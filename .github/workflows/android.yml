@@ -55,7 +55,7 @@ jobs:
         shell: bash
         run: |
           python - <<'PY'
-          import hashlib, json, os, subprocess, zipfile
+          import hashlib, json, os, re, subprocess, zipfile
           from pathlib import Path
           root = Path.cwd()
           version = json.loads((root/'package.json').read_text(encoding='utf-8'))['version']
@@ -71,9 +71,10 @@ jobs:
               assert archive.testzip() is None, 'Corrupt APK entry'
           tools = root/'.tmp/mobile-tools/sdk/build-tools/35.0.0'
           badging = subprocess.check_output([str(tools/'aapt2'), 'dump', 'badging', str(apk)], text=True)
+          print(badging)
           assert "package: name='io.github.try2love.codexbridge.preview'" in badging
           assert "versionName='"+version+"'" in badging
-          assert "sdkVersion:'26'" in badging
+          assert re.search(r"^sdkVersion:\s*'26(?:\.0)?'\s*$", badging, re.M), 'Unexpected minimum Android version'
           certificate = subprocess.check_output([str(tools/'apksigner'), 'verify', '--verbose', '--print-certs', str(apk)], text=True)
           (apk.parent/'APK-CERTIFICATE.txt').write_text(certificate, encoding='utf-8')
           digest = hashlib.sha256(apk.read_bytes()).hexdigest()
