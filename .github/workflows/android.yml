@@ -20,6 +20,9 @@ jobs:
         with:
           node-version: '24'
       - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools'
+          log-accepted-android-sdk-licenses: false
       - name: Prepare existing project-local Android build layout
         shell: bash
         run: |
