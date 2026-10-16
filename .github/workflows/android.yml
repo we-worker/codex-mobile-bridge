@@ -74,7 +74,8 @@ jobs:
           print(badging)
           assert "package: name='io.github.try2love.codexbridge.preview'" in badging
           assert "versionName='"+version+"'" in badging
-          assert re.search(r"^sdkVersion:\s*'26(?:\.0)?'\s*$", badging, re.M), 'Unexpected minimum Android version'
+          assert re.search(r"^(?:minSdkVersion|sdkVersion):\s*'26(?:\.0)?'\s*$", badging, re.M), 'Unexpected minimum Android version'
+          assert re.search(r"^targetSdkVersion:\s*'35(?:\.0)?'\s*$", badging, re.M), 'Unexpected target Android version'
           certificate = subprocess.check_output([str(tools/'apksigner'), 'verify', '--verbose', '--print-certs', str(apk)], text=True)
           (apk.parent/'APK-CERTIFICATE.txt').write_text(certificate, encoding='utf-8')
           digest = hashlib.sha256(apk.read_bytes()).hexdigest()
