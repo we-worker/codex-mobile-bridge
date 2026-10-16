@@ -21,10 +21,46 @@ function bindChatListToolbar(toolbar){
   if(typeof ResizeObserver!=='undefined')new ResizeObserver(update).observe(toolbar);
   later();
 }
+class CodexEntries {
+  constructor({root,request,onChange,notify}) {
+    Object.assign(this,{root,request,onChange,notify});this.generation=0;this.busy=false;this.value='';
+    this.select=document.createElement('select');this.select.setAttribute('aria-label','Codex 入口');
+    this.scan=document.createElement('button');this.scan.type='button';this.scan.textContent=this.text('扫描 WSL');this.scan.dataset.i18n='扫描 WSL';this.scan.onclick=()=>this.refresh(true);
+    this.options=document.createElement('div');this.options.className='codex-entry-options';
+    this.root.className='codex-entries';this.root.append(this.select,this.scan,this.options);
+    this.select.onchange=()=>{this.value=this.select.value;this.onChange(this.value);};
+    this.render({entries:[]});
+  }
+  text(value){return typeof BridgeI18n==='undefined'?value:BridgeI18n.t(value);}
+  clear(){this.generation++;this.busy=false;this.scan.disabled=false;this.value='';this.render({entries:[]});}
+  async refresh(scan=false){
+    if(this.busy)return;this.busy=true;const generation=++this.generation;this.scan.disabled=true;
+    try{const value=await this.request('/api/codex/entries',scan?{action:'scan'}:undefined);if(generation!==this.generation)return;this.render(value);if(value.errors?.length)this.notify(value.errors.map(e=>e.distribution+'：'+e.error).join('\n'));}
+    catch(error){if(generation===this.generation)this.notify(error.message);}
+    finally{if(generation===this.generation){this.busy=false;this.scan.disabled=false;}}
+  }
+  render(value){
+    this.scan.hidden=value.wslSupported===false;
+    const entries=value.entries||[],available=new Set(['',...entries.filter(e=>e.enabled).map(e=>e.id)]);
+    if(!available.has(this.value)){this.value='';this.onChange(this.value);}
+    this.select.replaceChildren();const all=document.createElement('option');all.value='';all.textContent=this.text('全部 Codex 入口');this.select.append(all);
+    for(const entry of entries.filter(e=>e.enabled)) {const option=document.createElement('option');option.value=entry.id;option.textContent=this.text(entry.label)+(entry.running?'':' · '+this.text('离线'));this.select.append(option);}
+    this.select.value=this.value;this.options.replaceChildren();
+    for(const entry of entries.filter(e=>e.kind==='wsl-cli')) {
+      const row=document.createElement('div'),name=document.createElement('span'),button=document.createElement('button');name.textContent=entry.label;button.type='button';button.textContent=this.text(entry.enabled?'关闭接入':'连接');button.disabled=!entry.running&&!entry.enabled;
+      button.onclick=async()=>{if(this.busy)return;this.busy=true;const generation=++this.generation;button.disabled=true;this.scan.disabled=true;try{const value=await this.request('/api/codex/entries',{action:'configure',id:entry.id,enabled:!entry.enabled});if(generation!==this.generation)return;this.render(value);this.onChange(this.value);}catch(error){if(generation===this.generation)this.notify(error.message);}finally{if(generation===this.generation){this.busy=false;this.scan.disabled=false;button.disabled=false;}}};
+      row.append(name,button);this.options.append(row);
+    }
+    this.options.hidden=!this.options.children.length;
+  }
+}
+
 class ClientNavigation {
   constructor({view,request,notify}) {
     Object.assign(this,{view,request,notify});this.clients=[];this.revision=0;this.pending=new Set();this.provider=localStorage.getItem('bridge-client')||'codex';const requested=new URLSearchParams(location.search).get('client');if(['codex','claude','deepseek'].includes(requested))this.provider=requested;
     this.heading=document.querySelector('#sidebar .list-heading');this.sidebar=document.getElementById('sidebar');
+    const entryRoot=document.getElementById('codex-entries');
+    if(entryRoot)this.entries=new CodexEntries({root:entryRoot,request,notify,onChange:value=>this.onEntryChange?.(value)});
     this.footer=document.querySelector('.sidebar-foot');this.footer.classList.add('client-functions');
     this.navigation=document.createElement('div');this.navigation.className='client-navigation';this.sidebar.append(this.navigation);this.navigation.append(this.footer);
     this.switcher=document.createElement('nav');this.switcher.className='client-switch';this.switcher.dataset.i18nAriaLabel='切换应用';this.switcher.setAttribute('aria-label',BridgeI18n.t('切换应用'));this.switchDock=document.createElement('div');this.switchDock.className='client-switch-dock';this.switchToggle=document.createElement('button');this.switchToggle.type='button';this.switchToggle.className='plain';this.switchToggle.id='client-switch-toggle';this.switcher.id='client-switch';this.switchToggle.setAttribute('aria-controls',this.switcher.id);this.switchToggle.onclick=()=>{if(this.switchToggle.hidden)return;this.preference('switch-collapsed',!this.preference('switch-collapsed',undefined,false));this.paint();document.getElementById('appearance-dialog').close();};this.switchDock.append(this.switcher);this.navigation.append(this.switchDock);
@@ -260,6 +296,7 @@ class ClientNavigation {
   paint(){
     this.cancelListSwipe();this.syncViewClients();
     const provider=this.provider,row=this.clients.find(c=>c.id===provider);this.badge.replaceChildren();if(provider)this.badge.append(this.icon(provider),document.createTextNode(row?.name||'Codex'));
+    if(this.entries)this.entries.root.hidden=provider!=='codex';
     const target=provider&&provider!=='codex'?this.view.list:this.sidebar;target.prepend(this.heading);target.append(this.navigation);
     this.account.classList.toggle('navigation-hidden',!provider||(provider==='codex'&&!!window.BridgeSharedRelay));this.notifications.classList.toggle('navigation-hidden',!provider);this.manage.hidden=!this.preference('clients');
     this.account.textContent=BridgeI18n.t('账号管理');this.account.removeAttribute('data-i18n');this.notifications.textContent=BridgeI18n.language()==='en'?'Push alerts':'第三方通知';this.notifications.removeAttribute('data-i18n');this.notifications.setAttribute('aria-label',BridgeI18n.t('第三方通知'));this.home.textContent=BridgeI18n.language()==='en'?'Computers':'返回电脑列表';

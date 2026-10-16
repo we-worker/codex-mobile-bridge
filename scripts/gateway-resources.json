@@ -1,6 +1,7 @@
 [
   "bridge/features/sessions/store.py",
   "bridge/clients/codex/catalog.py",
+  "bridge/clients/codex/configuration.py",
   "bridge/features/sessions/create.py",
   "bridge/features/accounts/models.py",
   "bridge/features/auth/tls.py",

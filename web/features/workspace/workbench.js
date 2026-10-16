@@ -230,6 +230,8 @@ class Workbench {
       const button = this.button('', () => { dialog.close(); action(); }, name);
       button.append(this.node('strong', '', name), this.node('span', '', description));
       if(this.current.provider&&['侧边聊天','子智能体'].map(BridgeI18n.t).includes(name)) {button.disabled=true;button.lastChild.textContent=BridgeI18n.t('当前客户端尚未提供此能力');}
+      const capability=name===BridgeI18n.t('终端')?'terminal':name===BridgeI18n.t('侧边聊天')?'sideChat':null;
+      if(capability&&this.current.capabilities?.[capability]===false){button.disabled=true;button.lastChild.textContent=BridgeI18n.t('当前客户端尚未提供此能力');}
       choices.append(button);
     }
     dialog.append(head, choices); dialog.addEventListener('close', () => dialog.remove()); document.body.append(dialog); dialog.showModal();

@@ -493,9 +493,17 @@ class Handler(BaseHTTPRequestHandler):
                 self.read_json()
                 self.server.auth.logout(self.token())
                 return self.output(200, {"ok": True}, cookie=self.cookie("", clear=True))
+            if write and path.startswith('/api/account') and query.get('entry', ['desktop'])[0] != 'desktop':
+                raise ValueError('WSL 接入由原环境管理，不能对它执行桌面账号操作')
             if not write and path == '/api/accounts':
+                entry = query.get('entry', ['desktop'])[0]
+                if entry != 'desktop':
+                    if not entry.startswith('wsl:'):
+                        raise ValueError('未知 Codex 入口')
+                    return self.output(200, self.server.bridge.for_host(entry).access_summary())
                 result = self.server.bridge.accounts.public()
-                result['canSwitch'] = self.server.auth.config.get('mode') != 'none'
+                result['canSwitch'] = result.get('canSwitch', True) and self.server.auth.config.get('mode') != 'none'
+                result['canManageDesktop'] = self.server.auth.config.get('mode') != 'none'
                 return self.output(200, result)
             if write and path == '/api/accounts/reminders':
                 body = self.read_json()
@@ -535,14 +543,31 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('账号切换请求包含不支持的字段')
                 return self.output(202, self.server.bridge.accounts.switch(body))
             if not write and path == '/api/account':
+                if query.get('entry', ['desktop'])[0] != 'desktop':
+                    return self.output(200, {'visible': False, 'reason': 'WSL 接入由原环境管理'})
                 return self.output(200, self.server.bridge.account.read(refresh=query.get('cached', [''])[0] != '1'))
             if write and path == '/api/account/reset':
                 return self.output(200, self.server.bridge.account.consume(self.read_json()))
             if not write and path == "/api/sessions":
                 feed = self.server.notifications.mobile.checkpoint() if self.server.notifications else None
-                rows = self.server.bridge.list(query=query.get("q", [""])[0][:200], offset=max(0, int(query.get("offset", [0])[0])), archived=query.get("archived", ["false"])[0] == "true")
+                entry_options = {'entry': query['entry'][0]} if 'entry' in query else {}
+                rows = self.server.bridge.list(query=query.get("q", [""])[0][:200], offset=max(0, int(query.get("offset", [0])[0])), archived=query.get("archived", ["false"])[0] == "true", **entry_options)
                 return self.output(200, {"sessions": rows, "unavailableHosts": self.server.bridge.host_errors,
                                         'notificationRead': {key: feed[key] for key in ('streamId', 'cursor')} if feed else None})
+            if path == '/api/codex/entries':
+                entries = getattr(self.server.bridge, 'entries', None)
+                if entries is None:
+                    return self.output(200, {'entries': []})
+                if self.server.desktop_sessions:
+                    self.server.desktop_sessions.require_enabled('codex')
+                if not write:
+                    return self.output(200, entries.public())
+                body = self.read_json()
+                if body == {'action': 'scan'}:
+                    return self.output(200, entries.scan())
+                if set(body) != {'action', 'id', 'enabled'} or body['action'] != 'configure':
+                    raise ValueError('Codex 入口请求无效')
+                return self.output(200, entries.configure(body['id'], body['enabled']))
             if not write and path == '/api/projects':
                 return self.output(200, {'projects': self.server.bridge.hosts.projects()})
             if write and path == '/api/activity':
@@ -750,6 +775,10 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('附件上传中断，请重试')
                 return self.output(200, bridge.side_attachment(thread_id, side, 'put', query.get('id', [''])[0], query.get('name', [''])[0], data) if side is not None else bridge.upload(thread_id, query.get('id', [''])[0], query.get('name', [''])[0], data))
             if action == 'notifications':
+                if getattr(bridge, 'capabilities', {}).get('notifications') is False:
+                    if write:
+                        raise ValueError('此 WSL 入口暂不提供后台通知')
+                    return self.output(200, {'available': False, 'watching': False, 'notifyOnCompletion': False})
                 if self.server.notifications is None:
                     return self.output(200, {'available': False, 'watching': False, 'notifyOnCompletion': False})
                 body = self.read_json() if write else {}

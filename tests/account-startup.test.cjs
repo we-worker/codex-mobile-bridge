@@ -47,6 +47,15 @@ async function fixture(read,kind='chatgpt',catalog=null,gatewayLanguage){
     async retry(){const entry=[...timers.entries()].find(([,t])=>t.delay<=5000);assert.ok(entry,'Account read should retry promptly without user input');timers.delete(entry[0]);await entry[1].fn();await new Promise(setImmediate);}};
 }
 
+test('WSL account URLs stay scoped and an explicit desktop choice restores desktop scope',async()=>{
+ const ui=await fixture(r=>r(official));
+ ui.run("currentId='fixture';currentHost='wsl:original';");
+ assert.equal(ui.run("accountUrl('/api/accounts')"),'/api/accounts?entry=wsl%3Aoriginal');
+ assert.equal(ui.run("accountUrl('/api/account?cached=1')"),'/api/account?cached=1&entry=wsl%3Aoriginal');
+ ui.run("codexEntries.value='wsl:selected';");assert.equal(ui.run("accountUrl('/api/accounts')"),'/api/accounts?entry=wsl%3Aselected');
+ ui.run("codexEntries.value='desktop';");assert.equal(ui.run("accountUrl('/api/accounts')"),'/api/accounts');
+});
+
 test('official and API connections share one fixed clickable entry without querying quota on startup',async()=>{
  for(const [kind,label] of [['chatgpt','账号与额度'],['api','API 接入']]){
   const ui=await fixture(r=>r(official),kind);

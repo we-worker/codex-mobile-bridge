@@ -23,6 +23,7 @@ from bridge.features.accounts.account import AccountRPC, AccountError, Account
 from bridge.clients.desktop_app import DesktopApp
 from bridge.features.accounts.models import model_ids
 from bridge.features.accounts.info import AccountInfo
+from bridge.clients.codex.configuration import magpie_managed
 from bridge.clients.codex.transport import connect_stream
 from bridge.features.notifications.channels import read_json
 
@@ -206,7 +207,11 @@ class Accounts:
 
     def public(self):
         with self.lock:
-            current = self.info.current()
+            management = self.management()
+            if management['external']:
+                current = {'status': 'ready', 'kind': 'external', 'id': None, 'name': 'Magpie / 外部管理'}
+            else:
+                current = self.info.current()
             verified = bool(current.get('id'))
             return {'accounts': [{**{k: row[k] for k in ('id', 'name', 'kind', 'email', 'planType', 'baseUrl', 'model') if k in row},
                                   'details': copy.deepcopy(self.info.entries.get(row['id'], {}))}
@@ -214,7 +219,25 @@ class Accounts:
                     'activeId': current.get('id'), 'activeVerified': verified, 'current': current, 'blockers': self.blockers(),
                     'externalChange': bool(self.index.get('activeId')) and not verified, 'switch': dict(self.state),
                     'reminders':dict(self.monitor.preferences), 'reminderError':self.monitor.last_error,
-                    'desktopUpdate':self.updates.status()}
+                    'desktopUpdate':self.updates.status(), 'management': management,
+                    'canSwitch': not management['external']}
+
+    def management(self):
+        try:
+            text = (self.home/'config.toml').read_text(encoding='utf-8')
+        except FileNotFoundError:
+            text = ''
+        except (OSError, UnicodeError):
+            return {'mode': 'external', 'external': True, 'reason': '无法确认接入配置，已暂停覆盖配置'}
+        configured = self.index.get('accessManagement', 'auto')
+        detected = magpie_managed(text=text)
+        return {'mode': configured, 'external': configured == 'external' or detected,
+                'detected': 'magpie' if detected else None,
+                'reason': '此入口由 Magpie 或外部工具管理；请在原工具中切换接入' if configured == 'external' or detected else None}
+
+    def require_managed_writes(self):
+        if self.management()['external']:
+            raise ValueError('此入口由 Magpie 或外部工具管理，Bridge 不会覆盖其认证、提供商和模型目录')
 
     def desktop_status(self):
         result = self.public()
@@ -387,6 +410,8 @@ class Accounts:
     def current_models(self, refresh=False):
         with self.lock:
             self.check_ready()
+            if self.management()['external']:
+                return None
             if not self.active_matches():
                 return None
             row = dict(self.row(self.index['activeId']))
@@ -531,6 +556,14 @@ class Accounts:
 
     def control(self, value):
         action = value.get('action', 'list')
+        if action == 'management':
+            if set(value) != {'action', 'mode'} or value['mode'] not in ('auto', 'external'):
+                raise ValueError('接入管理模式无效')
+            with self.gate, self.lock:
+                self.assert_editable()
+                self.index['accessManagement'] = value['mode']
+                self.save()
+            return self.desktop_status()
         if action == 'account':
             return self.account(value)
         if action == 'reminders':
@@ -622,6 +655,7 @@ class Accounts:
             raise ValueError('请先结束任务或处理待发送消息：'+names)
 
     def switch(self, value):
+        self.require_managed_writes()
         if value.get('confirmed') is not True or value.get('tasksConfirmed') is not True:
             raise ValueError('请确认所有桌面任务已结束，并同意重启 Codex 桌面应用')
         request_id = value.get('requestId')
@@ -670,6 +704,7 @@ class Accounts:
                 private_bytes(self.home/name, base64.b64decode(data))
 
     def prepare(self, row, before):
+        self.require_managed_writes()
         folder = self.root/'prepared'
         shutil.rmtree(folder, ignore_errors=True)
         folder.mkdir(mode=0o700)
@@ -804,7 +839,15 @@ class Accounts:
             if changed:
                 folder = self.prepare(row, before)
             self.phase('applying')
+            self.require_managed_writes()
+            if self.snapshot_files() != before:
+                raise ValueError('接入配置被外部工具修改，已停止覆盖')
             private_bytes(self.home/'config.toml', (folder/'config.toml').read_bytes())
+            backup['writtenConfig'] = base64.b64encode((folder/'config.toml').read_bytes()).decode('ascii')
+            private_json(self.root/'rollback.json', backup)
+            self.require_managed_writes()
+            if self.snapshot_files() != {'config.toml': backup['writtenConfig'], 'auth.json': before['auth.json']}:
+                raise ValueError('接入配置或认证被其他工具修改，已停止覆盖')
             if (folder/'auth.json').is_file():
                 private_bytes(self.home/'auth.json', (folder/'auth.json').read_bytes())
             else:
@@ -820,8 +863,15 @@ class Accounts:
         except Exception:
             if stopped and before is not None:
                 try:
+                    self.require_managed_writes()
+                    expected = backup.get('writtenConfig', before['config.toml'])
+                    if self.snapshot_files()['config.toml'] != expected:
+                        raise ValueError('配置已被其他工具修改，禁止覆盖恢复')
                     self.phase('restoring')
                     app.stop(provider='codex')
+                    self.require_managed_writes()
+                    if self.snapshot_files()['config.toml'] != expected:
+                        raise ValueError('配置已被其他工具修改，禁止覆盖恢复')
                     self.restore_files(before)
                     self.invalidate()
                     app.start()
@@ -840,6 +890,7 @@ class Accounts:
             shutil.rmtree(self.root/'prepared', ignore_errors=True)
 
     def recover(self, value):
+        self.require_managed_writes()
         if value.get('confirmed') is not True:
             raise ValueError('请确认恢复原接入并重启桌面应用')
         with self.gate, self.lock:
@@ -856,6 +907,9 @@ class Accounts:
                         app = DesktopApp(backup['desktopExecutable'], self.home)
                         app.validate(self.runtime)
                         app.stop(provider='codex')
+                        self.require_managed_writes()
+                        if 'writtenConfig' in backup and self.snapshot_files()['config.toml'] not in (backup['writtenConfig'], backup['files']['config.toml']):
+                            raise ValueError('配置已被其他工具修改，禁止覆盖恢复')
                         self.restore_files(backup['files'])
                         if backup.get('threadsApplying'):
                             # Only older previews wrote thread migrations to this

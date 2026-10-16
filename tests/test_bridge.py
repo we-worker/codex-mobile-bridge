@@ -778,6 +778,45 @@ class HttpTests(unittest.TestCase):
                 self.assertFalse(data['authenticated'])
                 self.assertEqual(data['uiLanguage'], expected)
 
+    def test_wsl_registration_is_authenticated_csrf_guarded_and_path_free(self):
+        from unittest.mock import Mock
+        entries = Mock()
+        entries.public.return_value = {'entries': []}
+        entries.scan.return_value = {'entries': []}
+        entries.configure.return_value = {'entries': []}
+        self.server.bridge.entries = entries
+        self.assertEqual(self.request('GET', '/api/codex/entries')[0], 401)
+        self.assertEqual(self.request('POST', '/api/codex/entries', {'action': 'scan'})[0], 401)
+        headers = self.login()
+        self.assertEqual(self.request('GET', '/api/codex/entries', headers=headers)[0], 200)
+        entries.scan.assert_not_called()
+        self.assertEqual(self.request('POST', '/api/codex/entries', {'action': 'scan'},
+                                      {'Cookie': headers['Cookie']})[0], 403)
+        self.assertEqual(self.request('POST', '/api/codex/entries', {'action': 'scan'}, headers)[0], 200)
+        entries.scan.assert_called_once_with()
+        bad = {'action': 'configure', 'id': 'wsl:fixture', 'enabled': True, 'home': '/arbitrary'}
+        self.assertEqual(self.request('POST', '/api/codex/entries', bad, headers)[0], 400)
+        entries.configure.assert_not_called()
+        self.assertEqual(self.request('POST', '/api/codex/entries',
+                        {'action': 'configure', 'id': 'wsl:fixture', 'enabled': True}, headers)[0], 200)
+        entries.configure.assert_called_once_with('wsl:fixture', True)
+
+    def test_wsl_account_scope_cannot_fall_back_to_desktop_account_writes(self):
+        from unittest.mock import Mock
+        target = Mock()
+        target.access_summary.return_value = {'scope': 'wsl', 'accounts': [], 'canSwitch': False}
+        self.server.bridge.accounts = Mock()
+        self.server.bridge.accounts.public.side_effect = AssertionError('must not read desktop account')
+        self.server.bridge.for_host = lambda host: target if host == 'wsl:fixture' else None
+        headers = self.login()
+        status, _, value = self.request('GET', '/api/accounts?entry=wsl%3Afixture', headers=headers)
+        self.assertEqual(status, 200)
+        self.assertEqual(value['scope'], 'wsl')
+        for path in ('/api/accounts/switch', '/api/account/reset', '/api/accounts/desktop-update'):
+            self.assertEqual(self.request('POST', path+'?entry=wsl%3Afixture', {}, headers)[0], 400)
+        self.server.bridge.accounts.switch.assert_not_called()
+        self.server.bridge.accounts.public.assert_not_called()
+
     def test_computer_identity_is_only_available_after_login(self):
         from unittest.mock import patch
         with patch('bridge.api.httpd.socket.gethostname', return_value='demo-workstation'):

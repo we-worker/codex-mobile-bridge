@@ -129,7 +129,8 @@ class RemoteCatalog:
     def _source(self):
         source = source_text('features/auth/tls.py') + '\n'
         source += source_text('features/accounts/models.py').replace('from bridge.features.auth.tls import client_context', '') + '\n'
-        source += source_text('clients/codex/catalog.py').replace('from bridge.features.accounts.models import model_ids', '')
+        source += source_text('clients/codex/configuration.py') + '\n'
+        source += source_text('clients/codex/catalog.py').replace('from bridge.features.accounts.models import model_ids', '').replace('from bridge.clients.codex.configuration import magpie_managed', '')
         source += '\nimport shutil\nhome=Path(os.environ.get("CODEX_HOME", str(Path.home()/".codex")))\n'
         source += 'runtime=shutil.which("codex") or str(Path.home()/".local/bin/codex")\n'
         source += 'reader=Catalog(home, runtime, allow_background_refresh=False)\n'
@@ -253,7 +254,7 @@ class AppHosts:
         return rows
 
 
-def upload_file(alias, thread, identifier, name, data, digest):
+def upload_file(alias, thread, identifier, name, data, digest, *, reader=None):
     """Transfer only the selected file to a private directory on its execution host."""
     value = {'thread': thread, 'id': identifier, 'name': name, 'data': base64.b64encode(data).decode('ascii'), 'sha256': digest}
     source = 'import os,json,base64,hashlib\nfrom pathlib import Path\nv=' + payload(value) + '''
@@ -271,4 +272,4 @@ else:
     tmp.replace(p)
 print(json.dumps({'path':str(p.resolve())}))
 '''
-    return ssh_read(alias, source, timeout=90)['path']
+    return (reader or ssh_read)(alias, source, timeout=90)['path']

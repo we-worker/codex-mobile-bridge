@@ -18,6 +18,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from bridge.features.accounts.models import model_ids
+from bridge.clients.codex.configuration import magpie_managed
 
 logger = logging.getLogger(__name__)
 SKILL_CACHE = 'skill-cache.json'
@@ -455,6 +456,16 @@ class Catalog:
         effective = {**config, **profile}
         provider = provider or effective.get('model_provider') or 'openai'
         definition = (effective.get('model_providers') or {}).get(provider) or {}
+        if magpie_managed(config=effective) and provider == (effective.get('model_provider') or 'openai'):
+            models, cursor = [], None
+            for _ in range(10):
+                response = request('model/list', {'cursor': cursor, 'limit': 100, 'includeHidden': False})
+                models.extend(response.get('data', []))
+                cursor = response.get('nextCursor')
+                if not cursor:
+                    break
+            return {'models': models, 'modelSource': 'magpie',
+                    'currentEffort': effective.get('model_reasoning_effort'), 'fastMode': {'allowed': False}}
         base = definition.get('base_url') or (effective.get('openai_base_url') or os.environ.get('OPENAI_BASE_URL') if provider == 'openai' else None)
         custom = provider != 'openai' or base or any(definition.get(k) for k in
             ('env_key', 'experimental_bearer_token', 'http_headers', 'env_http_headers', 'auth', 'gateway_oauth'))

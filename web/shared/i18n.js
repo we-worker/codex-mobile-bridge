@@ -2,6 +2,14 @@
 // UI messages only. Never translate chat content, commands, model IDs or user input.
 const BridgeI18n=(()=>{
 const en={
+"扫描 WSL":"Scan WSL",
+"全部 Codex 入口":"All Codex entries",
+"Codex 入口":"Codex entry",
+"桌面 Codex":"Desktop Codex",
+"接入配置管理":"Connection configuration management",
+"自动识别":"Detect automatically",
+"由 Magpie 等外部工具管理":"Managed by Magpie or another tool",
+"此入口由 Magpie 或外部工具管理；请在原工具中切换接入":"This entry is managed externally. Switch connections in Magpie or the original tool.",
 "第三方通知":"Third-party notifications",
 "显示第三方通知入口":"Show notification shortcut",
 "微信":"WeChat",

@@ -18,6 +18,8 @@
 
 ## 会话发现
 
+Windows 可通过显式扫描登记 WSL Codex 入口，详见 [WSL 说明](docs/wsl-codex.md)。桌面入口保留原 IPC owner；WSL 仅连接已核验的原共享服务，以独立入口路由、连接世代和线程 ID 隔离状态与写入记录。被动读取不恢复线程，未加载的 CLI 历史保持只读。发送/审批前重新核验原线程，不另起执行器。Magpie 由外部管理，WSL 接入页不回退到 Windows 账号；HTTP 仍执行原有登录、Origin、CSRF 和文件边界限制。
+
 本地通过只读 SQLite 连接读取 `$CODEX_HOME/state_*.sqlite`，筛选桌面聊天并排除子代理。尚无 IPC 快照时，可读取原始会话记录作为历史展示。WAL 模式且 `-wal` 缺失时，先复制到私有临时目录，并核对复制前后主文件的身份、大小和修改时间以及 WAL 仍不存在，再读取副本；并发变化时丢弃副本并等待重试。已有 WAL 时直接只读查询，保留最新提交。发现与历史读取不直接写入原数据库或会话文件；用户新建聊天时由官方运行时持久化新记录。
 
 发现兼容 `Codex Desktop`、`codex_work_desktop`、网关创建来源 `codex_mobile_bridge`，以及 `originator` 为空且 `source=vscode` 的旧桌面记录。列表与单会话读取使用同样的来源和子代理限制。

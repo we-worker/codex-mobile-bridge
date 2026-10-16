@@ -16,10 +16,23 @@ class StoreUnavailable(RuntimeError):
 
 
 class SessionStore:
-    def __init__(self, codex_home):
+    def __init__(self, codex_home, source='desktop'):
+        if source not in ('desktop', 'cli'):
+            raise ValueError('未知会话来源')
+        self.source = source
         self.home = Path(codex_home).resolve()
         self.history_cache = OrderedDict()
         self.history_lock = threading.Lock()
+
+    def _owner_filter(self, columns):
+        if self.source == 'cli':
+            return "(source IN ('cli', 'vscode') AND (originator IS NULL OR originator = 'codex-tui'))" if 'originator' in columns else "source IN ('cli', 'vscode')"
+        return "(originator IN ('Codex Desktop', 'codex_work_desktop', 'codex_mobile_bridge') OR (originator IS NULL AND source = 'vscode'))" if 'originator' in columns else '1'
+
+    def _matches(self, row):
+        if self.source == 'cli':
+            return row.get('source') in ('cli', 'vscode') and row.get('originator') in (None, 'codex-tui')
+        return row.get('originator') in ('Codex Desktop', 'codex_work_desktop', 'codex_mobile_bridge') or (row.get('originator') is None and row.get('source') == 'vscode')
 
     @contextmanager
     def _connect(self):
@@ -66,9 +79,7 @@ class SessionStore:
             fields = [name for name in ("id", "name", "title", "cwd", "updated_at", "updated_at_ms", "recency_at", "recency_at_ms", "model_provider", "model", "originator", "source", "archived", "is_pinned") if name in columns]
             where = ["archived = ?"]
             params = [int(archived)]
-            if "originator" in columns:
-                # Older desktop imports have no originator but retain their app source.
-                where.append("(originator IN ('Codex Desktop', 'codex_work_desktop', 'codex_mobile_bridge') OR (originator IS NULL AND source = 'vscode'))")
+            where.append(self._owner_filter(columns))
             if "thread_source" in columns:
                 where.append("COALESCE(thread_source, '') != 'subagent'")
             if "source" in columns:
@@ -88,7 +99,7 @@ class SessionStore:
             clocks = [name + ('' if name.endswith('_ms') else ' * 1000')
                       for name in ('updated_at', 'updated_at_ms', 'recency_at', 'recency_at_ms') if name in columns]
             clock = 'MAX(' + ','.join('COALESCE(' + c + ',0)' for c in clocks) + ',0)'
-            owner = "(originator IN ('Codex Desktop', 'codex_work_desktop', 'codex_mobile_bridge') OR (originator IS NULL AND source = 'vscode'))" if 'originator' in columns else '1'
+            owner = self._owner_filter(columns)
             filters = [owner, clock + ' >= ?']
             if 'thread_source' in columns:
                 filters.append("COALESCE(thread_source, '') != 'subagent'")
@@ -103,9 +114,8 @@ class SessionStore:
             columns = {r[1] for r in conn.execute('PRAGMA table_info(threads)')}
             fields = [name for name in ('id', 'originator', 'source') if name in columns]
             rows = [dict(row) for row in conn.execute('SELECT ' + ','.join(fields) + ' FROM threads')]
-        desktop = {row['id'] for row in rows if 'originator' not in columns
-                   or row.get('originator') in ('Codex Desktop', 'codex_work_desktop', 'codex_mobile_bridge')
-                   or (row.get('originator') is None and row.get('source') == 'vscode')}
+        desktop = {row['id'] for row in rows if ('originator' not in columns and self.source == 'desktop')
+                   or self._matches(row)}
         children = {}
         for row in rows:
             parent = self._agent_source(row).get('parent_thread_id')
@@ -134,7 +144,7 @@ class SessionStore:
             if not row:
                 raise KeyError("找不到这个桌面会话")
             result = dict(row)
-            desktop = result.get("originator") in ("Codex Desktop", "codex_work_desktop", "codex_mobile_bridge") or (result.get("originator") is None and result.get("source") == "vscode")
+            desktop = self._matches(result)
             if not desktop or result.get("thread_source") == "subagent" or '"subagent"' in (result.get("source") or ""):
                 raise KeyError("不是桌面 App 会话")
             return result

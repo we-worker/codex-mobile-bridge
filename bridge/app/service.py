@@ -111,6 +111,11 @@ class Bridge:
         self.codex_home = Path(codex_home)
         self.data_dir = Path(data_dir)
         self.hosts = AppHosts(codex_home)
+        if host == 'local':
+            from bridge.features.endpoints.registry import Entries
+            self.entries = Entries(data_dir, codex_home)
+        else:
+            self.entries = None
         self.remote_bridges = {}
         self.host_errors = []
         self.listed = set()
@@ -572,6 +577,8 @@ class Bridge:
     def for_host(self, host):
         if host == self.host:
             return self
+        if isinstance(host, str) and host.startswith('wsl:') and self.entries is not None:
+            return self.entries.get(host)
         available = self.hosts.hosts()
         if self.host != "local" or host not in available:
             raise KeyError("未知 SSH 主机")
@@ -738,7 +745,9 @@ class Bridge:
         finally:
             ipc.close()
 
-    def list(self, query="", limit=100, offset=0, archived=False):
+    def list(self, query="", limit=100, offset=0, archived=False, entry=None):
+        if entry and entry != 'desktop':
+            return self.for_host(entry).list(query=query, limit=limit, offset=offset, archived=archived)
         sources = [(self, "此电脑")]
         if self.host == 'local':
             sources.extend((self.for_host(host), info.get('displayName') or info['alias']) for host, info in self.hosts.hosts().items())
@@ -760,6 +769,10 @@ class Bridge:
             results = list(pool.map(read, sources))
         self.host_errors = [error for _, error in results if error]
         rows = [row for group, _ in results for row in group]
+        if self.entries is not None and entry != 'desktop':
+            extra, errors = self.entries.lists(query=query, limit=limit + offset, archived=archived)
+            rows.extend(extra)
+            self.host_errors.extend(errors)
         rows.sort(key=lambda row: (row['recency'], row['id'], row['host']), reverse=True)
         return rows[offset:offset + limit]
 
@@ -2077,6 +2090,8 @@ class Bridge:
         self.terminals.close()
         self.side_chats.close()
         self.closed.set()
+        if self.entries is not None:
+            self.entries.close()
         if self.host == "local" and self.accounts:
             self.accounts.login_cancel.set()
         for bridge in list(self.remote_bridges.values()):
