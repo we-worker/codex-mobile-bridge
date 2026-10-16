@@ -725,6 +725,40 @@ class ModelTests(unittest.TestCase):
 
 
 class HttpTests(unittest.TestCase):
+    def test_wsl_app_discovery_requires_login_and_csrf_in_application_management(self):
+        from unittest.mock import Mock
+        manager = self.server.desktop_sessions = Mock()
+        manager.scan_wsl.return_value = {'clients': [], 'wslSupported': True}
+        self.assertEqual(self.request('POST', '/api/clients', {'action': 'scan-wsl'})[0], 401)
+        headers = self.login()
+        self.assertEqual(self.request('POST', '/api/clients', {'action': 'scan-wsl'}, {'Cookie': headers['Cookie']})[0], 403)
+        manager.scan_wsl.assert_not_called()
+        self.assertEqual(self.request('POST', '/api/clients', {'action': 'scan-wsl'}, headers)[0], 200)
+        manager.scan_wsl.assert_called_once_with()
+
+    def test_wsl_session_routes_require_its_app_instead_of_windows_codex(self):
+        from unittest.mock import Mock
+        identifier = 'wsl:' + 'a' * 32
+        target = Mock()
+        target.host = identifier
+        target.timeline_read.return_value = {'rows': [], 'meta': {}}
+        manager = self.server.desktop_sessions = Mock()
+        def require(provider):
+            if provider != identifier:
+                raise ValueError('此应用已关闭，请在应用管理中开启')
+        manager.require_enabled.side_effect = require
+        self.server.bridge.for_host = lambda host: target if host == identifier else self.server.bridge
+        headers = self.login()
+        self.assertEqual(self.request('GET', '/api/sessions?entry=' + identifier, headers=headers)[0], 200)
+        self.assertEqual(self.request('GET', '/api/sessions?entry=desktop', headers=headers)[0], 400)
+        path = '/api/sessions/' + THREAD + '/timeline?host=' + identifier
+        self.assertEqual(self.request('GET', path, headers=headers)[0], 200)
+        target.timeline_read.assert_called_once()
+        manager.require_enabled.side_effect = ValueError('此应用已关闭，请在应用管理中开启')
+        target.timeline_read.reset_mock()
+        self.assertEqual(self.request('GET', path, headers=headers)[0], 400)
+        target.timeline_read.assert_not_called()
+
     @classmethod
     def setUpClass(cls):
         cls.record = password_record('correct password test')

@@ -39,6 +39,7 @@ async function fixture(read,kind='chatgpt',catalog=null,gatewayLanguage){
       if(url.includes('/respond')){responses.push(JSON.parse(options.body));return response({});}
       throw Error('Unexpected request '+url);
     }});
+  vm.runInContext(fs.readFileSync(path.join(__dirname,'../web/features/clients/client-navigation.js'),'utf8').match(/^function isCodexClient.*$/m)[0],context);
   for(const file of ['web/hosts/environment.js','web/shared/i18n.js','web/features/chat/list-sync.js','web/features/accounts/account.js','web/features/accounts/accounts.js','web/features/chat/modes.js','web/features/chat/attachments.js','web/features/chat/activity.js','web/features/chat/fast-mode.js','web/features/chat/message-actions.js','web/features/chat/permissions.js','web/shell/app.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'..',file),'utf8'),context);
   await new Promise(setImmediate);
   return {nodes,requests,timers,intervals,events,responses,run:code=>vm.runInContext(code,context),
@@ -49,11 +50,11 @@ async function fixture(read,kind='chatgpt',catalog=null,gatewayLanguage){
 
 test('WSL account URLs stay scoped and an explicit desktop choice restores desktop scope',async()=>{
  const ui=await fixture(r=>r(official));
- ui.run("currentId='fixture';currentHost='wsl:original';");
+ ui.run("currentId='fixture';currentHost='wsl:original';clientNavigation.provider='wsl:original';");
  assert.equal(ui.run("accountUrl('/api/accounts')"),'/api/accounts?entry=wsl%3Aoriginal');
  assert.equal(ui.run("accountUrl('/api/account?cached=1')"),'/api/account?cached=1&entry=wsl%3Aoriginal');
- ui.run("codexEntries.value='wsl:selected';");assert.equal(ui.run("accountUrl('/api/accounts')"),'/api/accounts?entry=wsl%3Aselected');
- ui.run("codexEntries.value='desktop';");assert.equal(ui.run("accountUrl('/api/accounts')"),'/api/accounts');
+ ui.run("clientNavigation.provider='wsl:selected';");assert.equal(ui.run("accountUrl('/api/accounts')"),'/api/accounts?entry=wsl%3Aselected');
+ ui.run("clientNavigation.provider='codex';");assert.equal(ui.run("accountUrl('/api/accounts')"),'/api/accounts');
 });
 
 test('official and API connections share one fixed clickable entry without querying quota on startup',async()=>{

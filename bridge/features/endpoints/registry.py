@@ -72,6 +72,30 @@ class Entries:
             self.candidates = candidates
         return {**self.public(), 'errors': errors}
 
+    def enabled(self, identifier):
+        with self.lock:
+            return any(row['id'] == identifier and row.get('enabled', True) for row in self.entries)
+
+    def applications(self):
+        """Display inventory only; never connect or probe a daemon while polling."""
+        rows = []
+        for row in self.public()['entries']:
+            if row['kind'] != 'wsl-cli':
+                continue
+            with self.lock:
+                bridge = self.bridges.get(row['id'])
+                server = bridge.server if bridge else None
+                connected = bool(server and not server.closed and row['enabled'])
+            rows.append({'id': row['id'], 'name': 'WSL Codex · ' + row['label'].removeprefix('WSL · '),
+                         'kind': 'wsl-cli', 'icon': 'codex', 'installed': True, 'configured': True,
+                         'enabled': row['enabled'], 'selectable': True, 'connected': connected,
+                         'running': True if connected else None if row['running'] else False,
+                         'distributionRunning': row['running'],
+                         'setupStatus': 'ready', 'canQuitDesktop': False, 'canForceQuit': False,
+                         'reason': ('使用原终端的 Codex 会话；账号与模型接入由 WSL 中的原工具管理。'
+                                    if row['running'] else 'WSL 发行版未运行，请先在电脑打开原终端。')})
+        return rows
+
     def configure(self, identifier, enabled):
         if not isinstance(enabled, bool):
             raise ValueError('入口开关无效')

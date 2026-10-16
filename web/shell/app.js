@@ -46,14 +46,13 @@ async function api(path,body,signal){const options={signal,credentials:'same-ori
 const workbench=window.BridgeWorkbench=new Workbench({chat:$('chat'),request:api,csrf:()=>csrf,notify:toast,onUnauthorized:authLost,openChat});
 const desktopSessions=new DesktopSessionsView({root:$('app'),select:$('desktop-backend'),request:api,notify:toast,csrf:()=>csrf,onUnauthorized:authLost,onSelect:provider=>{
   if(provider!=='codex'){saveDraft();chatTimeline?.dispose();chatTimeline=null;currentId=null;state=null;workbench.reset();$('chat').hidden=true;$('welcome').hidden=false;$('app').classList.remove('chat-open');history.replaceState(null,'',location.pathname);}
-  else if(clientNavigation.provider==='codex'&&!$('app').hidden)loadList(true).catch(error=>toast(error.message));
 }});
 const clientNavigation=new ClientNavigation({view:desktopSessions,request:api,notify:toast});
-const codexEntries=clientNavigation.entries||{value:'',refresh(){},clear(){}};
-function accountUrl(path){const entry=codexEntries.value.startsWith('wsl:')?codexEntries.value:codexEntries.value!=='desktop'&&currentId&&currentHost.startsWith('wsl:')?currentHost:null;return entry?path+(path.includes('?')?'&':'?')+'entry='+encodeURIComponent(entry):path;}
+function codexScope(){return clientNavigation.provider?.startsWith('wsl:')?clientNavigation.provider:'desktop';}
+function accountUrl(path){const entry=codexScope();return entry==='desktop'?path:path+(path.includes('?')?'&':'?')+'entry='+encodeURIComponent(entry);}
 function refreshEntryAccounts(){accountPanel.clear();$('account-button').hidden=true;accountsPanel?.clear();if(accountsPanel){accountsPanel.current.textContent=t('正在读取接入…');accountsPanel.refresh();}}
-clientNavigation.onEntryChange=()=>{listGeneration++;$('new-chat').hidden=codexEntries.value.startsWith('wsl:');refreshEntryAccounts();loadList(true).catch(e=>toast(e.message));};
-desktopSessions.onListEnter=()=>{clientNavigation.listReadDone=false;clientNavigation.listVisit=(clientNavigation.listVisit||0)+1;if(clientNavigation.provider!=='codex')desktopSessions.refresh();};
+clientNavigation.onApplicationChange=(previous,provider)=>{listGeneration++;saveDraft();listRows=[];listOffset=0;listHasMore=true;listRenderStamp='';$('sessions').replaceChildren();$('host-errors').hidden=true;chatTimeline?.dispose();chatTimeline=null;currentId=null;state=null;workbench.reset();$('chat').hidden=true;$('welcome').hidden=false;$('app').classList.remove('chat-open');history.replaceState(null,'',location.pathname);$('new-chat').hidden=!!provider?.startsWith('wsl:');if(isCodexClient(provider))refreshEntryAccounts();else{accountPanel.clear();accountsPanel?.clear();}if(isCodexClient(provider)&&!$('app').hidden)return loadList(true).catch(e=>toast(e.message));};
+desktopSessions.onListEnter=()=>{clientNavigation.listReadDone=false;clientNavigation.listVisit=(clientNavigation.listVisit||0)+1;if(!isCodexClient(clientNavigation.provider))desktopSessions.refresh();};
 desktopSessions.onListReady=(provider,value)=>clientNavigation.acknowledgeList(provider,value);
 async function uploadAttachment(key,id,file){const separator=key.indexOf('|'),host=key.slice(0,separator),thread=key.slice(separator+1);const response=await fetch(sessionUrl(thread,'uploads',host)+'&id='+encodeURIComponent(id)+'&name='+encodeURIComponent(file.name),{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/octet-stream','X-CSRF-Token':csrf},body:file});const result=await response.json();if(!response.ok){if(response.status===401)authLost();const error=Error(result.error||t('附件上传失败，请重试'));error.retryable=response.status>=500||response.status===429;throw error;}return result;}
 async function uploadAttachmentWithRetry(key,id,file){if(window.BridgeSharedRelay)return uploadAttachment(key,id,file);let last;for(let attempt=0;attempt<3;attempt++){try{return await uploadAttachment(key,id,file);}catch(error){last=error;if(error.name==='AbortError'||error.retryable===false||attempt===2)throw error;await new Promise(resolve=>setTimeout(resolve,400*(attempt+1)));}}if(last instanceof TypeError)last.message=t('附件上传中断，请重试');throw last;}
@@ -82,7 +81,7 @@ function renderLoginStatus(status=loginStatus){
   $('login-attempts').textContent=loginStatus.blocked?t('此 IP 已被封禁，请在电脑网关 App 的“登录设备”中解除。'):t('剩余尝试次数：')+loginStatus.attemptsRemaining+'/'+loginStatus.attemptLimit+t('；连续输错 5 次将封禁此 IP。');
   $('login-button').disabled=loginStatus.blocked;
 }
-function showLogin(passwordless=false,status){window.BridgeDownloads?.clear();$('mobile-binding-status').hidden=true;if(window.BridgeSharedRelay){location.replace((window.BridgeRelayBase||'')+'/relay/');return;}desktopSessions.clear();workbench.reset();codexEntries.clear();if(typeof accountsPanel!=='undefined')accountsPanel?.clear();accountPanel.clear();chatTimeline?.dispose();chatTimeline=null;document.querySelectorAll('dialog[open]').forEach(d=>d.close());$('app').hidden=true;$('login').hidden=false;$('credentials').hidden=passwordless;$('noauth').hidden=!passwordless;$('username').required=!passwordless;$('password').required=!passwordless;$('password').value='';$('remember-login').parentElement.hidden=passwordless||BridgeHost.isNativeApp();$('login-attempts').hidden=passwordless;renderLoginStatus(status);$('bootstrap-status').hidden=true;window.BridgeBootstrap?.ready();}
+function showLogin(passwordless=false,status){window.BridgeDownloads?.clear();$('mobile-binding-status').hidden=true;if(window.BridgeSharedRelay){location.replace((window.BridgeRelayBase||'')+'/relay/');return;}desktopSessions.clear();clientNavigation.clear?.();workbench.reset();if(typeof accountsPanel!=='undefined')accountsPanel?.clear();accountPanel.clear();chatTimeline?.dispose();chatTimeline=null;document.querySelectorAll('dialog[open]').forEach(d=>d.close());$('app').hidden=true;$('login').hidden=false;$('credentials').hidden=passwordless;$('noauth').hidden=!passwordless;$('username').required=!passwordless;$('password').required=!passwordless;$('password').value='';$('remember-login').parentElement.hidden=passwordless||BridgeHost.isNativeApp();$('login-attempts').hidden=passwordless;renderLoginStatus(status);$('bootstrap-status').hidden=true;window.BridgeBootstrap?.ready();}
 async function start(pairingToken=null){
   window.BridgeBootstrap?.waitingForAuth();
   const auth=await api('/api/auth');
@@ -112,7 +111,7 @@ async function openHarness(){
   catch(error){toast(error.message);}
 }
 $('harness-open').onclick=openHarness;
-async function enter(){desktopSessions.onListEnter();const chatLink=location.hash;$('desktop-backend').hidden=false;if(/(?:^|[?&])open=harness(?:&|$)/.test(location.search||'')){history.replaceState(null,'','/');await openHarness();}refreshComputer();$('login').hidden=true;$('app').hidden=false;$('bootstrap-status').hidden=true;window.BridgeBootstrap?.ready();document.dispatchEvent(new Event('bridge-authenticated'));await clientNavigation.refresh();codexEntries.refresh();accountsPanel?.refresh();const list=clientNavigation.provider==='codex'?loadList(true).catch(e=>toast(e.message)):Promise.resolve();await clientNavigation.openChatLink(chatLink,openChat);await list;}
+async function enter(){desktopSessions.onListEnter();const chatLink=location.hash;$('desktop-backend').hidden=false;if(/(?:^|[?&])open=harness(?:&|$)/.test(location.search||'')){history.replaceState(null,'','/');await openHarness();}refreshComputer();$('login').hidden=true;$('app').hidden=false;$('bootstrap-status').hidden=true;window.BridgeBootstrap?.ready();document.dispatchEvent(new Event('bridge-authenticated'));await clientNavigation.refresh();accountsPanel?.refresh();const list=isCodexClient(clientNavigation.provider)?loadList(true).catch(e=>toast(e.message)):Promise.resolve();await clientNavigation.openChatLink(chatLink,openChat);await list;}
 $('login-form').addEventListener('submit',async event=>{event.preventDefault();if(loginStatus.blocked)return;$('login-button').disabled=true;$('login-error').textContent='';try{const result=await api('/api/login',{username:$('username').value,password:$('password').value,remember:$('remember-login').checked});renderLoginStatus({attemptsRemaining:5,attemptLimit:5,blocked:false});csrf=result.csrf;$('password').value='';await enter();}catch(error){$('login-error').textContent=t(error.message);renderLoginStatus(error.loginStatus);}finally{$('login-button').disabled=loginStatus.blocked;}});
 $('logout').onclick=async()=>{await api('/api/logout',{});document.dispatchEvent(new Event('bridge-logged-out'));csrf='';state=null;currentId=null;$('messages').replaceChildren();$('approvals').replaceChildren();$('queued').replaceChildren();$('sessions').replaceChildren();$('message').value='';sessionStorage.clear();attachments.reset();sessionActivity.clear();recentInteractions.clear();showLogin();};
 function dateText(value){if(!value)return '';return new Date(value*1000).toLocaleDateString(BridgeI18n.locale(),{month:'numeric',day:'numeric'});}
@@ -151,7 +150,7 @@ async function loadList(reset=false){
   const generation=++listGeneration,offset=reset?0:listOffset;
   const query=$('search').value,archived=$('archived').checked;
   let result;listLoading++;
-  try{result=await api('/api/sessions?q='+encodeURIComponent(query)+'&offset='+offset+'&archived='+archived+(codexEntries.value?'&entry='+encodeURIComponent(codexEntries.value):''));}
+  try{result=await api('/api/sessions?q='+encodeURIComponent(query)+'&offset='+offset+'&archived='+archived+'&entry='+encodeURIComponent(codexScope()));}
   finally{listLoading--;}
   if(generation!==listGeneration)return;
   if(reset&&(query!==listQuery||archived!==listArchived))$('sessions').scrollTop=0;
@@ -161,11 +160,11 @@ async function loadList(reset=false){
   listRows=[...rows.values()];listRows.sort((a,b)=>b.recency-a.recency);
   listOffset=offset+result.sessions.length;listHasMore=result.sessions.length===100;
   $('host-errors').textContent=(result.unavailableHosts||[]).map(h=>h.label+'：'+h.error).join('\n');
-  $('host-errors').hidden=!(result.unavailableHosts||[]).length;renderList();refreshActivity();clientNavigation.acknowledgeList('codex',result);listSync.acknowledgeSuccess();
+  $('host-errors').hidden=!(result.unavailableHosts||[]).length;renderList();refreshActivity();clientNavigation.acknowledgeList(clientNavigation.provider,result);listSync.acknowledgeSuccess();
 }
 function loadMoreSessions(){
   const root=$('sessions');
-  if(document.hidden||$('app').hidden||clientNavigation.provider!=='codex'||!root.clientHeight||listQuery!==$('search').value||listArchived!==$('archived').checked)return;
+  if(document.hidden||$('app').hidden||!isCodexClient(clientNavigation.provider)||!root.clientHeight||listQuery!==$('search').value||listArchived!==$('archived').checked)return;
   if(root.scrollHeight-root.clientHeight-root.scrollTop<240)loadList().catch(e=>toast(e.message));
 }
 $('sessions').addEventListener('scroll',loadMoreSessions,{passive:true});
@@ -190,7 +189,7 @@ let newChatProjects=[],creatingChat=false,approvalBusy=0;
 $('new-chat-title').value=t('新聊天');
 $('new-chat-title').oninput=()=>{$('new-chat-title').dataset.edited='true';};
 $('new-chat').onclick=async()=>{
-  if(codexEntries.value.startsWith('wsl:')||(!codexEntries.value&&currentId&&currentHost.startsWith('wsl:'))){toast('WSL 新聊天请先在原终端创建，再在这里选择。');return;}
+  if(codexScope().startsWith('wsl:')){toast('WSL 新聊天请先在原终端创建，再在这里选择。');return;}
   $('new-chat-error').textContent='';$('new-chat-submit').disabled=true;
   $('new-chat-project').replaceChildren();$('new-chat-path').textContent=t('正在读取电脑项目…');
   $('new-chat-dialog').showModal();
@@ -501,7 +500,7 @@ $('model-button').onclick=async()=>{
   try{
     const catalog=await loadCatalogKind('models',true);
     if(request!==modelRequest||target!==chatKey())return;
-    $('model-select').replaceChildren(...(catalog.modelSource==='api'?[new Option(t('请选择上游模型'),'')]:[]),...(Array.isArray(catalog.models)?catalog.models:[]).map(m=>new Option(m.name,m.id)),new Option(t('自定义模型…'),'__custom__'));
+    $('model-select').replaceChildren(...(catalog.modelSource==='api'?[new Option(t('请选择上游模型'),'')]:[]),...(Array.isArray(catalog.models)?catalog.models:[]).map(m=>new Option(m.name||m.id,m.id)),new Option(t('自定义模型…'),'__custom__'));
     const current=state?.model||catalog.currentModel,models=Array.isArray(catalog.models)?catalog.models:[],known=models.some(m=>m.id===current);$('model-select').value=known?current:catalog.modelSource==='api'&&models.length?'':'__custom__';$('custom-model').value=current||'';
     $('model-error').textContent=catalog.modelError?t(catalog.modelError):catalog.modelSource==='api'&&!known&&models.length?t('当前聊天模型不在上游列表中，请选择可用模型后应用。'):'';
     $('model-access').textContent=(catalog.modelAccessName?t('当前接入：')+catalog.modelAccessName:t('聊天接入：')+(state?.provider||''));
@@ -744,7 +743,7 @@ const accountsPanel=window.BridgeSharedRelay||typeof AccountsPanel==='undefined'
 function openCurrentAccounts(){
   const provider=clientNavigation.provider;
   if(!provider)return false;
-  if(provider==='codex'){
+  if(isCodexClient(provider)){
     if(!accountsPanel)return false;
     $('accounts-dialog').showModal();accountsPanel.refresh();return true;
   }
@@ -765,7 +764,7 @@ window.BridgeNavigation={
   accounts:openCurrentAccounts,
   back(){
     const dialog=[...document.querySelectorAll('dialog[open]')].at(-1);if(dialog){dialog.close();return true;}
-    if(clientNavigation.provider!=='codex'){
+    if(!isCodexClient(clientNavigation.provider)){
       if(desktopSessions.workbench?.back())return true;
       return desktopSessions.backToList();
     }

@@ -747,6 +747,7 @@ class Bridge:
 
     def list(self, query="", limit=100, offset=0, archived=False, entry=None):
         if entry and entry != 'desktop':
+            self.host_errors = []
             return self.for_host(entry).list(query=query, limit=limit, offset=offset, archived=archived)
         sources = [(self, "此电脑")]
         if self.host == 'local':

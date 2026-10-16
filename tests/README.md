@@ -44,6 +44,8 @@ npm run test:updater
 
 `scripts/smoke-*` 中部分入口启动真实应用或依赖打包产物；运行前先看其头部与 fixture，不把它们作为无副作用的常规单元测试。
 
+`node scripts/smoke-wsl-app-ui.cjs` 在独立 Edge 配置目录中加载真实 Web 页面和合成 API，实际执行 `tests/browser/codex-entries.browser.js`，检查独立应用管理、列表隔离、Magpie 模型名称和草稿保留。默认使用 Windows Edge，也可用 `CMB_BROWSER` 指定 Chromium 可执行文件；只启动自己的浏览器进程，截图和结果放在 `.tmp/`，不连接真实网关或 Codex。原生共享服务的隔离验证仍由 `scripts/smoke-wsl-shared-server.py --codex <明确的 Linux 运行时>` 单独执行。
+
 ## 手机与打包
 
 Windows Tauri 的原生构建与隔离烟测见 [Tauri 说明](../docs/tauri-windows.md)。`test_tauri.py` 和 `tauri-adapter.test.cjs` 验证私有协议与适配合约，不替代真实 WebView2 窗口烟测。

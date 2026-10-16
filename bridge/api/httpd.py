@@ -380,6 +380,8 @@ class Handler(BaseHTTPRequestHandler):
                     return self.output(503, {'error': '应用管理不可用'})
                 if write:
                     value = self.read_json()
+                    if value == {'action': 'scan-wsl'}:
+                        return self.output(200, manager.scan_wsl())
                     if not isinstance(value, dict) or not {'provider', 'enabled'} <= set(value) or set(value) - {'provider', 'enabled', 'quitDesktop', 'initializeDesktop', 'forceDesktop', 'forceConfirmed'}:
                         raise ValueError('应用开关无效')
                     return self.output(200, manager.toggle_client(value))
@@ -549,6 +551,9 @@ class Handler(BaseHTTPRequestHandler):
             if write and path == '/api/account/reset':
                 return self.output(200, self.server.bridge.account.consume(self.read_json()))
             if not write and path == "/api/sessions":
+                if self.server.desktop_sessions:
+                    entry = query.get('entry', ['desktop'])[0]
+                    self.server.desktop_sessions.require_enabled(entry if entry.startswith('wsl:') else 'codex')
                 feed = self.server.notifications.mobile.checkpoint() if self.server.notifications else None
                 entry_options = {'entry': query['entry'][0]} if 'entry' in query else {}
                 rows = self.server.bridge.list(query=query.get("q", [""])[0][:200], offset=max(0, int(query.get("offset", [0])[0])), archived=query.get("archived", ["false"])[0] == "true", **entry_options)
@@ -558,8 +563,6 @@ class Handler(BaseHTTPRequestHandler):
                 entries = getattr(self.server.bridge, 'entries', None)
                 if entries is None:
                     return self.output(200, {'entries': []})
-                if self.server.desktop_sessions:
-                    self.server.desktop_sessions.require_enabled('codex')
                 if not write:
                     return self.output(200, entries.public())
                 body = self.read_json()
@@ -576,6 +579,8 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError('会话状态请求无效')
                 rows = []
                 for host, identifiers in groups.items():
+                    if self.server.desktop_sessions:
+                        self.server.desktop_sessions.require_enabled(host if host.startswith('wsl:') else 'codex')
                     rows.extend(self.server.bridge.for_host(host).activity(identifiers))
                 return self.output(200, {'sessions': rows})
             if write and path == '/api/sessions':
@@ -645,7 +650,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 bridge = self.server.bridge.for_host(query.get("host", ["local"])[0])
                 if path.startswith('/api/sessions') and self.server.desktop_sessions:
-                    self.server.desktop_sessions.require_enabled('codex')
+                    host = query.get('host', ['local'])[0]
+                    self.server.desktop_sessions.require_enabled(host if host.startswith('wsl:') else 'codex')
             side = query.get('side', [None])[0]
             if side is not None and self.server.auth.config.get('mode') == 'none':
                 raise PermissionError('侧边聊天需要启用网关密码保护')

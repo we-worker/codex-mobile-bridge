@@ -13,6 +13,7 @@ from bridge.clients.codex.ipc import IPCError
 from bridge.clients.codex.remote import RemoteStore, RemoteUnavailable, payload, upload_file
 from bridge.clients.codex.shared_server import SharedServer
 from bridge.clients.codex.configuration import magpie_managed
+from bridge.clients.codex.catalog import Catalog
 from bridge.features.sessions.model import normalize_state, normalize_request, computer_use_approval
 from bridge.features.sessions.timeline import Timeline
 from bridge.features.workspace.uploads import Uploads
@@ -471,7 +472,7 @@ class WslEntry:
             models.extend(page.get('data', [])); cursor = page.get('nextCursor')
             if not cursor:
                 break
-        return {'kind': kind or 'models', 'models': models, 'modelSource': 'codex', 'skills': [],
+        return {'kind': kind or 'models', 'models': Catalog.normalize_models(models), 'modelSource': 'codex', 'skills': [],
                 'currentModel': current.get('model') or metadata.get('model') or config.get('model'),
                 'currentEffort': current.get('reasoningEffort'),
                 'fastMode': {'allowed': False}, 'accessManagement': 'external'}

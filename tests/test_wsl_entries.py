@@ -75,6 +75,23 @@ class RegistryTests(unittest.TestCase):
                 wsl.read('Stopped Ubuntu', 'print("unexpected")')
             run.assert_not_called()
 
+    def test_app_inventory_reuses_registered_identity_without_connecting(self):
+        with patch.object(wsl, 'running_distributions', return_value=['Ubuntu']), patch.object(wsl, 'probe', return_value=self.info) as probe:
+            candidate = self.entries.scan()['entries'][1]
+            self.entries.configure(candidate['id'], True)
+            probe.reset_mock()
+            row = self.entries.applications()[0]
+            self.assertEqual(row['id'], candidate['id'])
+            self.assertTrue(row['name'].startswith('WSL Codex'))
+            self.assertTrue(row['enabled'])
+            self.assertTrue(row['distributionRunning'])
+            self.assertFalse(row['connected'])  # A running distro is not daemon evidence.
+            self.assertFalse(row['canQuitDesktop'])
+            self.assertFalse(self.entries.bridges)
+            probe.assert_not_called()
+            restarted = Entries(self.temp.name)
+            self.assertEqual(restarted.applications()[0]['id'], row['id'])
+
 
 class CliStoreTests(unittest.TestCase):
     def test_cli_source_is_explicit_and_subagents_remain_excluded(self):
@@ -246,9 +263,22 @@ class WslSessionTests(unittest.TestCase):
 
     def test_catalog_uses_original_runtime_models_without_exporting_config(self):
         result = self.entry.catalog(self.identifier, kind='models')
-        self.assertEqual(result['models'], [{'model': 'group/fixture'}])
+        self.assertEqual([(row['id'], row['name'], row['efforts']) for row in result['models']], [('group/fixture', 'group/fixture', [])])
         self.assertNotIn('model_providers', result)
         self.assertFalse(any(m == 'turn/start' for m, _ in self.entry.server.calls))
+
+    def test_catalog_normalizes_paged_native_models_and_keeps_group_ids_and_efforts(self):
+        request = self.entry.server.request
+        pages = iter([{'data': [None, {'id': 'internal', 'model': 'group/auto-gpt-6-1-sol',
+                    'displayName': '分组模型', 'supportedReasoningEfforts': [{'reasoningEffort': 'high'}],
+                    'defaultReasoningEffort': 'high'}], 'nextCursor': 'second'},
+                      {'data': [{'id': 'group/id-only', 'displayName': ''}, {'model': 'hidden', 'hidden': True}]}])
+        self.entry.server.request = lambda method, params: next(pages) if method == 'model/list' else request(method, params)
+        result = self.entry.catalog(self.identifier, kind='models')
+        self.assertEqual([(m['id'], m['name']) for m in result['models']],
+                         [('group/auto-gpt-6-1-sol', '分组模型'), ('group/id-only', 'group/id-only')])
+        self.assertEqual(result['models'][0]['efforts'], ['high'])
+        self.assertEqual(result['models'][0]['defaultEffort'], 'high')
 
     def test_wsl_access_summary_is_external_and_never_exposes_desktop_accounts(self):
         value = self.entry.access_summary()

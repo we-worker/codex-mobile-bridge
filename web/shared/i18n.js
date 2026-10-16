@@ -4,6 +4,10 @@ const BridgeI18n=(()=>{
 const en={
 "此版本请从项目下载页面手动更新。":"Download a new installer from the project download page to update this version.",
 "扫描 WSL":"Scan WSL",
+"扫描 WSL 应用":"Scan WSL applications",
+"使用原终端的 Codex 会话；账号与模型接入由 WSL 中的原工具管理。":"Use the original terminal's Codex sessions. Accounts and model providers are managed by the original tools in WSL.",
+"WSL 发行版未运行，请先在电脑打开原终端。":"The WSL distribution is stopped. Open its original terminal on your computer first.",
+"在 WSL 的原工具中管理接入":"Manage providers with the original tools in WSL",
 "全部 Codex 入口":"All Codex entries",
 "Codex 入口":"Codex entry",
 "桌面 Codex":"Desktop Codex",

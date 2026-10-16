@@ -144,6 +144,10 @@ def main():
                     entry._event(value, 'isolated-generation')
                 entry.server = SharedServer(connect(), event).start()
                 wait(lambda: any(r['id'] == sid for r in entry.store.list()))
+                catalog = entry.catalog(sid, kind='models')
+                assert catalog['models'] and all(model['id'] and model['name'] for model in catalog['models'])
+                assert all(isinstance(model['efforts'], list) for model in catalog['models'])
+                print('PASS: native model catalog has visible names, stable model IDs and reasoning-effort arrays.', flush=True)
                 view = entry.view(sid)
                 assert view['connected'] and view['provider'] == 'fixture'
                 submission = str(uuid.uuid4())
