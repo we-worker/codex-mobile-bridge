@@ -2,6 +2,7 @@
 // UI messages only. Never translate chat content, commands, model IDs or user input.
 const BridgeI18n=(()=>{
 const en={
+"此版本请从项目下载页面手动更新。":"Download a new installer from the project download page to update this version.",
 "扫描 WSL":"Scan WSL",
 "全部 Codex 入口":"All Codex entries",
 "Codex 入口":"Codex entry",

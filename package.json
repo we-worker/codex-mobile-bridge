@@ -8,7 +8,7 @@
   "private": true,
   "main": "desktop/main.cjs",
   "scripts": {
-    "desktop": "electron .",
+    "desktop": "node scripts/desktop.cjs",
     "test:desktop": "node scripts/test-frontend.cjs",
     "test:windows-app": "node scripts/smoke-windows.cjs",
     "icons:desktop": "electron scripts/build-icons.cjs",
@@ -19,9 +19,13 @@
     "test:linux-app": "node scripts/smoke-linux.cjs",
     "test:pairing": "electron scripts/smoke-pairing.cjs",
     "test:updater": "node --test tests/updater.test.cjs tests/update-handoff.test.cjs tests/update-controller.test.cjs",
-    "test:update-controller": "node scripts/smoke-update-controller.cjs"
+    "test:update-controller": "node scripts/smoke-update-controller.cjs",
+    "desktop:electron": "electron .",
+    "desktop:tauri": "node scripts/tauri.cjs dev",
+    "build:tauri": "node scripts/tauri.cjs build"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "2.12.3",
     "electron": "44.5.1",
     "electron-builder": "26.15.3",
     "jsqr": "1.4.0",

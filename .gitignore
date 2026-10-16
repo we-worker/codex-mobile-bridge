@@ -18,6 +18,8 @@ __pycache__/
 # Desktop development and packaged applications
 node_modules/
 dist/
+src-tauri/target/
+src-tauri/gen/
 *.spec
 
 # Local native push platform credentials

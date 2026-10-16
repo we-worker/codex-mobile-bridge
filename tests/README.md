@@ -46,6 +46,8 @@ npm run test:updater
 
 ## 手机与打包
 
+Windows Tauri 的原生构建与隔离烟测见 [Tauri 说明](../docs/tauri-windows.md)。`test_tauri.py` 和 `tauri-adapter.test.cjs` 验证私有协议与适配合约，不替代真实 WebView2 窗口烟测。
+
 `mobile/tests/` 中 Java/Swift 用例由相应 `scripts/test-mobile-*`、`scripts/test-ios-*` 驱动，可能编译测试程序；只在本次任务允许且环境具备时执行。Web 资源验证不代替 Android WebView 或 iOS WKWebView 的原生交互验证。
 
 `scripts/gateway-resources.json` 与源路径测试保证清单一致，但冻结导入、签名、安装和更新必须在获准打包后、目标系统上另外验证。不要根据 macOS 单机测试宣称 Windows/Linux 已实机通过。

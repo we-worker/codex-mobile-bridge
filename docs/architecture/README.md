@@ -26,6 +26,7 @@
 | Android 原生菜单、返回、下载、通知 | `mobile/android/` | 可选推送壳 `mobile/android-push/` |
 | iOS 原生菜单、导航、下载、通知 | `mobile/ios/` | Xcode 的 Sources/Resources 与 `WebScripts.swift` |
 | 桌面网关页面与模块排布 | `desktop/shell/`、`desktop/features/` | `desktop/index.html`、`main.cjs`、`preload.cjs` |
+| Windows Tauri 客户端、私有进程通信与安装包 | `src-tauri/`、`bridge/app/tauri.py` | [Windows Tauri 说明](../tauri-windows.md)、`desktop/tauri-bridge.js` |
 
 ## 目录与职责
 

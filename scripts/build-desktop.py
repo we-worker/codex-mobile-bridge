@@ -9,12 +9,14 @@ from importlib.metadata import distribution
 from pathlib import Path
 import certifi
 root = Path(__file__).resolve().parents[1]
+(root/'dist').mkdir(exist_ok=True)
+(root/'dist/update-version.json').write_text(json.dumps({'version': json.loads((root/'package.json').read_text(encoding='utf-8'))['version'], 'platform': sys.platform, 'arch': {'aarch64':'arm64', 'arm64':'arm64', 'AMD64':'x64', 'x86_64':'x64'}.get(platform.machine(), platform.machine())}), encoding='utf-8')
 subprocess.run([sys.executable, str(root/'scripts/build-client-helpers.py')], check=True)
 subprocess.run([sys.executable, str(root/'scripts/bundle-cloudflared.py')], check=True)
 command = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir', '--name', 'codex-mobile-gateway',
            '--distpath', str(root/'dist'), '--workpath', str(root/'.tmp/pyinstaller'), '--specpath', str(root/'.tmp'),
            '--add-data', str(root/'web')+':web']
-command.extend(['--add-data', str(root/'dist/cloudflared')+':cloudflared', '--collect-all', 'paramiko', '--collect-all', 'keyring', '--collect-all', 'aiohttp'])
+command.extend(['--add-data', str(root/'dist/update-version.json')+':.', '--add-data', str(root/'dist/cloudflared')+':cloudflared', '--collect-all', 'paramiko', '--collect-all', 'keyring', '--collect-all', 'aiohttp'])
 if sys.platform == 'darwin':
     command.extend(['--target-arch', platform.machine()])
 # Ship roots and their license explicitly; source users still need only stdlib.
@@ -38,5 +40,3 @@ import shutil
 shutil.rmtree(root/'dist/gateway', ignore_errors=True)
 source.rename(root/'dist/gateway')
 print('Gateway runtime ready:', root/'dist/gateway')
-
-(root/'dist/update-version.json').write_text(json.dumps({'version': json.loads((root/'package.json').read_text(encoding='utf-8'))['version'], 'platform': sys.platform, 'arch': {'aarch64':'arm64', 'arm64':'arm64', 'AMD64':'x64', 'x86_64':'x64'}.get(platform.machine(), platform.machine())}), encoding='utf-8')

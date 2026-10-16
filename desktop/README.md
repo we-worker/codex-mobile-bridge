@@ -1,6 +1,8 @@
 # 桌面网关界面
 
-`main.cjs`、`preload.cjs` 与 `index.html` 保持为 Electron 入口。主进程管理原生窗口和 IPC，预加载脚本保留现有隔离边界；页面脚本通过 `window.bridgeDesktop` 调用网关。
+Windows 默认开发入口已改为 Tauri；`src-tauri/` 管理原生窗口与私有 stdio，`tauri-bridge.js` 提供同一份 `window.bridgeDesktop` 接口，复用 `index.html` 和页面模块。构建、数据兼容与验证见 [Windows Tauri 说明](../docs/tauri-windows.md)。
+
+`main.cjs`、`preload.cjs` 保留为 Electron 对照入口（`npm run desktop:electron`），macOS/Linux 的默认桌面入口继续使用 Electron。原 Electron 构建与更新流程保留。
 
 | 目录 | 职责与入口 |
 | --- | --- |

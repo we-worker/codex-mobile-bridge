@@ -17,11 +17,18 @@ def main():
     sys.stdout.reconfigure(encoding='utf-8')
     sys.stdin.reconfigure(encoding='utf-8')
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['management-stream', 'tailscale-setup', 'read-credentials', 'server-setup', 'connection-credentials', 'snapshot-stream', 'snapshot', 'save', 'start', 'stop', 'logs', 'test-notification', 'deployment', 'export-deployment', 'check-entry', 'devices', 'pairing', 'account', 'accounts', 'harness', 'desktop-sessions', 'notification-watches', 'transfer-settings', 'serve', 'update-prepare', 'update-apply'])
+    parser.add_argument('action', choices=['tauri-stream', 'management-stream', 'tailscale-setup', 'read-credentials', 'server-setup', 'connection-credentials', 'snapshot-stream', 'snapshot', 'save', 'start', 'stop', 'logs', 'test-notification', 'deployment', 'export-deployment', 'check-entry', 'devices', 'pairing', 'account', 'accounts', 'harness', 'desktop-sessions', 'notification-watches', 'transfer-settings', 'serve', 'update-prepare', 'update-apply'])
     parser.add_argument('--data-dir', required=True)
     parser.add_argument('--plan')
+    parser.add_argument('--desktop-dir')
     parser.add_argument('--connection-secrets-stdin', action='store_true')
     args = parser.parse_args()
+    if args.action == 'tauri-stream':
+        if not args.desktop_dir:
+            parser.error('--desktop-dir is required for tauri-stream')
+        from bridge.app.tauri import stream
+        stream(args.data_dir, args.desktop_dir)
+        return
     desktop = Desktop(args.data_dir)
     if args.action == 'management-stream':
         # This persistent private channel keeps enrollment and discovery alive

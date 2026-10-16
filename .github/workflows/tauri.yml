@@ -1,0 +1,51 @@
+name: Tauri Windows build
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['src-tauri/**', 'desktop/**', 'desktop.py', 'bridge/**', 'web/**', 'scripts/**', 'tests/**', 'package*.json', 'requirements*.txt', '.github/workflows/tauri.yml']
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+      - run: python -m pip install -r requirements-desktop.txt
+      # Electron remains available for comparison but its runtime is not needed.
+      - run: npm ci --ignore-scripts
+      - run: python -B -m unittest discover -s tests -v
+      - run: npm run test:desktop
+      - run: python scripts/build-desktop.py
+      - run: npm run build:tauri -- --target x86_64-pc-windows-msvc
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --release --target x86_64-pc-windows-msvc
+      - run: python scripts/smoke-tauri.py src-tauri/target/x86_64-pc-windows-msvc/release/codex-mobile-bridge-tauri.exe
+      - name: Report independent download and installed sizes
+        run: python scripts/measure-tauri.py src-tauri/target/x86_64-pc-windows-msvc/release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Tauri-Windows-x64-Setup
+          if-no-files-found: error
+          path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: Tauri-Windows-validation
+          if-no-files-found: ignore
+          path: |
+            .tmp/tauri-smoke-result.json
+            .tmp/tauri-size.json
