@@ -144,6 +144,8 @@ macOS/Linux 使用登录 shell 与 PTY；Windows 10 1809 及以上使用 ConPTY 
 
 Android 入口是 `scripts/build-mobile-android.py`，使用项目 `.tmp/mobile-tools` 中已准备的 JDK、SDK 和 ZXing；发布必须保留既有签名，不能以新建密钥替代升级验证。地址边界验证见 `scripts/test-mobile-urls.py`，会话验证见 `scripts/test-mobile-session.py`，通知事件见 `tests/test_mobile_events.py`。
 
+本 Fork 的 GitHub Actions 提供手动运行的 **Android APK build**（`.github/workflows/android.yml`），产物为 **Android-APK-test**，包含 APK、SHA-256 和签名证书信息。流程使用原构建脚本、API 35/JDK 17 和固定校验的 ZXing，生成本次运行的测试签名，不上传密钥、不创建 Release，也不修改包名或版本。测试签名与原作者签名不同，不能作为正式覆盖升级包；不同运行也不保证签名相同。正式发布及持续覆盖升级仍须配置并保留原有签名。
+
 iOS 构建入口 `scripts/build-mobile-ios.py` 生成未签名 IPA 和包含受版本管理源码的 Xcode ZIP；`--source-only` 只导出源码，无需 Xcode。脚本不会自动安装模拟器运行时；模拟器 SDK 编译与实际启动测试应分别记录。
 
 可选 APNs/FCM 接入见 [推送开发说明](push/README.md)。普通 APK 不含 Firebase SDK；没有配置自有推送服务和签名时，源码能力不等于远程推送可用。iOS 远程通知图片由 BridgeNotifications 扩展处理，需一同构建和签名。第三方许可见 [NOTICE.md](NOTICE.md)。
