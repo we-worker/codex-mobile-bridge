@@ -27,7 +27,7 @@ class ClientLifecycleTests(unittest.TestCase):
             result = self.manager.scan_wsl()
             row = next(row for row in result['clients'] if row.get('kind') == 'wsl-cli')
             self.assertFalse(row['enabled'])
-            enabled = self.manager.toggle_client({'provider': row['id'], 'enabled': True})
+            enabled = self.manager.control({'action': 'toggle-client', 'provider': row['id'], 'enabled': True})
             self.assertTrue(next(item for item in enabled['clients'] if item['id'] == row['id'])['enabled'])
             self.manager.require_enabled(row['id'])
             with self.assertRaises(ValueError):

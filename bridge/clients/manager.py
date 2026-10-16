@@ -980,7 +980,7 @@ class DesktopSessions:
         provider, enabled = value.get('provider'), value.get('enabled')
         if isinstance(provider, str) and provider.startswith('wsl:'):
             entries = getattr(self.bridge, 'entries', None)
-            if entries is None or type(enabled) is not bool or set(value) - {'provider', 'enabled', 'quitDesktop'}:
+            if entries is None or type(enabled) is not bool or set(value) - {'action', 'provider', 'enabled', 'quitDesktop'}:
                 raise ValueError('WSL 应用开关无效')
             if value.get('quitDesktop', False) is not False:
                 raise ValueError('请在原 WSL 终端退出 Codex；应用管理只停用手机访问，不会终止原任务')
