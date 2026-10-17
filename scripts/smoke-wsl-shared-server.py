@@ -35,7 +35,7 @@ def wait(predicate, seconds=20):
 
 
 class Owner(SharedServer):
-    METHODS = SharedServer.METHODS | {'thread/start'}
+    METHODS = SharedServer.METHODS | {'thread/start', 'thread/unsubscribe'}
 
     def _request(self, method, params, timeout):
         if method == 'initialize':
@@ -185,6 +185,40 @@ def main():
                 assert config.read_bytes() == original_config
                 assert not (home/'auth.json').exists()
                 print('PASS: stop targets original turn; bridge disconnect preserves running task; config/provider/auth unchanged; loopback requests only.', flush=True)
+                owner.close()
+                process.terminate()
+                process.wait(timeout=10)
+                sock_path.unlink(missing_ok=True)
+                process = subprocess.Popen([args.codex, 'app-server', '--listen', 'unix://' + str(sock_path)],
+                    env=environment, cwd=root, stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+                wait(sock_path.exists)
+                owner = Owner(connect(), owner_events.append).start()
+                wait(lambda: owner.request('thread/read', {'threadId': sid, 'includeTurns': False})['thread']['status']['type'] == 'notLoaded')
+                entry = WslEntry(row, root/'mobile-bridge')
+                entry.store = SessionStore(home, source='cli')
+                entry.generation = 'mobile-lifecycle'
+                entry.server = SharedServer(connect(), lambda value: entry._event(value, 'mobile-lifecycle')).start()
+                def read_local(alias, source, timeout=20):
+                    result = subprocess.run([os.sys.executable, '-c', source], env=environment,
+                        capture_output=True, text=True, timeout=timeout, check=True)
+                    return json.loads(result.stdout)
+                entry.read = read_local
+                assert not entry.view(sid)['connected'], 'Passive read unexpectedly restored a thread'
+                entry.activate(sid)
+                assert entry.view(sid)['connected'], 'Explicit mobile open did not resume stored history'
+                count = len(requests)
+                entry.send(sid, 'Synthetic mobile resumed input', str(uuid.uuid4()))
+                wait(lambda: len(requests) == count + 1 and entry.server.request('thread/read', {'threadId': sid, 'includeTurns': False})['thread']['status']['type'] == 'idle')
+                print('PASS: unloaded original history resumes from mobile and receives the next turn on the same thread.', flush=True)
+                request_id = str(uuid.uuid4())
+                created = entry.create_chat(entry.host + '|independent', 'Synthetic mobile new chat', request_id)
+                assert created['id'] != sid and entry.view(created['id'])['connected']
+                assert any(r['id'] == created['id'] for r in entry.list())
+                assert entry.create_chat(entry.host + '|independent', 'Synthetic mobile new chat', request_id)['id'] == created['id']
+                entry.send(created['id'], 'Synthetic mobile new input', str(uuid.uuid4()))
+                wait(lambda: len(requests) == count + 2 and entry.server.request('thread/read', {'threadId': created['id'], 'includeTurns': False})['thread']['status']['type'] == 'idle')
+                assert config.read_bytes() == original_config and not (home/'auth.json').exists()
+                print('PASS: mobile creates a durable WSL chat once, lists it only in WSL, and sends without opening a TUI.', flush=True)
             except Exception as error:
                 if entry is not None:
                     pending = [r for session in entry.live.values() for r in session.state.get('requests', [])]

@@ -18,7 +18,14 @@ window.checkCodexEntries = async function checkCodexEntries() {
   await until(()=>document.querySelector('#sessions .session')?.dataset.host===wsl);
   assert(clientNavigation.provider===wsl,'WSL is the selected application');
   assert(!document.querySelector('#sessions .session[data-host=local]'),'Windows conversations excluded');
-  assert(document.getElementById('new-chat').hidden,'no desktop create action in WSL');
+  assert(!document.getElementById('new-chat').hidden,'WSL new chat is visible on mobile');
+  await document.getElementById('new-chat').onclick();
+  assert(document.getElementById('new-chat-dialog').open,'mobile new chat dialog opens');
+  assert(document.getElementById('new-chat-project').value===wsl+'|independent','independent workspace belongs to selected WSL app');
+  assert([...document.getElementById('new-chat-project').options].some(option=>option.value===wsl+'|/fixture'),'existing WSL projects are offered');
+  document.getElementById('new-chat-title').value='Mobile creation fixture';
+  await document.getElementById('new-chat-form').onsubmit({preventDefault(){}});
+  assert(!document.getElementById('new-chat-dialog').open&&currentHost===wsl,'create opens the WSL conversation without desktop handoff');
   await openChat(sid,wsl);await until(()=>state?.model==='group/auto-gpt-6-1-sol');
   await document.getElementById('model-button').onclick();
   const select=document.getElementById('model-select'),models=[...select.options].filter(option=>option.value!=='__custom__');
@@ -34,5 +41,5 @@ window.checkCodexEntries = async function checkCodexEntries() {
   clientNavigation.openManager();await clientNavigation.toggle(wsl,false);
   assert(clientNavigation.provider==='codex','disabled WSL falls back to enabled desktop app');
   assert(!document.querySelector('.client-disable-dialog'),'WSL never offers an unsupported native exit');
-  return {passed:16,modelLabels:models.map(option=>option.textContent),application:'WSL Codex',viewport:innerWidth};
+  return {passed:20,modelLabels:models.map(option=>option.textContent),application:'WSL Codex',viewport:innerWidth};
 };

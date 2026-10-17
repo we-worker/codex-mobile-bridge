@@ -2,6 +2,15 @@
 // UI messages only. Never translate chat content, commands, model IDs or user input.
 const BridgeI18n=(()=>{
 const en={
+"可从手机新建、恢复 WSL 会话；账号与模型接入由原工具管理。":"Create or resume WSL chats from your phone. Providers remain managed by the original tools.",
+"打开此应用时可启动已登记的 WSL 环境和原生共享服务。":"Opening this app can start its registered WSL environment and native shared service.",
+"正在恢复会话…":"Resuming conversation…",
+"选择 WSL 中的已有项目，或创建独立聊天。创建后可直接发送消息，无需打开终端。":"Choose an existing WSL project or create an independent chat. Send messages directly without opening a terminal.",
+"在 WSL 中创建独立聊天":"Create an independent chat in WSL",
+"聊天已创建，可以直接发送消息":"Chat created. You can send messages now.",
+"点击重新连接即可在此设备恢复会话并继续聊天":"Reconnect to resume this conversation and continue chatting on this device.",
+"点击重新连接以恢复 WSL 会话":"Reconnect to resume the WSL conversation.",
+"WSL 会话已卸载，点击重新连接即可恢复":"The WSL conversation was unloaded. Reconnect to resume it.",
 "此版本请从项目下载页面手动更新。":"Download a new installer from the project download page to update this version.",
 "扫描 WSL":"Scan WSL",
 "扫描 WSL 应用":"Scan WSL applications",

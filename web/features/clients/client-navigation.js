@@ -64,7 +64,7 @@ class ClientNavigation {
     new MutationObserver(restore).observe(document.body,{childList:true});
     new MutationObserver(restore).observe(settings,{childList:true});
     document.querySelector('#chat .chat-info').before(this.icon('codex'));
-    document.getElementById('new-chat-form').prepend(Object.assign(document.createElement('p'),{className:'muted',textContent:'Codex'}));
+    document.getElementById('new-chat-form').prepend(Object.assign(document.createElement('p'),{id:'new-chat-client',className:'muted',textContent:'Codex'}));
     new MutationObserver(()=>document.body.classList.toggle('gateway-authenticated',!document.getElementById('app').hidden)).observe(document.getElementById('app'),{attributes:true,attributeFilter:['hidden']});
     document.addEventListener('bridge-language',()=>{this.paint();BridgeI18n.apply();});
     document.addEventListener('visibilitychange',()=>{if(!document.hidden)this.refresh();});
@@ -182,7 +182,7 @@ class ClientNavigation {
     if(data.computer){this.computer.dataset.deviceName=data.computer;this.computerName.textContent=data.computer;document.dispatchEvent(new Event('bridge-computer'));}
     const enabled=this.clients.filter(c=>c.enabled);
     const id=enabled.some(c=>c.id===this.provider)?this.provider:enabled[0]?.id||null;
-    if(id!==this.provider||this.view.provider!==(isCodexClient(id)?'codex':id||'codex'))this.choose(id).catch(error=>this.notify(error.message));
+    if(id!==this.provider||this.view.provider!==(isCodexClient(id)?'codex':id||'codex'))this.choose(id,{activate:false}).catch(error=>this.notify(error.message));
     else this.paint();
   }
   async refresh(){
@@ -207,12 +207,12 @@ class ClientNavigation {
   hasUncertain(){return [...(this.operationFailures?.values()||[])].some(value=>value.uncertain);}
   syncViewClients(){this.view.setClientStates?.(this.clients.map(client=>({...client,operationFailure:this.operationFailures?.get(client.id),operationUncertain:this.hasUncertain(),pendingEnable:this.gatewayRunning!==false&&this.pending.has(client.id)&&client.enabled})),id=>this.toggle(id,true),id=>this.initialize(id),()=>this.refresh(),id=>this.reconnect(id));}
   retryOperation(id){const failure=this.operationFailures?.get(id);if(!failure||this.hasUncertain())return;return failure.action==='initialize'?this.initialize(id):this.toggle(id,failure.action==='enable');}
-  async choose(id){
+  async choose(id,{activate=true}={}){
     this.cancelListSwipe();
-    if(id===this.provider&&this.view.provider===(isCodexClient(id)?'codex':id||'codex'))return;
+    if(id===this.provider&&this.view.provider===(isCodexClient(id)?'codex':id||'codex')){if(activate&&id?.startsWith('wsl:'))await this.onApplicationChange?.(id,id,{activate});return;}
     this.rememberSwipeList();
     const previous=this.provider;this.listReadDone=false;this.listVisit=(this.listVisit||0)+1;this.provider=id;if(id)localStorage.setItem('bridge-client',id);
-    const ready=this.view.choose(isCodexClient(id)?'codex':id||'codex');this.paint();await this.onApplicationChange?.(previous,id);await ready;
+    const ready=this.view.choose(isCodexClient(id)?'codex':id||'codex');this.paint();await this.onApplicationChange?.(previous,id,{activate});await ready;
   }
   acknowledgeList(provider,value){
     if(provider?.startsWith('wsl:')||this.listReadDone||provider!==this.provider||document.hidden||document.getElementById('app').hidden||value.connected===false||value.unavailableHosts?.length)return;
@@ -277,7 +277,7 @@ class ClientNavigation {
     this.switcher.replaceChildren();const enabled=this.clients.filter(c=>c.enabled),visible=this.visibleClients();const collapsed=this.preference('switch-collapsed',undefined,false);this.switchToggle.hidden=enabled.length<2||!visible.length;this.paintSettingsActions();this.switchDock.hidden=this.switchToggle.hidden||collapsed;this.navigation.classList.toggle('switch-dock-hidden',this.switchDock.hidden);this.switchToggle.textContent=BridgeI18n.t(collapsed?'显示底部 APP 图标':'隐藏底部 APP 图标');this.switchToggle.setAttribute('aria-expanded',String(!collapsed));this.switchToggle.setAttribute('aria-label',BridgeI18n.t(collapsed?'展开应用图标':'收起应用图标'));this.switchToggle.title=this.switchToggle.getAttribute('aria-label');this.settingsNotifications.textContent=BridgeI18n.language()==='en'?'Push alerts':'第三方通知';
     for(const client of visible){const button=document.createElement('button');button.type='button';button.append(this.icon(client.id),document.createTextNode(client.name));button.classList.toggle('selected',client.id===provider);button.setAttribute('aria-pressed',String(client.id===provider));button.onclick=()=>this.choose(client.id).catch(e=>this.notify(e.message));this.switcher.append(button);}
     document.getElementById('desktop-backend').hidden=true;
-    document.getElementById('new-chat').disabled=!provider;document.getElementById('new-chat').hidden=!!provider?.startsWith('wsl:');
+    document.getElementById('new-chat').disabled=!provider;document.getElementById('new-chat').hidden=false;
     this.sidebar.classList.toggle('no-client',!provider);document.getElementById('app').classList.toggle('no-enabled-client',!provider);
     let empty=this.sidebar.querySelector('.no-client-message');if(!empty){empty=document.createElement('p');empty.className='no-client-message muted';empty.textContent=BridgeI18n.t('尚未启用应用，请打开应用管理。');this.heading.after(empty);}empty.hidden=!!provider;this.renderManager();
   }

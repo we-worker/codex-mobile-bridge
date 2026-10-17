@@ -20,7 +20,7 @@ class SharedServer:
     LIMIT = 64 * 1024 * 1024
     METHODS = frozenset({
         'thread/list', 'thread/read', 'thread/loaded/list', 'thread/turns/list',
-        'thread/items/list', 'thread/resume',
+        'thread/items/list', 'thread/resume', 'thread/start',
         'turn/start', 'turn/steer', 'turn/interrupt', 'thread/settings/update',
         'thread/name/set', 'model/list', 'config/read',
     })
@@ -55,7 +55,7 @@ class SharedServer:
                 raise IPCError('WSL 控制通道身份握手失败')
             self.reader = threading.Thread(target=self._read, daemon=True)
             self.reader.start()
-            self._request('initialize', {'clientInfo': {'name': 'codex_mobile_bridge', 'version': '0.1'},
+            self._request('initialize', {'clientInfo': {'name': 'codex_mobile_bridge_wsl', 'version': '0.2'},
                                         'capabilities': {'experimentalApi': True}}, 10)
             self.write({'method': 'initialized'})
             if hasattr(self.stream, 'settimeout'):

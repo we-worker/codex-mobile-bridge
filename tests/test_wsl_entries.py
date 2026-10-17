@@ -6,6 +6,8 @@ import threading
 import unittest
 import uuid
 import io
+import os
+import subprocess
 from contextlib import redirect_stdout
 from contextlib import closing
 from pathlib import Path
@@ -103,19 +105,76 @@ class CliStoreTests(unittest.TestCase):
                     ('cli', 'codex-tui', 'cli', None, 0, 10, '/fixture', 'CLI'),
                     ('shared', 'codex-tui', 'vscode', None, 0, 11, '/fixture', 'Shared CLI'),
                     ('old', None, 'cli', None, 0, 12, '/fixture', 'Old'),
+                    ('mobile', 'codex_mobile_bridge_wsl', 'vscode', None, 0, 12, '/fixture', 'Mobile'),
                     ('desktop', 'codex_work_desktop', 'vscode', None, 0, 13, '/fixture', 'Desktop'),
+                    ('vscode', None, 'vscode', None, 0, 13, '/fixture', 'Extension'),
                     ('child', 'codex-tui', 'cli', 'subagent', 0, 14, '/fixture', 'Child'),
                     ('exec', 'codex_exec', 'exec', None, 0, 15, '/fixture', 'Exec')])
                 db.commit()
             cli, desktop = SessionStore(home, source='cli'), SessionStore(home)
-            self.assertEqual({r['id'] for r in cli.list()}, {'cli', 'shared', 'old'})
-            self.assertEqual({r['id'] for r in desktop.list()}, {'desktop'})
-            for identifier in ('desktop', 'child', 'exec'):
+            self.assertEqual({r['id'] for r in cli.list()}, {'cli', 'shared', 'old', 'mobile'})
+            self.assertEqual({r['id'] for r in desktop.list()}, {'desktop', 'vscode'})
+            for identifier in ('desktop', 'vscode', 'child', 'exec'):
                 with self.assertRaises(KeyError):
                     cli.get(identifier)
             self.assertEqual(cli.get('shared')['originator'], 'codex-tui')
             with self.assertRaises(KeyError):
                 desktop.get('cli')
+
+
+class DaemonStartupTests(unittest.TestCase):
+    def test_only_verified_vscode_stdio_server_can_coexist(self):
+        home = Path('/home/fixture')
+        context = {'Path': Path, 'home': home}
+        exec(wsl._START_DAEMON.split('root=Path(requested_home)')[0], context)
+        identify = context['vscode_app_server']
+        executable = str(home/'.vscode-server/extensions/openai.chatgpt-26.1007.21434-linux-x64/bin/linux-x86_64/codex')
+        parent = str(home/'.vscode-server/bin/abcdef1234/node')
+        args = [b'codex', b'-c', b'example=true', b'app-server', b'--analytics-default-enabled']
+        parent_args = [b'node', b'--type=extensionHost']
+        self.assertTrue(identify(executable, args, parent, parent_args))
+        for other in ([b'codex'], [b'codex', b'app-server', b'--no-daemon'],
+                      args + [b'--listen', b'unix:///tmp/another'], args + [b'--managed-daemon']):
+            self.assertFalse(identify(executable, other, parent, parent_args))
+        self.assertFalse(identify('/usr/bin/codex', args, parent, parent_args))
+        self.assertFalse(identify(executable, args, parent, [b'node']))
+        self.assertFalse(identify(executable, args, '/usr/bin/node', parent_args))
+
+    def test_native_start_uses_original_home_and_does_not_restart_or_override_provider(self):
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            root = Path(folder).resolve()
+            proc = root/'empty-proc'; proc.mkdir()
+            executable = root/'codex'; executable.touch(); executable.chmod(0o700)
+            def path(value): return proc if value == '/proc' else Path(value)
+            run = Mock(return_value=SimpleNamespace(returncode=0))
+            context = {'Path': path, 'root': root, 'requested_home': str(root), 'uid': root.stat().st_uid,
+                       'home': root, 'inventory': {'homes': []}, 'os': os, 'subprocess': subprocess}
+            with patch('shutil.which', return_value=str(executable)), patch.object(subprocess, 'run', run):
+                exec(wsl._START_DAEMON, context)
+            self.assertEqual([c.args[0][1:] for c in run.call_args_list],
+                             [['app-server', 'daemon', 'start', '--help'], ['app-server', 'daemon', 'start']])
+            self.assertEqual(run.call_args.kwargs['env']['CODEX_HOME'], str(root))
+            self.assertEqual(run.call_args.kwargs['cwd'], root)
+
+    def test_another_home_daemon_is_never_retargeted_or_restarted(self):
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            root = Path(folder).resolve()
+            context = {'Path': Path, 'requested_home': str(root), 'uid': root.stat().st_uid, 'home': root,
+                       'inventory': {'homes': [{'home': '/other/config', 'daemon': {'pid': 999}}]},
+                       'os': os, 'subprocess': subprocess}
+            with patch.object(subprocess, 'run') as run:
+                with self.assertRaisesRegex(ValueError, 'Another configuration'):
+                    exec(wsl._START_DAEMON, context)
+                run.assert_not_called()
+
+    def test_only_explicit_start_can_wake_an_already_registered_distribution(self):
+        with patch.object(wsl, '_distributions', return_value=['Ubuntu']) as registered:
+            self.assertIn('Ubuntu', wsl.command('Ubuntu', 'fixture', allow_start=True))
+            registered.assert_called_once_with(False)
+        with patch.object(wsl, 'running_distributions', return_value=[]):
+            with self.assertRaises(OSError): wsl.command('Ubuntu', 'fixture')
+        with patch.object(wsl, '_distributions', return_value=[]):
+            with self.assertRaises(OSError): wsl.command('NotRegistered', 'fixture', allow_start=True)
 
 
 class Runtime:
@@ -206,6 +265,74 @@ class WslSessionTests(unittest.TestCase):
             self.entry.send(self.identifier, 'do not send', str(uuid.uuid4()))
         self.assertFalse(any(m == 'turn/start' for m, _ in self.entry.server.calls))
         self.assertFalse(self.entry.receipts_path.exists())
+
+    def test_explicit_open_resumes_unloaded_history_but_passive_refresh_does_not(self):
+        self.entry.server.thread.update(status={'type': 'notLoaded'}, canAcceptDirectInput=None)
+        self.entry.subscriptions[self.identifier] = self.entry.generation
+        self.entry.store.history = lambda *a, **k: {'id': self.identifier, 'turns': []}
+        self.assertFalse(self.entry.view(self.identifier)['connected'])
+        self.assertFalse(any(m == 'thread/resume' for m, _ in self.entry.server.calls))
+        original = self.entry.server.request
+        def request(method, params):
+            if method == 'thread/resume':
+                self.entry.server.thread.update(status={'type': 'idle'}, canAcceptDirectInput=True)
+            return original(method, params)
+        self.entry.server.request = request
+        self.assertTrue(self.entry.activate(self.identifier).connected)
+        self.assertEqual([p for m, p in self.entry.server.calls if m == 'thread/resume'],
+                         [{'threadId': self.identifier, 'excludeTurns': True}])
+        self.assertFalse(any(m == 'turn/start' for m, _ in self.entry.server.calls))
+
+    def test_restoring_history_cannot_silently_switch_to_a_different_default_provider(self):
+        self.entry.server.thread.update(status={'type': 'notLoaded'}, canAcceptDirectInput=None,
+                                        modelProvider='original-provider')
+        with self.assertRaisesRegex(IPCError, '提供商与当前接入不同'):
+            self.entry.activate(self.identifier)
+        self.assertFalse(any(m in ('thread/resume', 'turn/start') for m, _ in self.entry.server.calls))
+
+    def test_mobile_create_is_scoped_durable_and_never_repeats_an_uncertain_start(self):
+        self.entry.store.list = lambda **k: [{'cwd': '/home/fixture/project'}]
+        self.entry.read = lambda *a, **k: {'cwd': '/home/fixture/project'}
+        original = self.entry.server.request
+        created = str(uuid.uuid4())
+        def request(method, params):
+            if method == 'thread/start':
+                self.entry.server.calls.append((method, copy.deepcopy(params)))
+                self.entry.server.thread['id'] = created
+                return {'thread': copy.deepcopy(self.entry.server.thread)}
+            if method == 'thread/name/set': return {}
+            return original(method, params)
+        self.entry.server.request = request
+        project = self.entry.host + '|/home/fixture/project'
+        attempt = str(uuid.uuid4())
+        first = self.entry.create_chat(project, 'Mobile', attempt)
+        self.assertEqual(first['id'], created)
+        self.assertEqual(self.entry.create_chat(project, 'Mobile', attempt)['id'], created)
+        self.assertEqual(sum(m == 'thread/start' for m, _ in self.entry.server.calls), 1)
+        self.assertFalse(any(m == 'turn/start' for m, _ in self.entry.server.calls))
+        with self.assertRaises(ValueError): self.entry.create_chat('local|independent', 'Mobile', str(uuid.uuid4()))
+        with self.assertRaises(ValueError): self.entry.create_chat(project, 'Changed', attempt)
+        def unknown(method, params):
+            if method == 'thread/start': raise IPCError('Unknown write')
+            return request(method, params)
+        self.entry.server.request = unknown
+        uncertain = str(uuid.uuid4())
+        with self.assertRaisesRegex(IPCError, '不会重复创建'): self.entry.create_chat(project, 'Unknown', uncertain)
+        self.entry.server.request = Mock(side_effect=AssertionError('Must not replay native creation'))
+        with self.assertRaisesRegex(IPCError, '不会重复创建'): self.entry.create_chat(project, 'Unknown', uncertain)
+
+    def test_passive_connection_does_not_start_codex_and_explicit_connect_can_start_it(self):
+        self.entry.server = None
+        info = {'user': 'fixture', 'homes': [{'home': self.row['home'], 'daemon': None}]}
+        ready = copy.deepcopy(info)
+        ready['homes'][0]['daemon'] = {'socket': '/tmp/fixture', 'pid': 42}
+        with patch.object(wsl, 'probe', return_value=info), patch.object(wsl, 'ensure_daemon', return_value=ready) as start, \
+                patch.object(wsl, 'Stream'), patch('bridge.features.endpoints.wsl.SharedServer') as server:
+            with self.assertRaises(IPCError): self.entry.runtime()
+            start.assert_not_called()
+            self.entry.connect()
+            start.assert_called_once_with(self.row['distribution'], self.row['user'], self.row['home'])
+            server.return_value.start.assert_called_once()
 
     def test_uncertain_send_survives_restart_and_is_never_replayed(self):
         submission = str(uuid.uuid4())

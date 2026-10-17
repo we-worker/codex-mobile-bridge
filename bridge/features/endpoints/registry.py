@@ -92,8 +92,8 @@ class Entries:
                          'running': True if connected else None if row['running'] else False,
                          'distributionRunning': row['running'],
                          'setupStatus': 'ready', 'canQuitDesktop': False, 'canForceQuit': False,
-                         'reason': ('使用原终端的 Codex 会话；账号与模型接入由 WSL 中的原工具管理。'
-                                    if row['running'] else 'WSL 发行版未运行，请先在电脑打开原终端。')})
+                         'reason': ('可从手机新建、恢复 WSL 会话；账号与模型接入由原工具管理。'
+                                    if row['running'] else '打开此应用时可启动已登记的 WSL 环境和原生共享服务。')})
         return rows
 
     def configure(self, identifier, enabled):

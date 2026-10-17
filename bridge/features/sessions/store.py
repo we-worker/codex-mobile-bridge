@@ -26,12 +26,13 @@ class SessionStore:
 
     def _owner_filter(self, columns):
         if self.source == 'cli':
-            return "(source IN ('cli', 'vscode') AND (originator IS NULL OR originator = 'codex-tui'))" if 'originator' in columns else "source IN ('cli', 'vscode')"
+            return "((source = 'cli' AND originator IS NULL) OR (source IN ('cli', 'vscode') AND originator IN ('codex-tui', 'codex_mobile_bridge_wsl')))" if 'originator' in columns else "source = 'cli'"
         return "(originator IN ('Codex Desktop', 'codex_work_desktop', 'codex_mobile_bridge') OR (originator IS NULL AND source = 'vscode'))" if 'originator' in columns else '1'
 
     def _matches(self, row):
         if self.source == 'cli':
-            return row.get('source') in ('cli', 'vscode') and row.get('originator') in (None, 'codex-tui')
+            return ((row.get('source') == 'cli' and row.get('originator') is None)
+                    or (row.get('source') in ('cli', 'vscode') and row.get('originator') in ('codex-tui', 'codex_mobile_bridge_wsl')))
         return row.get('originator') in ('Codex Desktop', 'codex_work_desktop', 'codex_mobile_bridge') or (row.get('originator') is None and row.get('source') == 'vscode')
 
     @contextmanager

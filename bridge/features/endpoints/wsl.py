@@ -16,6 +16,7 @@ from bridge.clients.codex.configuration import magpie_managed
 from bridge.clients.codex.catalog import Catalog
 from bridge.features.sessions.model import normalize_state, normalize_request, computer_use_approval
 from bridge.features.sessions.timeline import Timeline
+from bridge.features.sessions.store import StoreUnavailable
 from bridge.features.workspace.uploads import Uploads
 from bridge.platforms.windows import wsl
 from bridge.resources import source_text
@@ -64,7 +65,7 @@ class Session:
     def view(self):
         with self.condition:
             return {**normalize_state(self.state, self.connected), 'sequence': self.sequence,
-                    'loadingHistory': self.loading, 'activating': False, 'error': self.error}
+                    'loadingHistory': self.loading, 'activating': self.activating, 'error': self.error}
 
 
 class WslEntry:
@@ -84,6 +85,9 @@ class WslEntry:
         self.write_lock = threading.RLock()
         self.receipts_path = self.data_dir / 'operations.json'
         self.receipts = json.loads(self.receipts_path.read_text(encoding='utf-8')) if self.receipts_path.exists() else {}
+        self.create_lock = threading.RLock()
+        self.creations_path = self.data_dir / 'creations.json'
+        self.creations = json.loads(self.creations_path.read_text(encoding='utf-8')) if self.creations_path.exists() else {}
         self.store = WslStore(self)
         self.uploads = Uploads(self.data_dir, lambda *args: upload_file(self.row['distribution'], *args, reader=self.read))
         self.worker = threading.Thread(target=self._maintain, daemon=True)
@@ -96,18 +100,19 @@ class WslEntry:
         except (OSError, ValueError, TimeoutError) as exc:
             raise RemoteUnavailable('WSL 入口暂不可用，请检查发行版和原 Codex') from exc
 
-    def runtime(self):
+    def runtime(self, allow_start=False):
         with self.connection_lock:
             if self.closed.is_set():
                 raise IPCError('WSL 入口已关闭')
             if self.server is not None and not self.server.closed:
                 return self.server
             try:
-                info = wsl.probe(self.row['distribution'], self.row['user'])
+                info = (wsl.ensure_daemon(self.row['distribution'], self.row['user'], self.row['home']) if allow_start
+                        else wsl.probe(self.row['distribution'], self.row['user']))
                 item = next((h for h in info['homes'] if h['home'] == self.row['home']), None)
                 daemon = item.get('daemon') if item else None
                 if info['user'] != self.row['user'] or not daemon:
-                    raise IPCError('未找到原 WSL Codex 共享服务；可查看旧历史，请先在电脑终端打开 Codex')
+                    raise IPCError('WSL 共享服务暂不可用；打开聊天时会尝试启动已安装的 Codex 服务')
                 stream = wsl.Stream(self.row['distribution'], self.row['user'], self.row['home'], daemon)
                 if self.closed.is_set():
                     stream.close()
@@ -129,7 +134,7 @@ class WslEntry:
                     raise IPCError('WSL 入口已关闭')
                 return server.start()
             except (OSError, ValueError, TimeoutError) as exc:
-                raise IPCError('无法连接原 WSL Codex 共享服务') from exc
+                raise IPCError('无法连接 WSL Codex 共享服务，请检查版本、发行版状态或其他独立运行的 Codex') from exc
 
     def _event(self, message, generation):
         if generation != self.generation:
@@ -171,7 +176,7 @@ class WslEntry:
                 self.subscriptions.pop(session.id, None)
                 session.connected = False
                 session.state['requests'] = []
-                session.error = '原 WSL 会话已卸载，请在终端打开后重新连接'
+                session.error = 'WSL 会话已卸载，点击重新连接即可恢复'
             session.changed()
 
     def _refresh(self, session):
@@ -199,7 +204,7 @@ class WslEntry:
                          'turns': [{**t, 'turnId': t['id'], 'turnStartedAtMs': (t.get('startedAt') or 0) * 1000} for t in turns],
                          'turnHistory': {'history': {'isComplete': not bool(cursor)}}}
                 connected = thread.get('status', {}).get('type') in ('idle', 'active') and thread.get('canAcceptDirectInput') is True
-                error = None if connected else '仅查看历史；请在原 WSL 终端打开此会话后重新连接'
+                error = None if connected else '点击重新连接即可在此设备恢复会话并继续聊天'
                 if runtime.closed or generation != self.generation:
                     raise IPCError('WSL 原连接已变化')
             except IPCError as exc:
@@ -283,7 +288,7 @@ class WslEntry:
         for turn in result['turns']:
             turn['actionable'] = False
         if not result['connected']:
-            result['readOnlyReason'] = result.get('error') or '请先在原 WSL 终端打开此会话'
+            result['readOnlyReason'] = result.get('error') or '点击重新连接以恢复 WSL 会话'
         return result
 
     def timeline_read(self, identifier, mode='page', **options):
@@ -323,38 +328,125 @@ class WslEntry:
                          'turnId': last.get('id'), 'turnStatus': last.get('status')})
         return rows
 
-    def _target(self, identifier):
+    def _target(self, identifier, activate=False):
         self.store.get(identifier)
-        runtime = self.runtime()
+        runtime = self.runtime(allow_start=activate)
         # Fresh native evidence, never a display cache. Explicit subscription is
         # allowed only to this already loaded thread on this original daemon.
         thread = runtime.request('thread/read', {'threadId': identifier, 'includeTurns': False})['thread']
+        if (activate and thread.get('id') == identifier and not thread.get('parentThreadId')
+                and thread.get('threadSource') != 'subagent' and thread.get('status', {}).get('type') == 'notLoaded'):
+            self.subscriptions.pop(identifier, None)
+            self._subscribe(identifier, runtime, thread)
+            thread = runtime.request('thread/read', {'threadId': identifier, 'includeTurns': False})['thread']
         if (thread.get('id') != identifier or thread.get('parentThreadId') or
+                thread.get('threadSource') == 'subagent' or
                 thread.get('canAcceptDirectInput') is not True or thread.get('status', {}).get('type') not in ('idle', 'active')):
-            raise IPCError('原 WSL 会话尚未加载或不允许直接输入；操作未发送，请先在终端打开它')
+            raise IPCError('WSL 会话尚未就绪或由其他执行器独占；操作未发送，请重新连接')
         return runtime, thread
 
     def _subscribe(self, identifier, runtime, thread):
         generation = self.generation
         if self.subscriptions.get(identifier) == generation:
             return
+        if thread.get('status', {}).get('type') == 'notLoaded':
+            config = runtime.request('config/read', {'includeLayers': False, 'cwd': thread.get('cwd')}).get('config') or {}
+            if thread.get('modelProvider') and thread['modelProvider'] != (config.get('model_provider') or 'openai'):
+                raise IPCError('此历史会话的提供商与当前接入不同；已保留原设置，请先在接入管理工具中选择原接入')
         # A second connection can send, but only subscribers receive approvals.
         # This reuses the SAME daemon/thread; no runtime, config overrides,
         # auth, cwd, model, permission policy, or new task is supplied.
         result = runtime.request('thread/resume', {'threadId': identifier, 'excludeTurns': True})
         current = result.get('thread') or {}
         if (runtime.closed or generation != self.generation or current.get('id') != identifier or
-                any(current.get(k) != thread.get(k) for k in ('cwd', 'modelProvider', 'model'))):
+                any(thread.get(k) is not None and current.get(k) != thread[k] for k in ('cwd', 'modelProvider', 'model'))):
             raise IPCError('原 WSL 会话设置或连接已变化，操作尚未发送，请重新查看原会话')
         self.subscriptions[identifier] = generation
 
     def activate(self, identifier):
+        uuid.UUID(identifier)
+        self.runtime(allow_start=True)
         session = self.session(identifier, attach=False)
         with session.action_lock:
-            runtime, thread = self._target(identifier)
-            self._subscribe(identifier, runtime, thread)
-            self._refresh(session)
-            return session
+            with session.condition:
+                session.activating = True
+                session.changed()
+            try:
+                runtime, thread = self._target(identifier, activate=True)
+                self._subscribe(identifier, runtime, thread)
+                self._refresh(session)
+                return session
+            except IPCError as exc:
+                with session.condition:
+                    session.error = str(exc)
+                raise
+            finally:
+                with session.condition:
+                    session.activating = False
+                    session.changed()
+
+    def connect(self):
+        self.runtime(allow_start=True)
+        return {'ok': True, 'host': self.host}
+
+    def projects(self):
+        """Offer existing WSL workspaces; phone input never supplies a raw path."""
+        try:
+            rows = self.store.list(limit=1000)
+        except StoreUnavailable:
+            rows = []
+        roots = sorted({row['cwd'] for row in rows if isinstance(row.get('cwd'), str) and row['cwd'].startswith('/')})
+        return [{'key': self.host + '|' + cwd, 'host': self.host, 'hostLabel': self.row['label'],
+                 'cwd': cwd, 'name': cwd.rstrip('/').rsplit('/', 1)[-1] or cwd} for cwd in roots]
+
+    def create_chat(self, project_key, title, request_id):
+        if not isinstance(request_id, str):
+            raise ValueError('创建请求标识无效')
+        uuid.UUID(request_id)
+        if not isinstance(title, str) or not 1 <= len(title.strip()) <= 120:
+            raise ValueError('请输入 1–120 字的聊天名称')
+        if not isinstance(project_key, str) or not project_key.startswith(self.host + '|'):
+            raise ValueError('请选择此 WSL 应用的已有项目或独立聊天')
+        independent = project_key == self.host + '|independent'
+        title = title.strip()
+        with self.create_lock:
+            receipt = self.creations.get(request_id)
+            if receipt:
+                if receipt['project'] != project_key or receipt['title'] != title:
+                    raise ValueError('同一创建请求不能用于不同内容')
+                if not receipt.get('id'):
+                    raise IPCError('创建结果待核对，请先刷新聊天列表；不会重复创建')
+                identifier = receipt['id']
+            else:
+                runtime = self.runtime(allow_start=True)
+                project = None if independent else next((p for p in self.projects() if p['key'] == project_key), None)
+                if not independent and project is None:
+                    raise ValueError('请选择此 WSL 应用的已有项目或独立聊天')
+                source = 'import json,uuid\nfrom pathlib import Path\n'
+                if independent:
+                    source += source_text('features/sessions/create.py')
+                    source += '\nprint(json.dumps({"cwd":independent_directory(' + repr(self.row['home'] + '/mobile-bridge') + ',' + repr(request_id) + ')}))\n'
+                else:
+                    source += 'p=Path(' + repr(project['cwd']) + ')\nif not p.is_dir():raise ValueError("Workspace unavailable")\nprint(json.dumps({"cwd":str(p.resolve())}))\n'
+                cwd = self.read(self.row['distribution'], source)['cwd']
+                receipt = self.creations[request_id] = {'project': project_key, 'title': title, 'cwd': cwd}
+                self.data_dir.mkdir(parents=True, exist_ok=True)
+                private_json(self.creations_path, self.creations)
+                try:
+                    created = runtime.request('thread/start', {'cwd': cwd, 'ephemeral': False})['thread']
+                    identifier = created['id']
+                    uuid.UUID(identifier)
+                    if created.get('cwd') != cwd or created.get('parentThreadId'):
+                        raise IPCError('新会话身份未确认')
+                    receipt['id'] = identifier
+                    private_json(self.creations_path, self.creations)
+                    runtime.request('thread/name/set', {'threadId': identifier, 'name': title})
+                    # Force durable empty-thread history before exposing it in lists.
+                    runtime.request('thread/read', {'threadId': identifier, 'includeTurns': True})
+                except Exception:
+                    raise IPCError('创建结果待核对，请先刷新聊天列表；不会重复创建') from None
+            self.activate(identifier)
+            return {'id': identifier, 'host': self.host, 'opened': True, 'message': '聊天已创建，可以直接发送消息'}
 
     def _mutation(self, identifier, key, value, call):
         fingerprint = hashlib.sha256(json.dumps([identifier, value], sort_keys=True).encode()).hexdigest()
@@ -405,7 +497,7 @@ class WslEntry:
             previous = self._previous_send(identifier, key, value)
             if previous is not None:
                 return previous
-            runtime, thread = self._target(identifier)
+            runtime, thread = self._target(identifier, activate=True)
             if mode == 'send' and thread['status']['type'] == 'active':
                 raise ValueError('任务正在运行，请选择补充当前任务，或等待完成')
             self._subscribe(identifier, runtime, thread)

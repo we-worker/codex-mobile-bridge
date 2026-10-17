@@ -1,4 +1,4 @@
-"""WSL inventory and byte streams. Never starts a stopped distribution or Codex."""
+"""WSL inventory and byte streams; daemon startup requires an explicit action."""
 import json
 import os
 import subprocess
@@ -12,11 +12,11 @@ def _options():
     return {'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}
 
 
-def running_distributions():
+def _distributions(running=True):
     if os.name != 'nt':
         return []
     try:
-        result = subprocess.run(['wsl.exe', '--list', '--running', '--quiet'],
+        result = subprocess.run(['wsl.exe', '--list', *(['--running'] if running else []), '--quiet'],
                                 capture_output=True, timeout=8, **_options())
     except (OSError, subprocess.TimeoutExpired):
         return []
@@ -27,10 +27,15 @@ def running_distributions():
     return [s.strip().lstrip('\ufeff') for s in text.splitlines() if s.strip().lstrip('\ufeff')]
 
 
-def command(distribution, user=None):
+def running_distributions():
+    return _distributions()
+
+
+def command(distribution, user=None, allow_start=False):
     # Listing is repeated immediately before every invocation. Discovery is not
     # permission to wake a distribution later during a background request.
-    if not isinstance(distribution, str) or distribution not in running_distributions():
+    available = _distributions(False) if allow_start else running_distributions()
+    if not isinstance(distribution, str) or distribution not in available:
         raise OSError('WSL 发行版已停止或不可用，请在电脑端启动后重新连接')
     args = ['wsl.exe', '--distribution', distribution]
     if user is not None:
@@ -40,9 +45,9 @@ def command(distribution, user=None):
     return args + ['--exec', 'python3']
 
 
-def read(distribution, source, user=None, timeout=20):
+def read(distribution, source, user=None, timeout=20, allow_start=False):
     try:
-        result = subprocess.run(command(distribution, user) + ['-'], input=source.encode('utf-8'),
+        result = subprocess.run(command(distribution, user, allow_start=allow_start) + ['-'], input=source.encode('utf-8'),
                                 capture_output=True, timeout=timeout, **_options())
     except subprocess.TimeoutExpired as exc:
         raise TimeoutError('WSL 读取超时') from exc
@@ -58,7 +63,7 @@ def read(distribution, source, user=None, timeout=20):
 
 # Only same-user process identities and native filesystem metadata are returned.
 # Do not return command lines or general environment/configuration contents.
-PROBE = r'''
+_INVENTORY = r'''
 import json,os,pwd,stat,subprocess
 from pathlib import Path
 uid=os.getuid(); user=pwd.getpwuid(uid).pw_name; home=Path.home()
@@ -95,12 +100,89 @@ for h,d in homes.items():
         if not result.returncode:windows=result.stdout.strip()
     except (OSError,subprocess.TimeoutExpired):pass
     rows.append({'home':h,'daemon':d,'windowsHome':windows})
-print(json.dumps({'user':user,'userHome':str(home),'homes':rows}))
+inventory={'user':user,'userHome':str(home),'homes':rows}
 '''
+PROBE = _INVENTORY + '\nprint(json.dumps(inventory))\n'
 
 
 def probe(distribution, user=None):
     return read(distribution, PROBE, user)
+
+
+_START_DAEMON = r'''
+import shutil,re
+def vscode_app_server(executable,args,parent_executable,parent_args):
+    # Only a VS Code extension host's private stdio server can coexist. Unknown
+    # app-servers and terminal executors still block shared-daemon startup.
+    for directory in ('.vscode-server','.vscode-server-insiders'):
+        base=home/directory
+        try:
+            relative=Path(executable).relative_to(base).as_posix()
+            parent=Path(parent_executable).relative_to(base).as_posix()
+        except ValueError: continue
+        if not re.fullmatch(r'extensions/openai\.chatgpt-[A-Za-z0-9.-]+/bin/linux-(?:x86_64|aarch64)/codex',relative): continue
+        if not re.fullmatch(r'bin/[a-f0-9]+/node',parent) or b'--type=extensionHost' not in parent_args: continue
+        remaining=[]; i=1
+        while i<len(args):
+            if args[i] in (b'-c',b'--config') and i+1<len(args): i+=2; continue
+            if args[i]: remaining.append(args[i])
+            i+=1
+        return remaining in ([b'app-server'],[b'app-server',b'--analytics-default-enabled'])
+    return False
+
+root=Path(requested_home).resolve()
+if not root.is_dir() or root.stat().st_uid!=uid: raise ValueError('Codex configuration directory unavailable')
+existing=[r for r in inventory['homes'] if r.get('daemon')]
+if not any(r['home']==str(root) for r in existing):
+    if existing: raise ValueError('Another configuration owns the shared daemon')
+    candidates=[]
+    # A private/legacy executor may still own work in this configuration. Never
+    # start a competing daemon when its task state cannot be verified.
+    for p in Path('/proc').iterdir():
+        if not p.name.isdigit(): continue
+        try:
+            if p.stat().st_uid!=uid: continue
+            exe=os.readlink(p/'exe')
+            if Path(exe).name!='codex': continue
+            env=dict(s.split(b'=',1) for s in (p/'environ').read_bytes().split(b'\0') if b'=' in s)
+            actual=Path(os.fsdecode(env.get(b'CODEX_HOME',os.fsencode(home/'.codex')))).resolve()
+            if actual!=root: continue
+            isolated=False
+            try:
+                parent=Path('/proc')/(p/'stat').read_text().rsplit(') ',1)[1].split()[1]
+                isolated=(parent.stat().st_uid==uid and vscode_app_server(exe,(p/'cmdline').read_bytes().split(b'\0'),
+                          os.readlink(parent/'exe'),(parent/'cmdline').read_bytes().split(b'\0')))
+            except (OSError,ValueError,IndexError): pass
+            if not isolated: raise RuntimeError('An independent Codex executor is already running')
+        except (OSError,ValueError): continue
+    found=shutil.which('codex')
+    if found:candidates.append(Path(found))
+    candidates.extend(home.glob('.nvm/versions/node/*/bin/codex'))
+    candidates.extend([home/'.local/bin/codex',home/'.codex/bin/codex',Path('/usr/local/bin/codex')])
+    packages=root/'packages/app-server-daemon/releases'
+    def version(p):return tuple(int(n) for n in re.match(r'(\d+)\.(\d+)\.(\d+)',p.parent.parent.name).groups())
+    cached=[p for p in packages.glob('*/bin/codex') if re.match(r'\d+\.\d+\.\d+',p.parent.parent.name)]
+    candidates.extend(sorted(cached,key=version,reverse=True))
+    environment=dict(os.environ,CODEX_HOME=str(root))
+    executable=None
+    for candidate in dict.fromkeys(candidates):
+        if not candidate.is_file() or not os.access(candidate,os.X_OK):continue
+        try:
+            check=subprocess.run([str(candidate.resolve()),'app-server','daemon','start','--help'],env=environment,
+                                 stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=12)
+            if not check.returncode:executable=candidate.resolve();break
+        except (OSError,subprocess.TimeoutExpired):continue
+    if not executable: raise ValueError('No installed Codex runtime supports shared daemon startup')
+    subprocess.run([str(executable),'app-server','daemon','start'],env=environment,cwd=root,
+                   stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=45,check=True)
+'''
+
+
+def ensure_daemon(distribution, user, home):
+    """Explicit open/create only. Use native idempotent start, never restart/update."""
+    source = 'requested_home=' + repr(home) + '\n' + _INVENTORY + _START_DAEMON
+    source += '\n' + _INVENTORY + '\nprint(json.dumps(inventory))\n'
+    return read(distribution, source, user, timeout=65, allow_start=True)
 
 
 @contextmanager

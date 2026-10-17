@@ -725,6 +725,33 @@ class ModelTests(unittest.TestCase):
 
 
 class HttpTests(unittest.TestCase):
+    def test_wsl_create_and_connect_require_auth_csrf_and_selected_application(self):
+        from unittest.mock import Mock
+        identifier = 'wsl:' + 'a' * 32
+        target = Mock()
+        target.projects.return_value = [{'key': identifier + '|/fixture', 'cwd': '/fixture'}]
+        target.create_chat.return_value = {'id': THREAD, 'host': identifier}
+        target.connect.return_value = {'ok': True}
+        self.server.bridge.entries = Mock()
+        self.server.bridge.entries.get.return_value = target
+        manager = self.server.desktop_sessions = Mock()
+        body = {'project': identifier + '|independent', 'title': 'Mobile', 'id': str(uuid.uuid4())}
+        path = '/api/sessions?entry=' + identifier
+        self.assertEqual(self.request('POST', path, body)[0], 401)
+        headers = self.login()
+        self.assertEqual(self.request('POST', path, body, {'Cookie': headers['Cookie']})[0], 403)
+        target.create_chat.assert_not_called()
+        self.assertEqual(self.request('GET', '/api/projects?entry=' + identifier, headers=headers)[0], 200)
+        self.assertEqual(self.request('POST', path, body, headers)[0], 200)
+        target.create_chat.assert_called_once_with(body['project'], body['title'], body['id'])
+        self.assertEqual(self.request('POST', '/api/codex/entries', {'action': 'connect', 'id': identifier}, headers)[0], 200)
+        target.connect.assert_called_once_with()
+        manager.require_enabled.side_effect = ValueError('Application disabled')
+        target.create_chat.reset_mock(); target.connect.reset_mock()
+        self.assertEqual(self.request('POST', path, body, headers)[0], 400)
+        self.assertEqual(self.request('POST', '/api/codex/entries', {'action': 'connect', 'id': identifier}, headers)[0], 400)
+        target.create_chat.assert_not_called(); target.connect.assert_not_called()
+
     def test_wsl_app_discovery_requires_login_and_csrf_in_application_management(self):
         from unittest.mock import Mock
         manager = self.server.desktop_sessions = Mock()
