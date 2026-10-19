@@ -14,9 +14,15 @@ from bridge.resources import project_root
 
 
 EMBEDDED_ERRORS = {
+    'network_timeout': '内嵌 Tailscale 在时限内没有连上控制面。'
+                       '请检查电脑网络、代理规则和 Tailscale 状态后重试。',
+    'auth_key_rejected': 'Tailscale 认证密钥无效、已过期或已经使用。'
+                         '请生成新的 auth key，并确认它属于当前账号。',
     'funnel_unavailable': 'Tailscale Funnel 尚未为此网络启用，或当前账号没有 Funnel 权限。'
                          '请先在 Tailscale 管理后台启用 HTTPS / Funnel；私有组网可改用 Serve。',
-    'https_unavailable': 'Tailscale 尚未为当前网络启用 HTTPS 或 MagicDNS，请先在管理后台开启。',
+    'https_unavailable': 'Tailscale 尚未为当前网络启用 HTTPS Certificates。'
+                         '请在 Tailscale 管理后台的 DNS 页面启用 HTTPS Certificates，'
+                         '并确认 MagicDNS 已开启。',
     'authentication_failed': '内嵌 Tailscale 登录失败，请重新授权或检查认证密钥。',
     'listener_failed': '内嵌 Tailscale 无法监听所选 HTTPS 端口，请检查端口或切换为 8443/10000。',
     'invalid_configuration': '内嵌 Tailscale 配置无效，请检查设备名称、端口和运行方式。',
@@ -26,6 +32,16 @@ EMBEDDED_ERRORS = {
     'tailscale_failed': '内嵌 Tailscale 未能连接，请检查网络和管理员策略。',
     'stopped': '内嵌 Tailscale 已停止。',
 }
+
+EMBEDDED_TERMINAL_ERRORS = frozenset({
+    'auth_key_rejected',
+    'funnel_unavailable',
+    'https_unavailable',
+    'authentication_failed',
+    'listener_failed',
+    'invalid_configuration',
+    'invalid_launch',
+})
 
 
 def is_embedded(entry):
@@ -228,6 +244,7 @@ class TailscaleTunnel:
         self.instance_id = instance_id
         self.stopped = threading.Event()
         self.lock = threading.Lock()
+        self.terminate_lock = threading.Lock()
         self.process = self.thread = None
         self.last_status = None
 
@@ -319,6 +336,7 @@ class TailscaleTunnel:
             self._publish_origin()
             self.status('connecting', '正在启动 App 内嵌 Tailscale…')
             process = None
+            watchdog = None
             try:
                 binary = embedded_executable()
                 if not binary:
@@ -348,6 +366,17 @@ class TailscaleTunnel:
                 process.stdin.write(json.dumps(launch, ensure_ascii=False) + '\n')
                 process.stdin.flush()
                 process.stdin.close()
+                startup_timed_out = threading.Event()
+                if launch['authKey']:
+                    def expire_startup():
+                        startup_timed_out.set()
+                        with self.lock:
+                            current = self.process
+                        if current is not None and current.poll() is None:
+                            self._terminate(current)
+                    watchdog = threading.Timer(90, expire_startup)
+                    watchdog.daemon = True
+                    watchdog.start()
                 for line in process.stdout:
                     if self.stopped.is_set():
                         break
@@ -358,7 +387,11 @@ class TailscaleTunnel:
                     if not isinstance(event, dict):
                         continue
                     state = event.get('state')
-                    if state == 'auth_required':
+                    if state in ('starting', 'connecting') and event.get('message'):
+                        self.status('connecting', str(event['message']))
+                    elif state == 'auth_required':
+                        if watchdog:
+                            watchdog.cancel()
                         self.status('authorization', '请完成内嵌 Tailscale 登录授权，完成后会继续连接。',
                                     event.get('authUrl', ''))
                     elif state in ('listening', 'connected'):
@@ -369,6 +402,8 @@ class TailscaleTunnel:
                                 or not self.instance_id
                                 or event_instance != self.instance_id):
                             continue
+                        if watchdog:
+                            watchdog.cancel()
                         self._publish_origin(url, node_id)
                         delay = 3
                         self.status('connected', 'App 内嵌 Tailscale 入口已启动，请检测固定入口并用手机验证。',
@@ -377,13 +412,21 @@ class TailscaleTunnel:
                     elif state in ('failed', 'error'):
                         code = str(event.get('code') or 'tailscale_failed')
                         self.status('failed', EMBEDDED_ERRORS.get(code, EMBEDDED_ERRORS['tailscale_failed']))
+                        if code in EMBEDDED_TERMINAL_ERRORS:
+                            return
                 process.wait()
+                if watchdog:
+                    watchdog.cancel()
+                if startup_timed_out.is_set() and not self.stopped.is_set():
+                    self.status('failed', EMBEDDED_ERRORS['network_timeout'])
             except (OSError, ValueError) as exc:
                 if not self.stopped.is_set():
                     self.status('retrying', str(exc) if isinstance(exc, ValueError)
                                 else '内嵌 Tailscale 已断开，正在重试。')
             finally:
                 self._publish_origin()
+                if watchdog:
+                    watchdog.cancel()
                 if process:
                     self._terminate(process)
                     if process.stdout:
@@ -398,15 +441,15 @@ class TailscaleTunnel:
                 break
             delay = min(60, delay * 2)
 
-    @staticmethod
-    def _terminate(process):
-        if process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=3)
+    def _terminate(self, process):
+        with self.terminate_lock:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=3)
 
     def close(self):
         self.stopped.set()

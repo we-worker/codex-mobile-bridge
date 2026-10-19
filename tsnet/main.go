@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httputil"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -27,7 +28,12 @@ import (
 	"tailscale.com/tsnet"
 )
 
-const version = "1.0.0"
+const (
+	version               = "1.0.1"
+	controlPlaneHost      = "controlplane.tailscale.com"
+	controlProbeTimeout   = 4 * time.Second
+	authKeyStartupTimeout = 75 * time.Second
+)
 
 var authURLPattern = regexp.MustCompile(`https://login\.tailscale\.com/[^\s<>"']+`)
 
@@ -98,12 +104,20 @@ func run(ctx context.Context, output *statusWriter, launch launchConfig, stateDi
 		return fmt.Errorf("resolve state directory: %w", err)
 	}
 
+	output.write(statusRecord{
+		State:   "starting",
+		Message: "正在探测 Tailscale 控制面网络…",
+		Version: version,
+	})
+	controlURL := chooseControlURL(ctx)
+
 	var authMu sync.Mutex
 	currentAuthURL := ""
 	server := &tsnet.Server{
-		Dir:      root,
-		Hostname: hostname,
-		AuthKey:  launch.AuthKey,
+		Dir:        root,
+		Hostname:   hostname,
+		AuthKey:    launch.AuthKey,
+		ControlURL: controlURL,
 		UserLogf: func(format string, args ...any) {
 			match := authURLPattern.FindString(fmt.Sprintf(format, args...))
 			if match == "" || !safeAuthorizationURL(match) {
@@ -125,9 +139,22 @@ func run(ctx context.Context, output *statusWriter, launch launchConfig, stateDi
 	}
 	defer server.Close()
 
-	output.write(statusRecord{State: "starting", Version: version})
-	status, err := server.Up(ctx)
+	output.write(statusRecord{
+		State:   "connecting",
+		Message: "正在连接 Tailscale 控制面并登录内嵌节点…",
+		Version: version,
+	})
+	upCtx := ctx
+	cancel := func() {}
+	if launch.AuthKey != "" {
+		upCtx, cancel = context.WithTimeout(ctx, authKeyStartupTimeout)
+	}
+	defer cancel()
+	status, err := server.Up(upCtx)
 	if err != nil {
+		if errors.Is(upCtx.Err(), context.DeadlineExceeded) {
+			return errors.New("startup timed out")
+		}
 		return fmt.Errorf("join tailnet: %w", err)
 	}
 	if len(status.CertDomains) == 0 {
@@ -236,6 +263,87 @@ func targetPort(authority string) string {
 	return "443"
 }
 
+// chooseControlURL avoids a Tailscale DNS cache trap on networks where the
+// control plane rotates between several anycast addresses and some of those
+// addresses are temporarily unreachable. We still use the system resolver,
+// but probe all addresses returned across a few lookups before handing a
+// reachable endpoint to tsnet.
+func chooseControlURL(ctx context.Context) string {
+	if strings.TrimSpace(os.Getenv("TS_CONTROL_URL")) != "" {
+		return ""
+	}
+	addresses := resolveControlPlane(ctx)
+	if len(addresses) == 0 {
+		return ""
+	}
+	if value := firstReachableControlURL(ctx, addresses, dialControlPlane); value != "" {
+		return value
+	}
+	return ""
+}
+
+func resolveControlPlane(ctx context.Context) []netip.Addr {
+	seen := make(map[netip.Addr]bool)
+	var result []netip.Addr
+	for attempt := 0; attempt < 3 && ctx.Err() == nil; attempt++ {
+		lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+		addresses, err := net.DefaultResolver.LookupNetIP(lookupCtx, "ip4", controlPlaneHost)
+		cancel()
+		if err == nil {
+			for _, address := range addresses {
+				address = address.Unmap()
+				if address.Is4() && !seen[address] {
+					seen[address] = true
+					result = append(result, address)
+				}
+			}
+		}
+		if attempt != 2 {
+			select {
+			case <-ctx.Done():
+				return result
+			case <-time.After(150 * time.Millisecond):
+			}
+		}
+	}
+	return result
+}
+
+func firstReachableControlURL(ctx context.Context, addresses []netip.Addr, dial func(context.Context, string, string) (net.Conn, error)) string {
+	type result struct {
+		url string
+	}
+	results := make(chan result, len(addresses))
+	probeCtx, cancel := context.WithTimeout(ctx, controlProbeTimeout)
+	defer cancel()
+	for _, address := range addresses {
+		address := address
+		go func() {
+			conn, err := dial(probeCtx, "tcp", net.JoinHostPort(address.String(), "443"))
+			if err == nil {
+				_ = conn.Close()
+				select {
+				case results <- result{url: "https://" + address.String()}:
+				case <-probeCtx.Done():
+				}
+			}
+		}()
+	}
+	for range addresses {
+		select {
+		case value := <-results:
+			if value.url != "" {
+				return value.url
+			}
+		case <-probeCtx.Done():
+			return ""
+		}
+	}
+	return ""
+}
+
+var dialControlPlane = (&net.Dialer{Timeout: 3 * time.Second}).DialContext
+
 func verifyLoopback(ctx context.Context, server *tsnet.Server, deviceURL, expectedInstance string) string {
 	client := server.HTTPClient()
 	client.Timeout = 8 * time.Second
@@ -321,6 +429,11 @@ func safeAuthorizationURL(value string) bool {
 func errorCode(err error) string {
 	text := strings.ToLower(err.Error())
 	switch {
+	case strings.Contains(text, "startup timed out"):
+		return "network_timeout"
+	case strings.Contains(text, "invalid auth key") ||
+		(strings.Contains(text, "auth key") && strings.Contains(text, "reject")):
+		return "auth_key_rejected"
 	case strings.Contains(text, "verify gateway instance"):
 		return "verification_failed"
 	case strings.Contains(text, "funnel"):

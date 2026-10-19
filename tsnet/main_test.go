@@ -1,9 +1,13 @@
 package main
 
 import (
+	"context"
 	"errors"
+	"net"
+	"net/netip"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestReadLaunch(t *testing.T) {
@@ -81,16 +85,46 @@ func TestSafeAuthorizationURL(t *testing.T) {
 
 func TestErrorCode(t *testing.T) {
 	for message, want := range map[string]string{
-		"verify gateway instance": "verification_failed",
-		"funnel is unavailable":   "funnel_unavailable",
-		"HTTPS certificate":       "https_unavailable",
-		"authentication required": "authentication_failed",
-		"listen tcp":              "listener_failed",
-		"other failure":           "tailscale_failed",
+		"startup timed out":         "network_timeout",
+		"invalid auth key provided": "auth_key_rejected",
+		"verify gateway instance":   "verification_failed",
+		"funnel is unavailable":     "funnel_unavailable",
+		"HTTPS certificate":         "https_unavailable",
+		"authentication required":   "authentication_failed",
+		"listen tcp":                "listener_failed",
+		"other failure":             "tailscale_failed",
 	} {
 		if got := errorCode(errors.New(message)); got != want {
 			t.Fatalf("errorCode(%q) = %q, want %q", message, got, want)
 		}
+	}
+}
+
+func TestFirstReachableControlURL(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	addresses := []netip.Addr{
+		netip.MustParseAddr("10.0.0.1"),
+		netip.MustParseAddr("10.0.0.2"),
+	}
+	dial := func(_ context.Context, _ string, address string) (net.Conn, error) {
+		if !strings.HasPrefix(address, "10.0.0.2:") {
+			return nil, errors.New("unreachable")
+		}
+		client, server := net.Pipe()
+		_ = server.Close()
+		return client, nil
+	}
+	if got, want := firstReachableControlURL(ctx, addresses, dial),
+		"https://10.0.0.2"; got != want {
+		t.Fatalf("firstReachableControlURL = %q, want %q", got, want)
+	}
+}
+
+func TestChooseControlURLRespectsExplicitControlServer(t *testing.T) {
+	t.Setenv("TS_CONTROL_URL", "https://control.example.test")
+	if got := chooseControlURL(context.Background()); got != "" {
+		t.Fatalf("chooseControlURL overrode explicit server with %q", got)
 	}
 }
 

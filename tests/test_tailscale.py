@@ -216,6 +216,62 @@ class TailscaleTests(unittest.TestCase):
             self.assertEqual(origins[1], ('ts', live, 'n123'))
             self.assertEqual(tunnel.last_status['state'], 'connected')
 
+    def test_embedded_helper_reports_network_timeout_without_staying_in_starting_state(self):
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            process = MagicMock()
+            process.pid = 123
+            process.poll.return_value = 0
+            entry = {**EMBEDDED, 'tailscaleAuthMode': 'authKey'}
+            tunnel = tailscale.TailscaleTunnel(entry, 8787, folder, {'authKey': 'fixture'})
+
+            class Output:
+                def __iter__(self):
+                    yield json.dumps({
+                        'state': 'starting',
+                        'message': '正在探测 Tailscale 控制面网络…',
+                    }) + '\n'
+                    yield json.dumps({'state': 'failed', 'code': 'network_timeout'}) + '\n'
+                    tunnel.stopped.set()
+
+                def close(self):
+                    pass
+
+            process.stdout = Output()
+            with patch.object(tailscale, 'embedded_executable', return_value='/fixture/codex-tsnet'), \
+                 patch.object(tailscale.subprocess, 'Popen', return_value=process):
+                tunnel.start()
+                tunnel.thread.join(3)
+            self.assertFalse(tunnel.thread.is_alive())
+            self.assertEqual(tunnel.last_status['state'], 'failed')
+            self.assertEqual(tunnel.last_status['message'],
+                             tailscale.EMBEDDED_ERRORS['network_timeout'])
+
+    def test_embedded_configuration_error_stops_without_automatic_restart(self):
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            process = MagicMock()
+            process.pid = 123
+            process.poll.return_value = 0
+            entry = {**EMBEDDED, 'tailscaleAuthMode': 'authKey'}
+            tunnel = tailscale.TailscaleTunnel(entry, 8787, folder, {})
+
+            class Output:
+                def __iter__(self):
+                    yield json.dumps({'state': 'failed', 'code': 'https_unavailable'}) + '\n'
+
+                def close(self):
+                    pass
+
+            process.stdout = Output()
+            with patch.object(tailscale, 'embedded_executable', return_value='/fixture/codex-tsnet'), \
+                 patch.object(tailscale.subprocess, 'Popen', return_value=process) as spawn:
+                tunnel.start()
+                tunnel.thread.join(2)
+            self.assertFalse(tunnel.thread.is_alive())
+            spawn.assert_called_once()
+            self.assertEqual(tunnel.last_status['state'], 'failed')
+            self.assertEqual(tunnel.last_status['message'],
+                             tailscale.EMBEDDED_ERRORS['https_unavailable'])
+
     def test_embedded_helper_requires_the_current_gateway_instance(self):
         live = 'https://embedded-bridge.example.ts.net'
         origins = []
