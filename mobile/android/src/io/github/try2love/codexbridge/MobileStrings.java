@@ -117,6 +117,8 @@ values.put("这个模型不支持所选推理强度","This model does not suppor
 values.put("公网地址必须使用 HTTPS；HTTP 仅限局域网","Public addresses require HTTPS. HTTP is only allowed on a local network.");
 values.put("公网地址必须使用 HTTPS；HTTP 仅限局域网或 Tailnet 私有地址","Public addresses require HTTPS. HTTP is only allowed on a LAN or Tailnet private address.");
  values.put("Tailnet 私有 HTTP 地址必须使用端口 8787","Tailnet private HTTP addresses must use port 8787");
+values.put("https://… 或 http://100.x:8787","https://... or http://100.x:8787");
+values.put("粘贴 HTTPS 地址、局域网地址，或同一 Tailnet 内的 http://100.x:8787 地址","Paste an HTTPS address, a LAN address, or http://100.x:8787 from the same tailnet.");
 values.put("网关地址不应包含路径","Gateway addresses must not include a path");
 values.put("请使用电脑网关提供的地址或二维码","Use the address or QR code from your computer\u2019s gateway");
 values.put("请填写完整网关地址，不含账号或参数","Enter a complete gateway address without credentials or query parameters");
@@ -144,7 +146,7 @@ values.put("使用 App 进程内的 Tailscale 节点访问 .ts.net HTTPS 或 100
   values.put("还没有连接的电脑","No computers connected yet");
   values.put("在电脑网关中展开“扫码登录”，然后用上方按钮扫描。","Open “Scan to sign in” on your computer’s gateway, then scan using the button above.");
   values.put("连接 ","Connect ");
-  values.put("外出使用 HTTPS 地址；局域网地址需要连接同一网络。","Use HTTPS when away. Local addresses require the same network.");
+  values.put("公网使用 HTTPS；局域网使用电脑地址；Tailnet 私有入口使用 http://100.x:8787。","Use HTTPS for public access, the computer's LAN address on the same network, or http://100.x:8787 for a Tailnet private entry.");
   values.put("连接电脑","Connect to computer");
   values.put("粘贴电脑网关提供的访问地址","Paste the address shown by your computer’s gateway");
   values.put("继续","Continue");

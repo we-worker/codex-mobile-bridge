@@ -12,7 +12,7 @@
     const label=button.dataset.i18n;if(label){button.removeAttribute('data-i18n');button.replaceChildren(text('span',label));}
     const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');svg.setAttribute('viewBox','0 0 24 24');svg.setAttribute('aria-hidden','true');const path=document.createElementNS(svg.namespaceURI,'path');path.setAttribute('d',paths[button.dataset.tab]);svg.append(path);button.prepend(svg);
   }
-  const descriptions={overview:'查看网关状态与可用访问入口。',accounts:'管理各客户端的连接、账号与工作区。',network:'设置本机、局域网与外网访问入口。',devices:'管理网关登录、受信任设备与访问保护。',notifications:'配置推送通道、通知事件与跳转方式。',advanced:'管理应用偏好、版本与运行诊断。'};
+  const descriptions={overview:'查看网关状态与可用访问入口。',accounts:'管理各客户端的连接、账号与工作区。',network:'设置本机、局域网、Tailnet 私有组网与公网入口。',devices:'管理网关登录、受信任设备与访问保护。',notifications:'配置推送通道、通知事件与跳转方式。',advanced:'管理应用偏好、版本与运行诊断。'};
   const description=text('p',descriptions.overview,'module-description');document.querySelector('main > header').after(description);
   module('devices').append($('auth-mode').closest('article'));
   module('network').append($('cloudflare-setup'));

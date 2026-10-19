@@ -173,6 +173,43 @@ test('repeated Tailscale startup text is rendered once in the card and summary',
   assert.equal(summary.textContent.split(message).length-1,1);
 });
 
+test('private Tailnet endpoints are distinct from public HTTPS and LAN adapters',async()=>{
+  const {interfaces}=require('../desktop/features/connections/network.cjs');
+  assert.deepEqual(interfaces({
+    Ethernet:[{family:'IPv4',internal:false,address:'192.168.1.7'}],
+    Tailscale:[{family:'IPv4',internal:false,address:'100.67.28.2'}],
+    Loopback:[{family:'IPv4',internal:true,address:'127.0.0.1'}],
+  }),[{name:'Ethernet',address:'192.168.1.7'}]);
+  const ui=await renderer();
+  const row={id:'ts',name:'Remote Tailscale',enabled:true,accessMode:'tailscale',
+    publicUrl:'https://codex-mobile-bridge-remote.taila8c1cb.ts.net',
+    tailscaleMode:'serve',tailscalePort:443,tailscaleNodeId:'remote-node',
+    tailscaleRuntime:'embedded',tailscaleHostname:'codex-mobile-bridge-remote',
+    tailscaleAuthMode:'interactive'};
+  const tailnetHttps='https://codex-mobile-bridge-remote.taila8c1cb.ts.net/';
+  const privateHttp='http://100.111.190.27:8787/';
+  const publicHttps='https://bridge.example.com/';
+  ui.value.runtime.running=true;
+  ui.value.preferences.connections=[row];
+  ui.value.urls=[tailnetHttps,privateHttp,publicHttps];
+  ui.value.externalStatus={ts:{state:'connected',urls:[tailnetHttps.slice(0,-1),privateHttp.slice(0,-1)]}};
+  ui.value.tailnetEndpoints=[
+    {url:tailnetHttps,kind:'tailnet-https',mode:'serve',connectionId:'ts'},
+    {url:privateHttp,kind:'private-http',mode:'serve',connectionId:'ts'},
+  ];
+  await ui.poll();
+  const descendants=node=>[node,...(node.children||[]).flatMap(descendants)];
+  const labels=descendants(ui.nodes.get('addresses')).filter(node=>node.dataset?.addressKind);
+  assert.deepEqual(labels.map(node=>[node.textContent,node.dataset.addressKind]),[
+    ['Tailnet HTTPS（仅私有网络）','tailnet-https'],
+    ['Tailnet 私有入口','private-http'],
+    ['公网 HTTPS','public'],
+  ]);
+  assert.match(ui.nodes.get('address-visibility').textContent,/不会发布到公网/);
+  assert.match(descendants(ui.nodes.get('connections')).map(node=>node.textContent).join(' '),/100\.111\.190\.27:8787/);
+  assert.match(ui.nodes.get('connections').children[0].children[0].children[0].children[0].textContent,/Tailnet · 私有组网/);
+});
+
 test('existing tunnel needs only an HTTPS address and keeps NAS upstream in the advanced location',async()=>{
   const descendants=node=>[node,...(node.children||[]).flatMap(descendants)];
   for(const language of ['zh-CN','en']){

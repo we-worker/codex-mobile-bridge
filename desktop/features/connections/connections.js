@@ -3,7 +3,11 @@ const connectionSecretDraft=new Map();
 const connectionSetupState=new Map();
 const connectionExpanded=new Map();
 const connectionAdvancedExpanded=new Map();
-function connectionLabel(mode){return t({quick:'临时 HTTPS · Cloudflare',cloudflare:'固定域名 · Cloudflare Tunnel',server:'固定域名 · 自有服务器 + SSH',external:'已有穿透 / 反向代理',nas:'已有穿透 / 反向代理',tailscale:'固定 HTTPS · Tailscale'}[mode]);}
+function connectionLabel(row){
+  const mode=typeof row==='string'?row:row.accessMode;
+  if(mode==='tailscale')return t(typeof row==='object'&&row.tailscaleMode==='serve'?'Tailnet · 私有组网':'Tailnet · 公网 Funnel');
+  return t({quick:'临时 HTTPS · Cloudflare',cloudflare:'固定域名 · Cloudflare Tunnel',server:'固定域名 · 自有服务器 + SSH',external:'已有穿透 / 反向代理',nas:'已有穿透 / 反向代理'}[mode]);
+}
 function normalizeExternalUrl(value){const trimmed=value.trim();return /^[^\s/:?#@]+(?::\d+)?$/.test(trimmed)?'https://'+trimmed:trimmed;}
 function connectionCheckIdentity(row){return JSON.stringify([snapshot?.dataDir,snapshot?.runtime.instanceId,snapshot?.runtime.running,row]);}
 function connectionSummary(row){return [row.name,row.publicUrl||'',t(row.enabled?(connectionSetupState.get(row.id)||snapshot?.externalStatus?.[row.id]?.message||'已启用'):'未启用')].filter(Boolean).join(' · ');}
@@ -31,12 +35,12 @@ function renderConnections(){
     const advanced=card.querySelector?.('details.connection-advanced');if(advanced)connectionAdvancedExpanded.set(card.dataset.connectionId,advanced.open);
   }
   $('connections').replaceChildren();
-  if(!connectionDraft.length){const empty=document.createElement('p');empty.className='hint';empty.textContent=t('尚未添加外网连接。局域网可独立使用。');$('connections').append(empty);}
+  if(!connectionDraft.length){const empty=document.createElement('p');empty.className='hint';empty.textContent=t('尚未添加 Tailnet 或其他远程连接。局域网可独立使用。');$('connections').append(empty);}
   for(const row of connectionDraft){
     const container=document.createElement('details');container.className='connection-card';container.dataset.connectionId=row.id;container.open=connectionExpanded.get(row.id)===true;
     const card=document.createElement('div');card.className='connection-body';
     const head=document.createElement('summary');head.className='section-head';
-    const heading=document.createElement('h3');heading.textContent=connectionLabel(row.accessMode);
+    const heading=document.createElement('h3');heading.textContent=connectionLabel(row);
     const summary=document.createElement('span');summary.className='connection-summary';summary.textContent=connectionSummary(row);
     const title=document.createElement('div');title.className='connection-title';
     const guideLink=document.createElement('a');setupGuide(guideLink,row.accessMode);title.append(heading,summary,guideLink);
@@ -122,6 +126,16 @@ function renderConnections(){
       }
       note(row.tailscaleMode==='serve'?(row.tailscaleRuntime==='embedded'?'私有组网会提供 Tailnet HTTPS 和 http://100.x:8787 入口，均只对同一 Tailnet 可见，不会发布 Funnel。手机可使用 App 内嵌 Tailscale 自动接入。手机直连时请使用本次检测到的 100.x:8787 地址。':'系统 Tailscale 只登记当前设备的 Tailnet HTTPS 入口。若还需要 100.x 私有 HTTP 入口，请将官方 Serve 的上游指到本机网关，或改用 App 内嵌 Tailscale。'):'手机和普通浏览器无需安装 Tailscale；需开启网关登录验证。首次使用可能需要授权 HTTPS 和 Funnel。');
       if(row.tailscaleRuntime==='embedded')note('内嵌节点在 App 退出网关时停止。首次交互登录会生成一次性 Tailscale 官方登录地址；无桌面主机建议使用认证密钥。');
+      const live=snapshot?.externalStatus?.[row.id];
+      const liveUrls=live?.state==='connected'&&Array.isArray(live.urls)?live.urls:[];
+      const privateUrl=liveUrls.find(value=>/^http:\/\/100\.(?:6[4-9]|[7-9]\d|1[01]\d|12[0-7])\./i.test(value));
+      const tailnetHttps=liveUrls.find(value=>/^https:\/\/[^/]+\.ts\.net(?::(?:443|8443|10000))?\/?$/i.test(value));
+      if(privateUrl||tailnetHttps){
+        const endpoint=document.createElement('p');endpoint.className='hint';
+        endpoint.dataset.tailnetEndpoints='true';
+        endpoint.textContent=[tailnetHttps?t('Tailnet HTTPS（仅私有网络）')+' · '+tailnetHttps:'',privateUrl?t('Tailnet 私有入口')+' · '+privateUrl:''].filter(Boolean).join('\n');
+        card.append(endpoint);
+      }
       const address=field('publicUrl','固定访问地址','text','检测后自动读取');address.readOnly=true;address.onfocus=null;address.onblur=null;
       note('保留 Tailscale 设备与名称时，重启后地址不变。国内访问速度取决于实际线路，请用蜂窝网络验证。');
       if(row.tailscaleMode!=='serve')note('首次启用后，公网 DNS 生效可能需要最多 10 分钟。');

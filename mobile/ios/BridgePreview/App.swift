@@ -408,7 +408,7 @@ final class BridgeController: UIViewController, WKNavigationDelegate, WKUIDelega
                 updateComputerNotifications(computerSnapshots[address], address: address)
             }
         }
-        let foot = label(MobileStrings.text("外出使用 HTTPS 地址；局域网地址需要连接同一网络。"), size: 13, secondary: true); foot.textAlignment = .center; content.addArrangedSubview(foot)
+        let foot = label(MobileStrings.text("公网使用 HTTPS；局域网使用电脑地址；系统 Tailnet 上的私有入口使用 http://100.x:8787。"), size: 13, secondary: true); foot.textAlignment = .center; content.addArrangedSubview(foot)
         checkComputers(); sync()
     }
     private var recentComputers: [String] {
@@ -476,8 +476,8 @@ final class BridgeController: UIViewController, WKNavigationDelegate, WKUIDelega
         computerTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: false) { [weak self] _ in self?.checkComputers() }
     }
     private func manualAddress() {
-        let a = UIAlertController(title: MobileStrings.text("连接电脑"), message: MobileStrings.text("粘贴电脑网关提供的访问地址"), preferredStyle: .alert)
-        a.addTextField { field in field.text = "https://"; field.keyboardType = .URL; field.autocapitalizationType = .none; field.autocorrectionType = .no; field.placeholder = "https://codex.try2love.com" }
+        let a = UIAlertController(title: MobileStrings.text("连接电脑"), message: MobileStrings.text("粘贴 HTTPS 地址、局域网地址，或系统 Tailnet 内的 http://100.x:8787 地址"), preferredStyle: .alert)
+        a.addTextField { field in field.keyboardType = .URL; field.autocapitalizationType = .none; field.autocorrectionType = .no; field.placeholder = "https://… 或 http://100.x:8787" }
         a.addAction(UIAlertAction(title: MobileStrings.text("取消"), style: .cancel)); a.addAction(UIAlertAction(title: MobileStrings.text("继续"), style: .default) { [weak self, weak a] _ in self?.choose(a?.textFields?.first?.text ?? "") }); present(a, animated: true)
     }
     func choose(_ value: String) {
@@ -1376,9 +1376,10 @@ enum MobileStrings {
         "还没有连接的电脑": "No computers connected yet",
         "在电脑网关中展开“扫码登录”，然后用上方按钮扫描。": "Open “Scan to sign in” on your computer’s gateway, then scan using the button above.",
         "连接 ": "Connect ",
-        "外出使用 HTTPS 地址；局域网地址需要连接同一网络。": "Use HTTPS when away. Local addresses require the same network.",
+        "公网使用 HTTPS；局域网使用电脑地址；系统 Tailnet 上的私有入口使用 http://100.x:8787。": "Use HTTPS for public access, the computer's LAN address on the same network, or http://100.x:8787 through system Tailscale.",
         "连接电脑": "Connect to computer",
-        "粘贴电脑网关提供的访问地址": "Paste the address shown by your computer’s gateway",
+        "粘贴 HTTPS 地址、局域网地址，或系统 Tailnet 内的 http://100.x:8787 地址": "Paste an HTTPS address, a LAN address, or http://100.x:8787 through system Tailscale.",
+        "https://… 或 http://100.x:8787": "https://... or http://100.x:8787",
         "继续": "Continue",
         "取消": "Cancel",
         "连接到这台电脑？": "Connect to this computer?",

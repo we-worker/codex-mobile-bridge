@@ -1,5 +1,6 @@
 """Local desktop controller. No management API is exposed to the network."""
 import http.client
+import ipaddress
 import json
 import os
 import secrets
@@ -10,6 +11,7 @@ import sys
 import time
 import zipfile
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from bridge.resources import project_root
 
@@ -22,6 +24,31 @@ from bridge.clients.codex.catalog import Catalog
 import bridge.features.network.access as access
 import bridge.features.network.addresses as network
 from bridge.api.validation import FieldError, at_field
+
+
+TAILNET_NETWORK = ipaddress.ip_network('100.64.0.0/10')
+
+
+def tailnet_ipv4_host(host):
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return address.version == 4 and address in TAILNET_NETWORK
+
+
+def tailnet_endpoint_kind(value):
+    try:
+        parsed = urlsplit(value)
+        host = parsed.hostname or ''
+        port = parsed.port
+    except ValueError:
+        return ''
+    if parsed.scheme == 'http' and port == 8787 and tailnet_ipv4_host(host):
+        return 'private-http'
+    if parsed.scheme == 'https' and host.rstrip('.').endswith('.ts.net'):
+        return 'tailnet-https'
+    return ''
 
 
 class Desktop:
@@ -157,7 +184,11 @@ class Desktop:
         hosts = (addresses() if selected is None else ['127.0.0.1'] + selected) if preferences['lan'] else ['127.0.0.1']
         if not preferences['localAccess']:
             hosts = [host for host in hosts if host not in ('127.0.0.1', 'localhost')]
-        urls = [f'http://{host}:{preferences["port"]}/' for host in hosts if host != 'localhost']
+        # Tailscale may install a system wt0 interface. Its address is not a
+        # LAN binding and must not be confused with the exact private endpoint
+        # owned and verified by an embedded tsnet sidecar.
+        urls = [f'http://{host}:{preferences["port"]}/' for host in hosts
+                if host != 'localhost' and not tailnet_ipv4_host(host)]
         quick = read_json(self.data_dir/'cloudflare-status.json', {})
         if not runtime['running'] or quick.get('pid') != runtime.get('pid'):
             quick = {}
@@ -185,8 +216,9 @@ class Desktop:
             if runtime['running'] and status.get('pid') == runtime.get('pid'):
                 external[entry['id']] = status
         dynamic_fixed = []
+        tailnet_endpoints = []
         for entry in preferences['connections']:
-            if entry['accessMode'] != 'tailscale':
+            if entry['accessMode'] != 'tailscale' or not entry.get('enabled'):
                 continue
             status = external.get(entry['id'], {})
             if status.get('state') != 'connected':
@@ -195,7 +227,17 @@ class Desktop:
             endpoints = [value for value in endpoints if isinstance(value, str) and value]
             if not endpoints and isinstance(status.get('url'), str) and status['url']:
                 endpoints = [status['url']]
-            dynamic_fixed.extend(value.rstrip('/') + '/' for value in endpoints)
+            for value in endpoints:
+                endpoint = value.rstrip('/') + '/'
+                dynamic_fixed.append(endpoint)
+                kind = tailnet_endpoint_kind(value)
+                if kind:
+                    tailnet_endpoints.append({
+                        'url': endpoint,
+                        'kind': kind,
+                        'mode': status.get('mode') or entry.get('tailscaleMode', 'funnel'),
+                        'connectionId': entry['id'],
+                    })
         urls = list(dict.fromkeys(dynamic_fixed + urls))
         executable = preferences['cloudflared']
         cloudflared = {'path': executable, 'available': bool(executable and Path(executable).is_file() and os.access(executable, os.X_OK))}
@@ -210,7 +252,8 @@ class Desktop:
                 'addressNotificationStatus': read_json(self.data_dir/'address-notifications.json', {}),
                 'notificationStatus': read_json(self.data_dir/'notification-status.json', {}),
                 'dataDir': str(self.data_dir), 'credentialsAvailable': (self.data_dir/'首次登录.txt').exists(),
-                'runtime': runtime, 'urls': urls, 'externalStatus': external, 'cloudflared': cloudflared, 'quickTunnel': quick}
+                'runtime': runtime, 'urls': urls, 'tailnetEndpoints': tailnet_endpoints,
+                'externalStatus': external, 'cloudflared': cloudflared, 'quickTunnel': quick}
 
     def save(self, value):
         with session_file_lock(self.config_path):

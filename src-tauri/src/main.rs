@@ -46,7 +46,10 @@ fn decorate(app: &tauri::AppHandle, mut value: Value) -> Value {
     if let Ok(interfaces) = if_addrs::get_if_addrs() {
         for interface in interfaces {
             if let std::net::IpAddr::V4(address) = interface.ip() {
+                let octets = address.octets();
+                let is_tailnet = octets[0] == 100 && (64..=127).contains(&octets[1]);
                 if !address.is_loopback()
+                    && !is_tailnet
                     && !rows
                         .iter()
                         .any(|r: &Value| r["address"] == address.to_string())

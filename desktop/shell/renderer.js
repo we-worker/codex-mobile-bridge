@@ -136,12 +136,21 @@ function render(value,watchRevision=watchPanel.revision){
   $('notification-readiness').textContent=!notificationsEnabled?t('尚未开启手机通知：填写并保存后，先发送测试通知。'):!running?t('网关尚未启动：可以先测试通知接收，聊天提醒需要启动网关。'):!value.runtime.supportsNotifications?t('当前网关版本不支持聊天提醒，请在首页停止后重新启动网关，再刷新手机网页。'):t('网关已就绪：在手机聊天中点击“提醒”，勾选“开启聊天提醒”并保存。');
   $('data-dir').textContent=value.dataDir;
   $('addresses').replaceChildren();
+  const tailnetEndpoints=new Map((value.tailnetEndpoints||[]).map(row=>[
+    String(row.url||'').replace(/\/+$/,''),row
+  ]));
+  const hasPrivateTailnet=[...tailnetEndpoints.values()].some(row=>row.kind==='private-http');
+  $('address-visibility').textContent=t(hasPrivateTailnet
+    ?'Tailnet 私有入口只在同一 Tailnet 内可达，不会发布到公网。'
+    :'局域网地址适用于同一网络；Funnel、Cloudflare 等公网入口使用 HTTPS。');
   for(const url of value.urls){
     const card=document.createElement('div');card.className='address';
     const text=document.createElement('div'),label=document.createElement('small'),address=document.createElement('strong');
-    const fixed=(value.preferences.connections||[]).some(c=>c.enabled&&url===c.publicUrl+'/');
-    const parsed=new URL(url),tailnetIPv4=isTailnetIPv4(parsed.hostname);
-    const kind=fixed?'固定 HTTPS · 请检测入口':parsed.hostname.endsWith('.ts.net')?'Tailnet HTTPS':tailnetIPv4?'Tailnet 私有入口':url.startsWith('https:')?'临时外网 HTTPS':parsed.hostname==='127.0.0.1'?'此电脑':'局域网';
+    const parsed=new URL(url),normalized=url.replace(/\/+$/,''),endpoint=tailnetEndpoints.get(normalized);
+    const fixed=!endpoint&&(value.preferences.connections||[]).some(c=>c.enabled&&url===c.publicUrl+'/');
+    const kind=endpoint?.kind==='private-http'?'Tailnet 私有入口':endpoint?.kind==='tailnet-https'?'Tailnet HTTPS（仅私有网络）':fixed?'固定 HTTPS · 请检测入口':parsed.hostname.endsWith('.ts.net')?'Tailnet HTTPS（仅私有网络）':isTailnetIPv4(parsed.hostname)?'Tailnet 私有入口':url.startsWith('https:')?'公网 HTTPS':parsed.hostname==='127.0.0.1'?'此电脑':'局域网';
+    label.dataset.addressKind=endpoint?.kind||(fixed?'fixed':url.startsWith('https:')?'public':'lan');
+    address.dataset.addressUrl=url;
     label.textContent=t(kind)+(running?'':t(' · 网关未启动'));address.textContent=url;text.append(label,address);card.append(text);
     for(const [name,action] of [[t('复制'),()=>api.copy(url)],[t('打开'),()=>api.open(url)]]){
       const button=document.createElement('button');button.textContent=name;button.onclick=()=>action().catch(e=>feedback(e.message,true));card.append(button);

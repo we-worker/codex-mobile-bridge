@@ -130,7 +130,7 @@ public final class MainActivity extends Activity {
    LinearLayout.LayoutParams renameSize=new LinearLayout.LayoutParams(0,-2,1);renameSize.setMarginEnd(dp(8));actions.addView(rename,renameSize);actions.addView(remove,new LinearLayout.LayoutParams(0,-2,1));add(actions,computer,0);
    computer.setOnClickListener(v->connect(entry+"/"));computer.setContentDescription(L("连接 ")+computerName(entry));add(computer,content,12);
   }
-  TextView foot=text(L("外出使用 HTTPS 地址；局域网地址需要连接同一网络。"),13);foot.setTextColor(0xff777b80);foot.setGravity(Gravity.CENTER);add(foot,content,0);renderComputerNotifications();checkComputers();
+  TextView foot=text(L("公网使用 HTTPS；局域网使用电脑地址；Tailnet 私有入口使用 http://100.x:8787。"),13);foot.setTextColor(0xff777b80);foot.setGravity(Gravity.CENTER);add(foot,content,0);renderComputerNotifications();checkComputers();
  }
  List<String> recentComputers(){List<String> entries=new ArrayList<>(saved());entries.sort((a,b)->{int order=Long.compare(prefs.getLong("last-opened:"+b,0),prefs.getLong("last-opened:"+a,0));return order!=0?order:a.compareTo(b);});return entries;}
  String computerName(String address){return prefs.getString("name:"+address,Uri.parse(address).getHost());}
@@ -162,7 +162,7 @@ public final class MainActivity extends Activity {
   }
   homeHandler.postDelayed(homeRefresh,30000);
  }
- void manualAddress(){resetExitGesture();EditText field=new EditText(this);field.setSingleLine();field.setInputType(17);field.setText("https://");field.setSelection(field.length());field.setPadding(dp(24),dp(16),dp(24),dp(16));new AlertDialog.Builder(this).setTitle(L("连接电脑")).setMessage(L("粘贴电脑网关提供的访问地址")).setView(field).setPositiveButton(L("继续"),(d,w)->choose(field.getText().toString())).setNegativeButton(L("取消"),null).show();}
+void manualAddress(){resetExitGesture();EditText field=new EditText(this);field.setSingleLine();field.setInputType(17);field.setHint(L("https://… 或 http://100.x:8787"));field.setPadding(dp(24),dp(16),dp(24),dp(16));new AlertDialog.Builder(this).setTitle(L("连接电脑")).setMessage(L("粘贴 HTTPS 地址、局域网地址，或同一 Tailnet 内的 http://100.x:8787 地址")).setView(field).setPositiveButton(L("继续"),(d,w)->choose(field.getText().toString())).setNegativeButton(L("取消"),null).show();}
  boolean htmlPreviewShell(String target){return target!=null&&target.equals(origin+"/html-preview-shell");}
  void choose(String value){resetExitGesture();try{String target=GatewayURL.connection(value);String base=GatewayURL.origin(value);new AlertDialog.Builder(this).setTitle(L("连接到这台电脑？")).setMessage(base+L("\n请确认这是你自己的网关。")).setPositiveButton(L("连接"),(d,w)->connect(target)).setNegativeButton(L("取消"),null).show();}catch(Exception e){message(e.getMessage());}}
   void connect(String url){routeAttempted=false;try{String base=GatewayURL.targetBase(url);clear();header(true);status.setVisibility(View.VISIBLE);origin=base;Set<String> saved=saved();saved.add(origin);prefs.edit().putStringSet("origins",saved).putString("active",origin).putLong("last-opened:"+origin,System.currentTimeMillis()).apply();

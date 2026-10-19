@@ -318,3 +318,39 @@ class CloudflareSetupTests(unittest.TestCase):
             self.assertIn('https://old.trycloudflare.com', desktop.snapshot()['urls'])
             write_json(data/'cloudflare-status.json', {'pid': 100, 'state': 'reconnecting', 'message': ''})
             self.assertNotIn('https://old.trycloudflare.com', desktop.snapshot()['urls'])
+
+    def test_private_tailnet_entry_is_explicit_and_system_tailnet_is_not_a_lan_binding(self):
+        from bridge.features.notifications.channels import write_json
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as directory:
+            data = Path(directory)
+            desktop = Desktop(data)
+            connection = {
+                'id': 'remote', 'name': 'Remote Tailscale', 'enabled': True,
+                'accessMode': 'tailscale', 'tailscaleMode': 'serve',
+                'tailscaleRuntime': 'embedded', 'tailscalePort': 443,
+                'tailscaleHostname': 'codex-mobile-bridge-remote',
+                'tailscaleAuthMode': 'interactive', 'publicUrl': '', 'tailscaleNodeId': '',
+            }
+            write_json(data/'desktop.json', {'lan': True, 'connections': [connection]})
+            desktop.status = lambda: {
+                'running': True, 'pid': 100, 'instanceId': 'gateway-instance',
+                'portOccupied': False, 'supportsNotifications': True,
+            }
+            private = 'http://100.111.190.27:8787'
+            public = 'https://codex-mobile-bridge-remote.taila8c1cb.ts.net'
+            write_json(data/'ssh-status-remote.json', {
+                'pid': 100, 'state': 'connected', 'mode': 'serve',
+                'url': public, 'urls': [public, private],
+                'tailnetUrl': private, 'tailnetIps': ['100.111.190.27'],
+                'nodeId': 'remote-node', 'instanceId': 'gateway-instance',
+            })
+            with patch('run.addresses', return_value=[
+                    '127.0.0.1', '192.168.1.7', '100.67.28.2', 'localhost']):
+                snapshot = desktop.snapshot()
+            self.assertIn(public+'/', snapshot['urls'])
+            self.assertIn(private+'/', snapshot['urls'])
+            self.assertNotIn('http://100.67.28.2:8787/', snapshot['urls'])
+            self.assertEqual(snapshot['tailnetEndpoints'], [
+                {'url': public+'/', 'kind': 'tailnet-https', 'mode': 'serve', 'connectionId': 'remote'},
+                {'url': private+'/', 'kind': 'private-http', 'mode': 'serve', 'connectionId': 'remote'},
+            ])
