@@ -36,7 +36,7 @@ npm run build:tauri             # Windows NSIS 安装程序
 
 源码开发可设置 `CMB_PYTHON` 指定解释器；已有 `.tmp/tauri-venv` 时开发入口优先使用它。`CMB_DATA_DIR` 指定独立数据目录，同时隔离 WebView2 页面缓存。构建配置位于 `src-tauri/tauri.conf.json`，依赖由 `src-tauri/Cargo.lock` 锁定。默认仅构建一个安装程序，不把重复的便携包和安装包合并上传。
 
-GitHub Actions 的 `Tauri Windows build` 独立编译、测试并上传安装程序，原 `Desktop builds` 继续提供 Electron 对照构建。Tauri 流程只上传构建产物，不创建 Release、不自动安装或发布。
+GitHub Actions 的 `Tauri Windows build` 独立编译、测试并上传安装程序。原 `Desktop builds` 不再由 push 或手动入口触发，只保留为现有签名发布流程引用的 Electron 兼容构建；日常开发与 Windows 交付使用 Tauri 流程。Tauri 流程只上传构建产物，不创建 Release、不自动安装或发布。
 
 ## 验证和体积
 

@@ -189,7 +189,7 @@ v2.0.0 在线查询订阅周期日期，显示剩余时间和具体日期；接�
 
 ### 使用桌面 App
 
-下载方式见上方快速开始。开发构建可从 GitHub Actions → **Desktop builds** 获取，也可按下文在本机构建。
+下载方式见上方快速开始。开发构建可从 GitHub Actions → **Tauri Windows build** 获取，也可按下文在本机构建。
 
 打开后可设置：
 

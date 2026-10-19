@@ -1,14 +1,12 @@
 name: Desktop builds
+# Legacy Electron builds are reusable only by the signed release workflow.
+# Regular pushes and manual runs use Tauri Windows build instead.
 on:
   workflow_call:
     inputs:
       source_ref:
         type: string
         default: ''
-  workflow_dispatch:
-  push:
-    branches: [main, feature/desktop-ntfy, codex/windows-desktop-app, integration/desktop-cross-platform, codex/ubuntu-support]
-    paths: ['desktop/**', 'desktop.py', 'bridge/**', 'web/**', 'run.py', 'scripts/**', 'tests/**', 'package*.json', 'requirements-desktop.txt', '.github/workflows/desktop.yml']
 permissions:
   contents: read
 jobs:
