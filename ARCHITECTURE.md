@@ -127,6 +127,7 @@ Windows `desktop/shell/tray.cjs` 管理托盘状态、手机地址和两种退�
 | `bridge/features/auth/auth.py` / `httpd.py` | 登录、同源校验、HTTP、SSE、轮询 |
 | `bridge/features/workspace/files.py` | 引用文件的范围校验与解析 |
 | `bridge/features/network/tunnel.py` | 临时 HTTPS 隧道生命周期 |
+| `tsnet/` | 桌面与 Android App 共用的用户态 `tsnet` 核心；桌面 sidecar 同时提供私有网关上游代理 |
 | `web/` | 手机浏览器界面 |
 | `tests/` | 合成数据与模拟 App IPC 回归 |
 
@@ -135,6 +136,12 @@ Windows `desktop/shell/tray.cjs` 管理托盘状态、手机地址和两种退�
 桌面 `connections` 保存可独立启用的 Quick Tunnel、自有服务器 SSH 和 NAS 配置，局域网监听由 `lan` 控制，`lanAddresses: null` 保持所有 IPv4 网卡监听，数组仅绑定选中地址，空数组只保留回环。各监听器共享同一个认证、配对、通知和会话状态。`localAccess: false` 关闭本机网页入口，回环仅允许无会话信息的私有 `/api/health` 检查和保留 Host 的已授权 HTTPS 隧道；停机关闭全部监听器。桌面用系统网卡名称和 IPv4 地址呈现选择，地址不可绑定时失败，不回退至全网卡。旧单入口配置在读取时转换，保存前不改写文件。`bridge/features/network/access.py` 验证地址，生成不含凭据的 Caddy/Nginx Compose 部署包；所有启用的固定 URL 自动加入允许源，第一个启用的固定 URL 优先用于通知链接（显式 clickBase 仍优先）。停用或删除配置时移除对应托管固定源，保留其他手动 HTTPS 源。
 
 `accessMode: external` 只保存用户自管穿透或同机 HTTPS 反代的 `publicUrl`，要求可信 HTTPS 根地址，可包含端口；上游由用户指向电脑网关的实际回环端口。该模式不管理 SSH、frpc 或反代进程，即使 `lan: false`、`localAccess: false` 仍保留受公开 Host 约束的回环上游。跨设备 NAS 继续使用 `nas`，要求启用 LAN 并填写端口匹配、非回环的 `proxyUpstream`。固定入口和扫码前的探测不发送凭据、不跟随重定向、不跳过证书验证；仅核对本次网关实例，不用 `instanceId` 迁移或授予登录凭据。
+
+Tailscale 连接可继续复用系统客户端，也可选择 App 内嵌。内嵌模式由独立 Go sidecar 使用 `tsnet.Server` 建立用户态节点，不要求 `tailscaled`，不创建系统 TUN/VPN 接口，也不修改系统路由或已有 Serve/Funnel 规则。sidecar 在 Tailnet 的 HTTPS/Funnel listener 上反向代理到 Python 网关的私有回环端口；认证密钥只经系统凭据存储和私密 stdin 传递，不进入 argv、普通配置、状态文件或日志。
+
+内嵌 sidecar 必须先从自身 `tsnet.HTTPClient` 访问公开 `.ts.net` 入口的 `/api/auth`，并匹配当前网关 `instanceId`，才返回 `listening` 状态。`run.py` 只动态加入该节点返回的精确 Host/Origin；不会加入通配 `*.ts.net`，也不会在启动时沿用上次保存的内嵌地址。停止、重连、节点身份变化或验证失败时立即撤回动态来源。状态文件同时绑定当前网关 PID 与 instanceId，防止上一次运行被展示为本次已连接。
+
+Android App 将同一 `tsnet` 核心经 `gomobile` 打包为 `libgojni.so`，在 App 进程内启动独立节点和仅绑定回环地址的 HTTP CONNECT 代理。Android 10 及以上并通过 AndroidX WebView 的进程内代理能力，把 HTTPS `*.ts.net` 请求交给该节点；其他 WebView 和后台 HTTP 流量保持直连。代理端再次校验目标只能是受支持端口上的 `*.ts.net`，应用不声明或创建 `VpnService`，不接管手机路由。预授权密钥由 Android Keystore 加密保存；iOS 尚未实现内嵌 `tsnet`。
 
 `bridge/features/network/ssh_tunnel.py` 管理独立 OpenSSH 子进程，复用已有 SSH 目标和身份，以 `-R 127.0.0.1:服务器端口:127.0.0.1:电脑端口` 回程。启用 BatchMode、StrictHostKeyChecking、ExitOnForwardFailure 与保活，不复用 ControlMaster。失败后台退避重连，不阻塞 LAN 服务。各 SSH 配置独立保存状态与日志，状态关联当前网关 PID；服务器 GatewayPorts 应使用 no/clientspecified，不能强制公网绑定。
 

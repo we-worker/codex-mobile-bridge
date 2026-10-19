@@ -30,7 +30,7 @@ public final class MainActivity extends Activity {
  private FrameLayout screen;private DownloadCard downloadCard;private ArtifactDownload.Task downloadTask,choosingDownload;private UpdateInstallSession updateSession;private boolean savingDownload,openingDownload,restoringUpdate,autoInstallUpdate;
  private String choosingUpdateFile;private Bundle pendingSaveResult;
  private GatewayUpdate preparingUpdate;
- private ServiceConnection monitor;private ValueCallback<Uri[]> files;private WebView fileView;private int fileGeneration;private int generation;private boolean authLossAttempted;
+ private ServiceConnection monitor;private ValueCallback<Uri[]> files;private WebView fileView;private int fileGeneration;private int generation;private boolean authLossAttempted;private TailnetController tailnet;
  String L(String value){return MobileStrings.text(this,value);}
  int dp(int n){return (int)(getResources().getDisplayMetrics().density*n);}
  TextView text(String value,int size){TextView t=new TextView(this);t.setText(value);t.setTextSize(size);t.setTextColor(0xff202124);t.setPadding(0,dp(5),0,dp(5));return t;}
@@ -105,7 +105,7 @@ public final class MainActivity extends Activity {
 
  void message(String value){resetExitGesture();new AlertDialog.Builder(this).setMessage(L(value)).setPositiveButton(L("好"),null).show();}
  Set<String> saved(){return new LinkedHashSet<>(prefs.getStringSet("origins",new HashSet<>()));}
- @Override public void onCreate(Bundle state){super.onCreate(state);prefs=getSharedPreferences("bridge",0);for(String address:prefs.getStringSet("origins",java.util.Collections.emptySet()))EventClient.setName(address,prefs.getString("cookieName:"+address,null));root=new LinearLayout(this);root.setOrientation(1);root.setBackgroundColor(0xfff5f5f3);screen=new FrameLayout(this);screen.addView(root,new FrameLayout.LayoutParams(-1,-1));setContentView(screen);systemBars=new SystemBars(this,screen,()->{if(downloadCard!=null)downloadCard.post(downloadCard::place);});
+  @Override public void onCreate(Bundle state){super.onCreate(state);prefs=getSharedPreferences("bridge",0);tailnet=new TailnetController(this);for(String address:prefs.getStringSet("origins",java.util.Collections.emptySet()))EventClient.setName(address,prefs.getString("cookieName:"+address,null));root=new LinearLayout(this);root.setOrientation(1);root.setBackgroundColor(0xfff5f5f3);screen=new FrameLayout(this);screen.addView(root,new FrameLayout.LayoutParams(-1,-1));setContentView(screen);systemBars=new SystemBars(this,screen,()->{if(downloadCard!=null)downloadCard.post(downloadCard::place);});
   if(state!=null){choosingUpdateFile=state.getString("choosingUpdateFile");pendingSaveResult=state.getBundle("pendingSaveResult");}
   if(Build.VERSION.SDK_INT>=33)getOnBackInvokedDispatcher().registerOnBackInvokedCallback(android.window.OnBackInvokedDispatcher.PRIORITY_DEFAULT,this::handleBack);
   bar=new LinearLayout(this);bar.setGravity(Gravity.CENTER_VERTICAL);bar.setPadding(dp(20),dp(4),dp(12),dp(4));root.addView(bar);header(false);
@@ -113,7 +113,7 @@ public final class MainActivity extends Activity {
   status=text("",12);status.setTextColor(0xff6b7075);status.setGravity(Gravity.CENTER);root.addView(status);
   if(!openIntent(getIntent())){String active=prefs.getString("active","");if(saved().contains(active))connect(active+"/");else home();}monitor();root.post(this::requestStartupNotifications);restoreUpdate();
  }
- void clear(){if(preparingUpdate!=null){preparingUpdate.cancel();preparingUpdate=null;}pendingStorage=null;if(routeDiscovery!=null){routeDiscovery.cancel();routeDiscovery=null;}if(files!=null){files.onReceiveValue(null);files=null;fileView=null;}stopComputerChecks();homeStates.clear();homeNotifications.clear();resetExitGesture();generation++;if(web!=null){web.stopLoading();web.destroy();web=null;}systemBars.update(0xfff5f5f3,0xfff5f5f3);while(root.getChildCount()>2)root.removeViewAt(2);}
+  void clear(){if(preparingUpdate!=null){preparingUpdate.cancel();preparingUpdate=null;}pendingStorage=null;if(routeDiscovery!=null){routeDiscovery.cancel();routeDiscovery=null;}if(files!=null){files.onReceiveValue(null);files=null;fileView=null;}if(tailnet!=null)tailnet.stop();stopComputerChecks();homeStates.clear();homeNotifications.clear();resetExitGesture();generation++;if(web!=null){web.stopLoading();web.destroy();web=null;}systemBars.update(0xfff5f5f3,0xfff5f5f3);while(root.getChildCount()>2)root.removeViewAt(2);}
  void home(){clear();header(false);status.setVisibility(View.GONE);ScrollView scroll=new ScrollView(this);scroll.setFillViewport(true);LinearLayout content=column();content.setPadding(dp(20),dp(16),dp(20),dp(24));scroll.addView(content);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
   ImageView icon=new ImageView(this);icon.setImageResource(getResources().getIdentifier("ic_computer","drawable",getPackageName()));icon.setScaleType(ImageView.ScaleType.FIT_CENTER);LinearLayout.LayoutParams ip=new LinearLayout.LayoutParams(dp(64),dp(58));ip.gravity=Gravity.CENTER;ip.bottomMargin=dp(24);content.addView(icon,ip);
   TextView headline=text(L("电脑上的工作，\n带在身边。"),30);headline.setTypeface(null,android.graphics.Typeface.BOLD);headline.setGravity(Gravity.CENTER);add(headline,content,10);
@@ -165,8 +165,32 @@ public final class MainActivity extends Activity {
  void manualAddress(){resetExitGesture();EditText field=new EditText(this);field.setSingleLine();field.setInputType(17);field.setText("https://");field.setSelection(field.length());field.setPadding(dp(24),dp(16),dp(24),dp(16));new AlertDialog.Builder(this).setTitle(L("连接电脑")).setMessage(L("粘贴电脑网关提供的访问地址")).setView(field).setPositiveButton(L("继续"),(d,w)->choose(field.getText().toString())).setNegativeButton(L("取消"),null).show();}
  boolean htmlPreviewShell(String target){return target!=null&&target.equals(origin+"/html-preview-shell");}
  void choose(String value){resetExitGesture();try{String target=GatewayURL.connection(value);String base=GatewayURL.origin(value);new AlertDialog.Builder(this).setTitle(L("连接到这台电脑？")).setMessage(base+L("\n请确认这是你自己的网关。")).setPositiveButton(L("连接"),(d,w)->connect(target)).setNegativeButton(L("取消"),null).show();}catch(Exception e){message(e.getMessage());}}
- void connect(String url){routeAttempted=false;try{String base=GatewayURL.targetBase(url);clear();header(true);status.setVisibility(View.VISIBLE);origin=base;Set<String> saved=saved();saved.add(origin);prefs.edit().putStringSet("origins",saved).putString("active",origin).putLong("last-opened:"+origin,System.currentTimeMillis()).apply();status.setText(L("正在连接 · ")+origin);
-  FrameLayout viewport=new FrameLayout(this);root.addView(viewport,new LinearLayout.LayoutParams(-1,0,1));web=new WebView(this);web.setBackgroundColor(0xfff7f9fc);viewport.addView(web,new FrameLayout.LayoutParams(-1,-1));ImageButton menu=icon("ic_more",L("电脑与聊天选项"),()->{});menu.setOnClickListener(v->gatewayMenu(v));FrameLayout.LayoutParams menuPosition=new FrameLayout.LayoutParams(dp(48),dp(48),Gravity.TOP|Gravity.END);menuPosition.topMargin=dp(4);menuPosition.setMarginEnd(dp(8));viewport.addView(menu,menuPosition);final String clipboardToken=UUID.randomUUID().toString();final String appearance=MobileWebScripts.appearance(getAssets()).replace("__BRIDGE_CLIPBOARD_TOKEN__",clipboardToken);WebSettings s=web.getSettings();s.setJavaScriptEnabled(true);s.setDomStorageEnabled(true);s.setAllowFileAccess(false);s.setAllowContentAccess(true);s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);s.setSupportMultipleWindows(false);s.setUserAgentString(s.getUserAgentString()+" BridgeMobile/0.1-Android");CookieManager.getInstance().setAcceptThirdPartyCookies(web,false);
+  void connect(String url){routeAttempted=false;try{String base=GatewayURL.targetBase(url);clear();header(true);status.setVisibility(View.VISIBLE);origin=base;Set<String> saved=saved();saved.add(origin);prefs.edit().putStringSet("origins",saved).putString("active",origin).putLong("last-opened:"+origin,System.currentTimeMillis()).apply();
+   if(GatewayURL.tailnetOrigin(origin)){
+    final String target=url,address=base;final int ticket=generation;
+    status.setText(L("正在启动内置 Tailscale · ")+origin);
+    tailnet.start(new TailnetController.Listener(){
+     public void status(String value){if(ticket==generation&&address.equals(origin))status.setText(L(value));}
+     public void authRequired(String value){if(ticket==generation&&address.equals(origin))openTailnetAuthorization(value);}
+     public void ready(int port){if(ticket==generation&&address.equals(origin)){status.setText(L("内置 Tailscale 已连接 · ")+origin);openGateway(target);}}
+     public void failed(String value){if(ticket==generation&&address.equals(origin)){status.setText(L("内置 Tailscale 连接失败"));message(value);}}
+    });
+    return;
+   }
+   status.setText(L("正在连接 · ")+origin);openGateway(url);
+  }catch(Exception e){message(e.getMessage());}}
+  void openTailnetAuthorization(String value){
+   try{
+    Uri uri=Uri.parse(value);String host=uri.getHost();
+    if(!"https".equals(uri.getScheme())||!"login.tailscale.com".equals(host)||uri.getUserInfo()!=null)throw new IllegalArgumentException("Tailscale 授权地址无效");
+    status.setText(L("请在浏览器完成 Tailscale 授权后返回"));
+    new AlertDialog.Builder(this).setTitle(L("授权内置 Tailscale")).setMessage(L("将打开官方 Tailscale 登录页。授权完成后返回此应用，连接会自动继续。")).setNegativeButton(L("稍后"),null).setPositiveButton(L("打开浏览器"),(d,w)->{try{startActivity(new Intent(Intent.ACTION_VIEW,uri));}catch(Exception e){message(L("没有可用的浏览器，请稍后重试"));}}).show();
+   }catch(Exception e){message(e.getMessage());}
+  }
+  void openGateway(String url){
+   final String base=origin;
+   try{
+   FrameLayout viewport=new FrameLayout(this);root.addView(viewport,new LinearLayout.LayoutParams(-1,0,1));web=new WebView(this);web.setBackgroundColor(0xfff7f9fc);viewport.addView(web,new FrameLayout.LayoutParams(-1,-1));ImageButton menu=icon("ic_more",L("电脑与聊天选项"),()->{});menu.setOnClickListener(v->gatewayMenu(v));FrameLayout.LayoutParams menuPosition=new FrameLayout.LayoutParams(dp(48),dp(48),Gravity.TOP|Gravity.END);menuPosition.topMargin=dp(4);menuPosition.setMarginEnd(dp(8));viewport.addView(menu,menuPosition);final String clipboardToken=UUID.randomUUID().toString();final String appearance=MobileWebScripts.appearance(getAssets()).replace("__BRIDGE_CLIPBOARD_TOKEN__",clipboardToken);WebSettings s=web.getSettings();s.setJavaScriptEnabled(true);s.setDomStorageEnabled(true);s.setAllowFileAccess(false);s.setAllowContentAccess(true);s.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);s.setSupportMultipleWindows(false);s.setUserAgentString(s.getUserAgentString()+" BridgeMobile/0.1-Android");CookieManager.getInstance().setAcceptThirdPartyCookies(web,false);
   web.setWebViewClient(new WebViewClient(){
    public boolean shouldOverrideUrlLoading(WebView view,WebResourceRequest request){String target=request.getUrl().toString();if(!request.isForMainFrame())return !htmlPreviewShell(target);if(htmlPreviewShell(target))return true;if(target.equals("codexbridge://home")&&request.hasGesture()&&GatewayURL.sameOrigin(view.getUrl(),origin)){home();return true;}if(ArtifactDownload.accepts(target,origin)&&request.hasGesture()){downloadArtifact(target);return true;}if(GatewayURL.sameOrigin(target,origin))return false;if(request.hasGesture()&&("https".equals(request.getUrl().getScheme())||"http".equals(request.getUrl().getScheme())))new AlertDialog.Builder(MainActivity.this).setMessage(L("在浏览器打开外部链接？\n")+request.getUrl().getHost()).setPositiveButton(L("打开"),(d,w)->startActivity(new Intent(Intent.ACTION_VIEW,request.getUrl()))).setNegativeButton(L("取消"),null).show();return true;}
    public void onPageFinished(WebView view,String target){if(view==web&&GatewayURL.sameOrigin(target,origin)){CookieManager.getInstance().flush();view.evaluateJavascript("window.BridgeMobileCapabilities = Object.freeze({ diagnosticsExport: true });",null);view.evaluateJavascript(appearance,null);status.setVisibility(View.GONE);registerPushToken();rememberConnection();
@@ -214,7 +238,7 @@ public final class MainActivity extends Activity {
    }});
 
   web.setDownloadListener((target,agent,disposition,mime,length)->downloadArtifact(target));
-  loadWithRecovery(base,url,web,generation);monitor();
+   loadWithRecovery(base,url,web,generation);monitor();
  }catch(Exception e){message(e.getMessage());}}
  void renderDownload(){downloadCard.render(downloadTask,savingDownload||choosingDownload!=null,openingDownload,updateSession!=null);}
  void downloadArtifact(String target){
@@ -317,6 +341,10 @@ public final class MainActivity extends Activity {
   LinearLayout notifications=card();Button toggle=button(prefs.getBoolean("alerts",false)?L("关闭任务通知"):L("开启任务通知"),()->{dialog.dismiss();toggleNotifications();});add(toggle,notifications,8);add(text(L("App 打开时提醒已连接电脑的新任务消息。离开 App 或锁屏后不保证通知；可在电脑端配置 Bark 或 ntfy。"),14),notifications,12);
   add(button(L("测试本机通知"),()->{dialog.dismiss();testNotification();}),notifications,4);add(text(L("10 秒后显示，用于检查手机的通知权限。"),13),notifications,0);add(notifications,content,22);
   add(text(L("当前电脑"),19),content,12);LinearLayout computer=card();if(origin.isEmpty()){add(text(L("尚未选择电脑"),17),computer,8);add(text(L("返回首页扫码或输入网关地址。"),14),computer,0);}else{add(text(computerName(origin),17),computer,8);add(text(origin,13),computer,12);Button remove=button(L("移除这台电脑"),()->{dialog.dismiss();confirmRemove();});remove.setTextColor(0xffb44235);add(remove,computer,0);}add(computer,content,24);
+   add(text(L("内置 Tailscale"),19),content,12);LinearLayout tailnetCard=card();add(text(L("使用 App 进程内的 Tailscale 节点访问 .ts.net 网关，不创建系统 VPN，也不接管手机路由。"),14),tailnetCard,10);
+   if(Build.VERSION.SDK_INT<29)add(text(L("此功能需要 Android 10 或更高版本。"),13),tailnetCard,8);else add(text(tailnet.hasAuthKey()?L("已保存加密的预授权密钥，可直接加入 Tailnet。"):L("首次连接会打开官方 Tailscale 授权页；也可保存预授权密钥。"),13),tailnetCard,8);
+   add(button(tailnet.hasAuthKey()?L("更换授权密钥"):L("设置授权密钥"),()->setTailnetAuthKey(dialog)),tailnetCard,4);
+   Button resetTailnet=button(L("重置内置 Tailscale 节点"),()->resetTailnet(dialog));resetTailnet.setTextColor(0xffb44235);add(resetTailnet,tailnetCard,0);add(tailnetCard,content,22);
   LinearLayout updates=card();add(text(L("应用更新"),19),updates,8);add(text("Codex Mobile Bridge · "+appVersion(),14),updates,8);add(text(L("手动检查更新，确认后下载并安装"),13),updates,8);
   TextView updateStatus=text("",13);Button check=button(L("检查更新"),()->{});check.setOnClickListener(v->checkUpdate(dialog,check,updateStatus));add(check,updates,6);add(updateStatus,updates,0);add(updates,content,20);
   TextView version=text("Codex Mobile Bridge",13);version.setTextColor(0xff777b80);version.setGravity(Gravity.CENTER);add(version,content,0);
@@ -387,6 +415,25 @@ public final class MainActivity extends Activity {
    downloadTask=new ArtifactDownload.Task(release.download,MobileRelease.REPO,directory,release.size,release.sha256,MobileRelease.asset(release.version));updateSession=new UpdateInstallSession(release,downloadTask,directory);downloadCard.showTask();renderDownload();runDownload(downloadTask);return true;
   }catch(java.io.IOException e){updateSession=null;downloadTask=null;updateProblem(e.getMessage(),release);return false;}
  }
+  void setTailnetAuthKey(Dialog settings){
+   EditText field=new EditText(this);field.setSingleLine();field.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD);field.setHint("tskey-auth-…");field.setFilters(new android.text.InputFilter[]{new android.text.InputFilter.LengthFilter(16384)});field.setPadding(dp(24),dp(16),dp(24),dp(16));
+   AlertDialog.Builder builder=new AlertDialog.Builder(this).setTitle(L("Tailscale 预授权密钥")).setMessage(L("密钥会由 Android Keystore 加密。留空可继续使用浏览器授权。")).setView(field).setNegativeButton(L("取消"),null).setPositiveButton(L("保存"),null);
+   if(tailnet.hasAuthKey())builder.setNeutralButton(L("清除"),(d,w)->{tailnet.clearAuthKey();settings.dismiss();message(L("已清除预授权密钥；现有节点身份不会删除。"));});
+   AlertDialog dialog=builder.create();dialog.setOnShowListener(ignored->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
+    try{tailnet.saveAuthKey(field.getText().toString());dialog.dismiss();settings.dismiss();message(L("已加密保存 Tailscale 预授权密钥。下次启动节点时使用。"));}
+    catch(Exception error){field.setError(error.getMessage()==null?L("授权密钥无效"):error.getMessage());}
+   }));dialog.show();
+  }
+  void resetTailnet(Dialog settings){
+   new AlertDialog.Builder(this).setTitle(L("重置内置 Tailscale？")).setMessage(L("这会删除此手机在 Tailnet 中的内置节点身份和本机保存的预授权密钥。后端电脑和聊天记录不会受影响。")).setNegativeButton(L("取消"),null).setPositiveButton(L("重置"),(d,w)->{
+    settings.dismiss();final String active=origin;
+    tailnet.reset(()->runOnUiThread(()->{
+     if(isFinishing()||isDestroyed())return;
+     message(L("内置 Tailscale 节点已重置。"));
+     if(GatewayURL.tailnetOrigin(active))connect(active+"/");else home();
+    }));
+   }).show();
+  }
  boolean startGatewayUpdate(MobileRelease release,String gateway){
   if(restoringUpdate||preparingUpdate!=null||(downloadTask!=null&&(updateSession==null||downloadTask.state!=ArtifactDownload.State.FAILED))){message(L("已有下载任务，请先完成或取消"));return false;}
   if(gateway.isEmpty()||!gateway.equals(selectedUpdateGateway())){updateProblem("请先连接并登录电脑网关",release);return false;}
@@ -481,5 +528,5 @@ public final class MainActivity extends Activity {
  void resetExitGesture(){homeBackAt=0;if(exitToast!=null){exitToast.cancel();exitToast=null;}}
  @Override public void onBackPressed(){handleBack();}
  void handleBack(){if(web==null){long now=SystemClock.elapsedRealtime();if(homeBackAt!=0&&now-homeBackAt<=2000){resetExitGesture();finishAndRemoveTask();}else{homeBackAt=now;if(exitToast!=null)exitToast.cancel();exitToast=Toast.makeText(this,L("再按一次返回退出 App"),Toast.LENGTH_SHORT);exitToast.show();}return;}resetExitGesture();if(!GatewayURL.sameOrigin(web.getUrl(),origin)){home();return;}final int ticket=generation;web.evaluateJavascript("(()=>{const dialog=document.querySelector('dialog[open]');if(dialog){dialog.close();return true;}if(typeof window.BridgeNavigation?.back==='function')return window.BridgeNavigation.back();if(window.BridgeWorkbench?.back())return true;if(document.getElementById('app')?.classList.contains('chat-open')){document.getElementById('back')?.click();return true;}return false;})()",result->{if(ticket==generation&&!"true".equals(result))home();});}
- @Override public void onDestroy(){if(downloadTask!=null&&(updateSession==null||downloadTask.state!=ArtifactDownload.State.COMPLETE))downloadTask.cancel();downloads.shutdownNow();clear();probes.shutdownNow();worker.shutdownNow();if(monitor!=null)getApplicationContext().unbindService(monitor);super.onDestroy();}
+  @Override public void onDestroy(){if(downloadTask!=null&&(updateSession==null||downloadTask.state!=ArtifactDownload.State.COMPLETE))downloadTask.cancel();downloads.shutdownNow();clear();if(tailnet!=null)tailnet.dispose();probes.shutdownNow();worker.shutdownNow();if(monitor!=null)getApplicationContext().unbindService(monitor);super.onDestroy();}
 }

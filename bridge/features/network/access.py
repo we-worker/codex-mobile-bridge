@@ -15,7 +15,9 @@ from bridge.api.validation import FieldError, at_field
 DEFAULTS = {'accessMode': 'lan', 'publicUrl': '', 'proxyUpstream': '',
             'sshTarget': '', 'sshRemotePort': 18787, 'sshAuth': 'config',
             'sshHost': '', 'sshPort': 22, 'sshUser': '', 'sshKeyPath': '',
-            'tailscaleMode': 'funnel', 'tailscalePort': 443, 'tailscaleNodeId': ''}
+            'tailscaleMode': 'funnel', 'tailscalePort': 443, 'tailscaleNodeId': '',
+            'tailscaleRuntime': 'system', 'tailscaleHostname': '',
+            'tailscaleAuthMode': 'interactive'}
 
 
 def origin(value, scheme='https'):
@@ -72,6 +74,17 @@ def validate(preferences):
     if p['accessMode'] == 'tailscale':
         if p['tailscaleMode'] not in ('funnel', 'serve'):
             raise FieldError('请选择有效的 Tailscale 访问范围。', 'tailscaleMode')
+        if p['tailscaleRuntime'] not in ('system', 'embedded'):
+            raise FieldError('请选择有效的 Tailscale 运行方式。', 'tailscaleRuntime')
+        if p['tailscaleAuthMode'] not in ('interactive', 'authKey'):
+            raise FieldError('请选择有效的内嵌 Tailscale 登录方式。', 'tailscaleAuthMode')
+        if (not isinstance(p['tailscaleHostname'], str)
+                or (p['tailscaleHostname'] and not re.fullmatch(
+                    r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?', p['tailscaleHostname']))):
+            raise FieldError('设备名称只能使用 1–63 位字母、数字和短横线，且不能以短横线开头或结尾。',
+                             'tailscaleHostname')
+        if p['tailscaleRuntime'] == 'embedded' and not p['tailscaleHostname']:
+            p['tailscaleHostname'] = 'codex-mobile-bridge'
         if type(p['tailscalePort']) is not int or p['tailscalePort'] not in (443, 8443, 10000):
             raise FieldError('Tailscale HTTPS 端口只能为 443、8443 或 10000。', 'tailscalePort')
         if not isinstance(p['tailscaleNodeId'], str) or not re.fullmatch(r'[A-Za-z0-9_-]{0,128}', p['tailscaleNodeId']):

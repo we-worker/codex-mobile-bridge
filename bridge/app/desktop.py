@@ -170,12 +170,26 @@ class Desktop:
             if value.startswith('https://'):
                 quick_url = value
                 urls.insert(0, value)
-        urls = [url+'/' for url in access.public_urls(preferences)] + urls
+        embedded_urls = {
+            entry['publicUrl'].rstrip('/')
+            for entry in preferences['connections']
+            if entry['accessMode'] == 'tailscale'
+            and entry.get('tailscaleRuntime') == 'embedded' and entry['publicUrl']
+        }
+        persisted_fixed = [url for url in access.public_urls(preferences)
+                           if url.rstrip('/') not in embedded_urls]
+        urls = [url+'/' for url in persisted_fixed] + urls
         external = {}
         for entry in preferences['connections']:
             status = read_json(self.data_dir/('ssh-status-'+entry['id']+'.json'), {})
             if runtime['running'] and status.get('pid') == runtime.get('pid'):
                 external[entry['id']] = status
+        dynamic_fixed = [status.get('url', '').rstrip('/') + '/'
+                         for entry in preferences['connections']
+                         if entry['accessMode'] == 'tailscale'
+                         for status in [external.get(entry['id'], {})]
+                         if status.get('state') == 'connected' and status.get('url')]
+        urls = list(dict.fromkeys(dynamic_fixed + urls))
         executable = preferences['cloudflared']
         cloudflared = {'path': executable, 'available': bool(executable and Path(executable).is_file() and os.access(executable, os.X_OK))}
         from bridge.features.notifications.addresses import entry_urls
@@ -236,9 +250,24 @@ class Desktop:
         if not isinstance(origins, list):
             raise FieldError('额外 HTTPS 源格式不正确', 'origins')
         origins = list(dict.fromkeys(at_field('origins', access.origin, origin) for origin in origins))
-        old_fixed = access.public_urls(old_preferences)
+        old_embedded = {
+            entry['publicUrl'].rstrip('/')
+            for entry in old_preferences['connections']
+            if entry['accessMode'] == 'tailscale'
+            and entry.get('tailscaleRuntime') == 'embedded' and entry['publicUrl']
+        }
+        new_embedded = {
+            entry['publicUrl'].rstrip('/')
+            for entry in preferences['connections']
+            if entry['accessMode'] == 'tailscale'
+            and entry.get('tailscaleRuntime') == 'embedded' and entry['publicUrl']
+        }
+        old_fixed = [url for url in access.public_urls(old_preferences)
+                     if url.rstrip('/') not in old_embedded]
         origins = [origin for origin in origins if origin not in old_fixed]
         for fixed in access.public_urls(preferences):
+            if fixed.rstrip('/') in new_embedded:
+                continue
             if fixed not in origins:
                 origins.append(fixed)
         if self.status()['running'] and origins != config.get('origins', []):
@@ -253,7 +282,9 @@ class Desktop:
         if password:
             config['auth'].update(password_record(password))
         config['origins'] = origins
-        config['publicUrl'] = access.public_url(preferences)
+        fixed_urls = [url for url in access.public_urls(preferences)
+                      if url.rstrip('/') not in new_embedded]
+        config['publicUrl'] = fixed_urls[0] if fixed_urls else ''
         config['connections'] = preferences['connections']
         config['lanAddresses'] = preferences['lanAddresses']
         config['localAccess'] = preferences['localAccess']
@@ -301,8 +332,14 @@ class Desktop:
             if not entry['enabled']:
                 continue
             if entry['accessMode'] == 'tailscale':
-                from bridge.features.network.tailscale import require_identity
+                from bridge.features.network.tailscale import embedded_credentials, require_identity
                 require_identity(entry)
+                if entry.get('tailscaleRuntime') == 'embedded':
+                    secret = embedded_credentials(entry, self.data_dir, temporary.get(entry['id']))
+                    if entry.get('tailscaleAuthMode') == 'authKey' and not secret.get('authKey'):
+                        raise FieldError('请先为内嵌 Tailscale 填写并保存认证密钥。',
+                                         'authKey', entry['id'])
+                    temporary[entry['id']] = secret
             if entry['accessMode'] == 'cloudflare' or (entry['accessMode'] == 'server' and entry.get('sshAuth', 'config') != 'config'):
                 secret = credentials(entry, self.data_dir, temporary.get(entry['id']))
                 if entry['accessMode'] == 'cloudflare' and not secret.get('tunnelToken'):
@@ -497,14 +534,24 @@ class Desktop:
         status = self.status()
         if not status['running']:
             raise ValueError('请先启动网关，再检测固定入口')
-        return access.check_entry(access.select_connection(self.preferences(), value), instance_id=status.get('instanceId'))
+        entry = access.select_connection(self.preferences(), value)
+        if entry['accessMode'] == 'tailscale' and entry.get('tailscaleRuntime') == 'embedded':
+            from bridge.features.network.tailscale import check_entry_embedded
+            return check_entry_embedded(entry, self.data_dir, status.get('pid'), status.get('instanceId'))
+        return access.check_entry(entry, instance_id=status.get('instanceId'))
 
     def tailscale_setup(self, value):
         from bridge.features.network.tailscale import inspect
         entry = access.select_connection(self.preferences(), value, allow_disabled=True)
         if entry['accessMode'] != 'tailscale':
             raise ValueError('请选择 Tailscale 连接。')
-        return inspect(entry)
+        status = self.status()
+        # A status file belongs to one gateway process. When the gateway is
+        # stopped, 0 deliberately matches no persisted PID and cannot surface
+        # the previous run's embedded node as ready.
+        return inspect(entry, self.data_dir,
+                       status.get('pid') if status['running'] else 0,
+                       status.get('instanceId') if status['running'] else None)
 
     def pairing(self, value):
         if value.get('action') == 'create':

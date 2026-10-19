@@ -16,6 +16,7 @@ def java_tool(name):
     return str(Path(java_home) / 'bin' / name) if java_home else shutil.which(name)
 subprocess.run([java_tool('javac'), '-encoding', 'UTF-8', '-d', str(work),
                 str(root / 'mobile/android/src/io/github/try2love/codexbridge/GatewayURL.java'),
+                str(root / 'mobile/android/src/io/github/try2love/codexbridge/TailnetHttp.java'),
                 str(root / 'mobile/android/src/io/github/try2love/codexbridge/MobileRelease.java'),
                 str(root / 'mobile/android/src/io/github/try2love/codexbridge/ArtifactDownload.java'),
                 str(root / 'mobile/android/src/io/github/try2love/codexbridge/UpdateInstallSession.java'),

@@ -6,7 +6,7 @@ from pathlib import Path
 
 from bridge.features.notifications.channels import read_json, write_json
 
-FIELDS = ('password', 'passphrase', 'tunnelToken')
+FIELDS = ('password', 'passphrase', 'tunnelToken', 'authKey')
 
 
 def backend():

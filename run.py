@@ -6,6 +6,7 @@ import ipaddress
 import json
 import logging
 import os
+import re
 import secrets
 import shutil
 import signal
@@ -131,9 +132,25 @@ def main(connections=None, connection_secrets=None):
     if config['auth']['mode'] == 'none' and any(c['enabled'] and c['accessMode'] == 'tailscale' and c['tailscaleMode'] == 'funnel' for c in entries):
         parser.error('Funnel 公网入口需要启用网关登录验证；手机仍可扫码配对。')
     args.tunnel = args.tunnel or any(c['enabled'] and c['accessMode'] == 'quick' for c in entries)
+    embedded_urls = {
+        entry['publicUrl'].rstrip('/')
+        for entry in entries
+        if entry['enabled'] and entry['accessMode'] == 'tailscale'
+        and entry.get('tailscaleRuntime') == 'embedded' and entry['publicUrl']
+    }
+    fixed_urls = [
+        row['publicUrl'].rstrip('/')
+        for row in entries
+        if row['enabled'] and row['accessMode'] in (
+            'server', 'nas', 'cloudflare', 'tailscale', 'external')
+        and row['publicUrl'] and row['publicUrl'].rstrip('/') not in embedded_urls
+    ]
     if entries:
-        config['publicUrl'] = public_url(preferences)
-    origins = config.get("origins", []) + args.origin + public_urls(preferences)
+        config['publicUrl'] = fixed_urls[0] if fixed_urls else ''
+    # An embedded tsnet device is trusted only after this run's sidecar proves
+    # that its exact public identity reaches this gateway instance.
+    origins = [origin for origin in config.get("origins", []) + args.origin + fixed_urls
+               if origin.rstrip('/') not in embedded_urls]
     for origin in origins:
         parsed = urlsplit(origin)
         if parsed.scheme != "https" or not parsed.hostname or parsed.path or parsed.query or parsed.fragment or parsed.username or parsed.password:
@@ -164,6 +181,45 @@ def main(connections=None, connection_secrets=None):
         bridge.close()
         raise
     server = servers[0]
+    tailscale_origins = {}
+
+    def allow_tailscale_origin(entry_id, origin='', node_id=''):
+        """Allow only the exact .ts.net identity returned by this live node."""
+        old = tailscale_origins.pop(entry_id, None)
+        if old:
+            old_host = urlsplit(old).netloc
+            server.origins.discard(old)
+            server.hosts.discard(old_host)
+            server.secure_hosts.discard(old_host)
+        entry = next((row for row in entries if row['id'] == entry_id), None)
+        if not entry:
+            return
+        if not origin:
+            entry['publicUrl'] = ''
+            entry['tailscaleNodeId'] = ''
+            config['publicUrl'] = public_url(preferences)
+            return
+        parsed = urlsplit(origin)
+        if (parsed.scheme != 'https' or parsed.username or parsed.password
+                or parsed.path not in ('', '/') or parsed.query or parsed.fragment
+                or not re.fullmatch(
+                    r'(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+ts\.net',
+                    parsed.hostname or '')
+                or (parsed.port or 443) != entry['tailscalePort']
+                or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', node_id or '')):
+            entry['publicUrl'] = ''
+            entry['tailscaleNodeId'] = ''
+            config['publicUrl'] = public_url(preferences)
+            return
+        canonical = origin.rstrip('/')
+        tailscale_origins[entry_id] = canonical
+        entry['publicUrl'] = canonical
+        entry['tailscaleNodeId'] = node_id
+        config['publicUrl'] = public_url(preferences)
+        server.origins.add(canonical)
+        server.hosts.add(parsed.netloc)
+        server.secure_hosts.add(parsed.netloc)
+
     listener_threads = []
     pid_file = args.config.parent / "gateway.pid"
     pid_file.write_text(str(os.getpid()), encoding='utf-8')
@@ -217,7 +273,11 @@ def main(connections=None, connection_secrets=None):
         for entry in entries:
             if entry['enabled'] and entry['accessMode'] == 'tailscale':
                 from bridge.features.network.tailscale import TailscaleTunnel
-                tailscale = TailscaleTunnel(entry, tailscale_port, args.config.parent)
+                tailscale = TailscaleTunnel(
+                    entry, tailscale_port, args.config.parent,
+                    secrets=connection_secrets.get(entry['id']),
+                    allow_origin=allow_tailscale_origin,
+                    instance_id=server.instance_id)
                 ssh_tunnels.append(tailscale)
                 tailscale.start()
             if entry['enabled'] and entry['accessMode'] == 'cloudflare':

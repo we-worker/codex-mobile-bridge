@@ -1,45 +1,79 @@
 # Tailscale 固定 HTTPS 入口
 
-无需自建服务器或邀请码。网关复用电脑上已安装的官方 Tailscale 客户端，为现有工作台提供固定地址。电脑、网关与所用 Agent 客户端仍需保持运行；Tailscale 不会唤醒休眠的电脑。
+桌面 App 支持两种互斥的运行方式，Android App 也可在手机进程内加入 Tailnet：
 
-## 首次配置
+| 运行方式 | 需要系统客户端 | 网络实现 | 适用场景 |
+| --- | --- | --- | --- |
+| **App 内嵌** | 不需要 `tailscaled`，也不创建系统 TUN/VPN 接口 | 桌面 App 启动 `codex-tsnet`，在进程内运行独立 Tailscale 用户态节点 | 希望由 App 自己管理连接，尤其适合远程或无桌面电脑 |
+| **系统客户端** | 需要已安装并登录的 Tailscale 官方客户端 | 复用系统 Tailscale 的 Serve/Funnel | 已经统一维护系统 Tailscale 的电脑 |
+| **Android App 内嵌** | 不需要安装 Android Tailscale 客户端，也不创建 `VpnService` | App 通过 `gomobile` 启动用户态 `tsnet`，只把 HTTPS `.ts.net` 交给本机 CONNECT 代理 | 手机位于 Tailnet 外，仍需私有访问固定 Serve 入口 |
 
-1. 安装 [Tailscale 官方客户端](https://tailscale.com/download)，登录自己的账号并开启连接。macOS 首次启动需在系统设置允许网络扩展；Windows/Linux 需要官方服务处于运行状态。需要 1.52 或更高版本。
-2. 在网关 **网络访问** 添加 **固定 HTTPS · Tailscale**。选择 **公网访问 · Funnel**，保存配置。
-3. 点击 **检测 Tailscale 并读取地址**，再保存自动填入的地址。无需手填域名或密码；Tailscale 登录凭据由官方客户端管理。
-4. 启动网关。如果提示授权，点击 **继续 Tailscale 授权**，在 Tailscale 官方页面启用 HTTPS / Funnel。需要相应网络管理权限；没有权限时联系自己的 Tailscale 网络管理员。
-5. 点击 **检测固定入口**，再从概览生成手机配对码。普通手机浏览器和手机 App 不必安装 Tailscale；沿用网关原有登录与扫码配对。
-6. 手机关闭 Wi-Fi，验证首次打开、聊天读写、文件下载和重新连接。电脑端检测通过不等于蜂窝网络可达。
+两种方式都要求 Tailnet 开启 HTTPS/MagicDNS。选择 **公网访问 · Funnel** 时还需在 Tailscale 管理后台启用 Funnel；选择 **私有组网 · Serve** 时，访问设备必须位于同一 Tailnet 并获得 ACL 授权。
 
-macOS 建议使用 Tailscale 官网的独立安装包（Standalone）；Funnel 的平台要求见[官方说明](https://tailscale.com/docs/features/tailscale-funnel)。
+## App 内嵌 Tailscale
 
-Funnel 会把入口提供给公网，因此要求启用网关登录验证。不要关闭验证来解决连接问题。
+新建 Tailscale 连接时默认选择 **App 内嵌**。`codex-tsnet` 使用 Tailscale 的用户态网络栈连接到本机网关，再由 Tailscale 的 `ListenTLS` 或 `ListenFunnel` 提供固定 HTTPS 入口。它不使用 `VpnService` 一类系统 VPN 接口，不接管电脑路由，也不修改现有 Tailscale 客户端或其他 Serve 配置。
 
-## 私有访问
+### 首次配置
 
-选择 **私有组网 · Serve** 时，只有已连接同一 Tailscale 私有网络且获访问授权的设备可以进入。浏览器无需插件，但所在手机/电脑必须具备 Tailscale 网络连接。本版没有在手机 App 内嵌 Tailscale。
+1. 在 **网络访问 → 添加连接 → 固定 HTTPS · Tailscale** 选择 **App 内嵌**。
+2. 填写设备名称，选择 **私有组网 · Serve** 或 **公网访问 · Funnel**，保存配置。
+3. 选择登录方式：
+   - **交互登录**：启动网关后，点击 **继续 Tailscale 授权**，在官方页面登录并授权。
+   - **Tailscale 认证密钥**：填写密钥并选择保存。密钥只进入系统凭据存储，运行时通过私密 stdin 交给 sidecar。
+4. 启动网关。首次登录或 Funnel/DNS 生效可能需要一段时间；状态从“正在启动”变为“已连接”前，旧地址不会加入网关可信源。
+5. 点击 **检测内嵌 Tailscale 并读取地址**，确认它通过自身 Tailscale 网络访问到的 `/api/auth` 实例与当前网关一致。
+6. 用手机实际访问、登录、打开聊天并发送一条消息。电脑端检测通过不等于蜂窝网络和 ACL 已通过。
 
-## 地址和启停
+交互登录适合有人操作桌面的电脑。无人值守或纯远程部署应使用 Tailscale 认证密钥。需要固定设备身份和地址时，不要使用会在节点离线后删除设备的 ephemeral key；密钥应按最小权限创建并妥善轮换。
 
-- 地址为 `https://设备名.网络名.ts.net`，HTTPS 证书由 Tailscale 管理。保留设备身份和名称时，正常重启不会重新分配临时地址。
-- 删除设备、切换账号、改名后需要停止网关，重新检测并保存。原手机地址可能需要更新。
-- 入口随网关启动和停止；只退出控制面板并保留网关时，入口也保留。
-- 网关不退出 Tailscale，不执行 `serve reset`、`tailscale down` 或 `logout`。本项目创建的前台会话在连接进程退出时由 Tailscale 清理。
-- 默认使用 HTTPS 443。被其他 Tailscale 服务占用时不会覆盖，可以改为 8443 或 10000，再检测保存；这时访问地址包含端口。
-- 重启电脑后，Tailscale 需要恢复连接，网关也需要启动。网关的自动启动选项不会替代操作系统或 Tailscale 的登录设置。
+### 生命周期与安全边界
 
-## 网络限制与排查
+- sidecar 随网关启停，只终止本实例创建的 `codex-tsnet` 子进程。
+- 节点私有状态保存在网关数据目录的 `tsnet/<connection-id>/`。删除该目录会让内嵌节点丢失身份并需要重新登录；不要在未确认影响前清理。
+- 内嵌节点只有从自身 Tailscale 网络访问当前网关的 `/api/auth`，并匹配本次运行的 `instanceId` 后，网关才会动态加入这个精确的 `.ts.net` Host/Origin。不会放行任意 `*.ts.net`。
+- 旧的内嵌地址不会在网关启动时被当作永久可信 Origin。子进程退出、重连、身份变化或检测失败时都会撤回动态地址。
+- 认证密钥不会出现在普通配置、状态 JSON、通知、日志或命令行参数中。配置、桌面快照和聊天 HTTP 也不返回明文密钥。
+- 桌面 App 内嵌模式不退出用户账号，不执行系统 `tailscale down/logout`，也不调用 `serve reset`。
+- Android 内置节点只在 App 进程内使用独立节点身份和回环代理；不声明 `BIND_VPN_SERVICE`，不接管系统 VPN 或手机路由。重置节点会删除手机上的节点身份与认证密钥，后端电脑和聊天记录不受影响。
 
-Funnel 使用 Tailscale 公网服务，存在带宽限制，不保证国内蜂窝网络速度。固定域名解决地址变化问题，不能代替线路实测。Funnel 的内建 HTTPS 入口限定为 `.ts.net`，不直接支持自定义域名。
+### Serve、Funnel 与手机
 
-| 提示 | 处理 |
+**Funnel** 给普通浏览器提供公网入口，手机不必安装 Tailscale，但必须保留网关登录与扫码配对保护。
+
+**Serve** 只允许 Tailnet 内设备访问。Android App 可直接连接 `.ts.net` 地址：首次使用会启动内置节点，可在应用设置中保存经 Android Keystore 加密的认证密钥，或在官方 Tailscale 授权页完成登录。App 只把 HTTPS `.ts.net` 请求交给内置节点，其他浏览和后台 HTTP 请求保持直连。该功能要求 Android 10 及以上，以及支持 `PROXY_OVERRIDE_REVERSE_BYPASS` 的当前 Android System WebView。
+
+仍可使用手机上的官方 Tailscale 客户端访问私有 Serve。iOS App 尚未内嵌 `tsnet`；使用私有 Serve 时需在系统层接入同一 Tailnet，或使用 Funnel。
+
+Tailscale 公网与 DERP 中继可能位于境外，速度受当前网络影响。内嵌模式省去系统客户端和 TUN，不保证比系统客户端或 Cloudflare 更快，也不保证一定能建立 P2P 直连；P2P 不可用时会回退到 Tailscale DERP。
+
+## 系统 Tailscale 客户端
+
+1. 安装 [Tailscale 官方客户端](https://tailscale.com/download)，登录并开启连接。版本需为 1.52 或更高。
+2. 连接中选择 **系统 Tailscale 客户端**。
+3. 检测并保存固定地址，启动网关并根据提示完成 Serve/Funnel 授权。
+4. 本模式只创建前台 Serve/Funnel 会话；不会重置已有规则、关闭系统网络或注销账号。
+
+macOS 建议使用官方独立安装包。Funnel 的平台和权限要求见其官方说明。
+
+## 地址、端口和重启
+
+- 地址通常为 `https://设备名.网络名.ts.net`，证书和 DNS 由 Tailscale 管理。
+- 支持 HTTPS 端口 443、8443、10000。端口被其他服务占用时不会覆盖，改用另一个受支持端口并重新检测即可。
+- DNSName、设备身份或 Funnel 状态可能变化。以当前运行状态和“检测固定入口”结果为准，不把上次保存的地址当成已连通。
+- 删除设备、切换账号、清理节点状态或使用 ephemeral key 后，地址和授权可能需要重新处理。
+- Tailscale 不会唤醒休眠电脑；电脑、网关和所需 Agent 客户端仍需运行。
+
+## 排查
+
+| 状态 | 处理 |
 | --- | --- |
-| 未找到客户端 | 安装官方 Tailscale，重新检测；macOS 支持应用目录和 Homebrew，Windows 支持标准安装目录，Linux 支持 PATH/标准目录 |
-| 等待登录或网络权限 | 打开 Tailscale，完成登录和系统网络授权 |
-| 等待 HTTPS/Funnel 授权 | 点击继续授权，完成官方页面操作 |
-| 首次授权后公网找不到域名 | 公网 DNS 记录最多可能需要 10 分钟传播；电脑上的 MagicDNS 可先解析到私有地址，仍需用手机蜂窝网络核验公网访问 |
-| 端口被其他服务使用 | 选择其他支持的 HTTPS 端口，不需要重置已有 Tailscale 配置 |
-| 账号或设备地址变化 | 停止网关，检测当前账号，再保存 |
-| 入口启动但检测失败 | 检查 DNS、证书、Funnel 授权和公网线路；不要跳过 TLS 或关闭网关验证 |
+| 缺少 `codex-tsnet` | 使用包含内嵌节点的完整 App 构建；源码运行先执行 `python -B scripts/build-tsnet.py` |
+| 等待登录 | 打开 **继续 Tailscale 授权**，或检查认证密钥是否有效、未过期且允许当前 Tailnet |
+| HTTPS / MagicDNS 不可用 | 在 Tailscale 管理后台启用 HTTPS 与 MagicDNS |
+| Funnel 不可用 | 启用 Funnel、确认账号/节点有权限，或先改用私有 Serve |
+| 正在验证但未就绪 | 等待证书、DNS 和 Funnel 生效；确认访问端可到达当前网关，不要跳过 TLS 验证 |
+| 地址或身份变化 | 停止网关后重新检测并确认；旧地址会被动态撤回 |
+| 私有 Serve 打不开 | Android 可在 App 内完成内置节点授权；其他设备需接入同一 Tailnet。再检查 Tailscale ACL 和设备授权 |
 
-[Serve 官方说明](https://tailscale.com/docs/features/tailscale-serve) · [Funnel 官方说明](https://tailscale.com/docs/features/tailscale-funnel)
+[tsnet 官方说明](https://tailscale.com/docs/features/tsnet) · [tsnet API](https://tailscale.com/docs/reference/tsnet-server-api) · [Serve](https://tailscale.com/docs/features/tailscale-serve) · [Funnel](https://tailscale.com/docs/features/tailscale-funnel)

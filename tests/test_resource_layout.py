@@ -186,6 +186,8 @@ class ResourceLayoutTests(unittest.TestCase):
         build = ast.parse((ROOT/'scripts/build-desktop.py').read_text())
         constants = {node.value for node in ast.walk(build) if isinstance(node, ast.Constant) and isinstance(node.value, str)}
         self.assertIn('scripts/gateway-resources.json', constants)
+        self.assertIn('scripts/build-tsnet.py', constants)
+        self.assertIn('--add-binary', constants)
         destinations = []
         for node in ast.walk(build):
             if (isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add)
@@ -204,6 +206,21 @@ class ResourceLayoutTests(unittest.TestCase):
                     and node.right.value.endswith(('.swift', '.cs'))):
                 sources.add(path_expression(node, names).relative_to(ROOT).as_posix())
         self.assertEqual(sources, NATIVE_SOURCES)
+
+    def test_embedded_tailscale_helper_is_pinned_and_built_for_packaging(self):
+        self.assertTrue((ROOT/'tsnet/main.go').is_file())
+        self.assertTrue((ROOT/'tsnet/main_test.go').is_file())
+        self.assertIn('tailscale.com v1.104.1',
+                      (ROOT/'tsnet/go.mod').read_text(encoding='utf-8'))
+        self.assertGreater((ROOT/'tsnet/go.sum').stat().st_size, 0)
+        build = (ROOT/'scripts/build-tsnet.py').read_text(encoding='utf-8')
+        self.assertIn("'CGO_ENABLED': '0'", build)
+        self.assertIn("'-trimpath'", build)
+        self.assertIn("'-ldflags=-s -w'", build)
+        licenses = ROOT/'tsnet/third_party/tailscale'
+        self.assertIn('Tailscale', (licenses/'LICENSE.txt').read_text(encoding='utf-8'))
+        self.assertTrue((licenses/'PATENTS.txt').is_file())
+        self.assertTrue((licenses/'licenses/tailscale.md').is_file())
 
 
 if __name__ == '__main__':

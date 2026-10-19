@@ -43,9 +43,12 @@ def entry_urls(preferences, hosts, quick_url='', external_status=None):
         if not entry['enabled']:
             continue
         mode = entry['accessMode']
+        status = (external_status or {}).get(entry['id'], {})
         if mode in ('nas', 'external') or (mode in ('server', 'cloudflare', 'tailscale') and
-                (external_status or {}).get(entry['id'], {}).get('state') == 'connected'):
-            urls.append(entry['publicUrl'].rstrip('/'))
+                status.get('state') == 'connected'):
+            url = (status.get('url') or entry['publicUrl']) if mode == 'tailscale' else entry['publicUrl']
+            if url:
+                urls.append(url.rstrip('/'))
     if quick_url:
         urls.append(quick_url.rstrip('/'))
     if preferences.get('lan'):

@@ -40,7 +40,7 @@ final class EventClient {
  static JSONObject read(String origin,Long after,Read pending)throws Exception {
   if(!GatewayURL.origin(origin).equals(origin))throw new IOException("连接地址无效");
   String cookie=CookieManager.getInstance().getCookie(origin+"/"),binding=sessionCookie(cookie,origin);if(binding.isEmpty())throw new IOException("请先登录电脑网关");
-  HttpURLConnection c=(HttpURLConnection)new URL(origin+"/api/mobile/events"+(after==null?"":"?after="+Math.max(0,after))).openConnection();
+   HttpURLConnection c=TailnetHttp.open(new URL(origin+"/api/mobile/events"+(after==null?"":"?after="+Math.max(0,after))));
   c.setInstanceFollowRedirects(false);c.setConnectTimeout(7000);c.setReadTimeout(10000);c.setRequestProperty("Cookie",cookie);c.setRequestProperty("Origin",GatewayURL.httpOrigin(origin));c.setRequestProperty("User-Agent",USER_AGENT);
   try{if(pending!=null)pending.attach(c);int code=c.getResponseCode();if(code==401||code==403)throw new IOException("登录已失效，请重新连接电脑");if(code==404)throw new IOException("请使用配套的电脑端 Preview 网关");if(code!=200)throw new IOException("暂时无法读取提醒，请检查连接");
    if(pending!=null)pending.check();
@@ -61,7 +61,7 @@ final class EventClient {
  }
  static JSONObject request(String origin,String path,JSONObject body,String csrf)throws Exception {
   if(!GatewayURL.origin(origin).equals(origin))throw new IOException("连接地址无效");
-  HttpURLConnection c=(HttpURLConnection)new URL(origin+path).openConnection();c.setInstanceFollowRedirects(false);c.setConnectTimeout(7000);c.setReadTimeout(10000);
+   HttpURLConnection c=TailnetHttp.open(new URL(origin+path));c.setInstanceFollowRedirects(false);c.setConnectTimeout(7000);c.setReadTimeout(10000);
   String cookie=CookieManager.getInstance().getCookie(origin+"/");if(cookie!=null)c.setRequestProperty("Cookie",cookie);c.setRequestProperty("Origin",GatewayURL.httpOrigin(origin));c.setRequestProperty("User-Agent",USER_AGENT);
   try{if(body!=null){c.setRequestMethod("POST");c.setDoOutput(true);c.setRequestProperty("Content-Type","application/json");c.setRequestProperty("X-CSRF-Token",csrf);try(OutputStream out=c.getOutputStream()){out.write(body.toString().getBytes(StandardCharsets.UTF_8));}}
    if(c.getResponseCode()!=200)throw new IOException("电脑未配置系统推送，或登录已失效");

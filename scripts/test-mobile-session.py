@@ -32,9 +32,10 @@ for name, source in stubs.items():
 java_home = os.environ.get('JAVA_HOME')
 def java_tool(name):
     return str(Path(java_home) / 'bin' / name) if java_home else shutil.which(name)
-subprocess.run([java_tool('javac'), '-d', str(work),
+subprocess.run([java_tool('javac'), '-encoding', 'UTF-8', '-d', str(work),
                 *[str(work / name) for name in stubs],
                 str(root / 'mobile/android/src/io/github/try2love/codexbridge/GatewayURL.java'),
+                str(root / 'mobile/android/src/io/github/try2love/codexbridge/TailnetHttp.java'),
                 str(root / 'mobile/android/src/io/github/try2love/codexbridge/EventClient.java'),
                 str(root / 'mobile/tests/EventClientTests.java')], check=True)
 subprocess.run([java_tool('java'), '-cp', str(work), 'io.github.try2love.codexbridge.EventClientTests'], check=True)

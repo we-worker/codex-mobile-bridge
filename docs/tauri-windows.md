@@ -19,11 +19,13 @@ Windows 桌面壳改为 Tauri 2，复用现有设置页面和 Python 网关，�
 
 `bridge/app/tauri.py` 复用 `Desktop`，保留账号登录状态和内存凭据；快照不返回连接明文凭据。目录切换前核验本机管理操作是否空闲。配对二维码在 Rust 中本地生成，不向图片服务传送登录令牌。Cloudflared 使用原构建脚本校验并随包携带的固定版本，“安装”操作复制该版本；源码运行未构建随附程序时可在设置中选择手动下载的程序。
 
+Tailscale 的 **App 内嵌**模式随桌面包携带 `codex-tsnet`。它使用 Tailscale 用户态网络栈，不要求安装 `tailscaled`，不创建系统 TUN/VPN 接口，也不接管系统路由。认证密钥由系统凭据库保存，并通过 Python 网关到 sidecar 的私密 stdin 传递；sidecar 必须从自身 Tailnet 连接回探当前网关 `instanceId` 后，才会把精确的 `.ts.net` Host/Origin 动态加入可信源。原系统客户端模式继续保留，详见 [Tailscale 连接说明](tailscale.md)。
+
 `scripts/prepare-tauri.py` 按现有桌面资源清单选取网页资源，保持相对地址和脚本顺序；只为 Tauri 私有 IPC 增加 CSP 连接范围，保留禁止远程脚本、框架和任意导航。未修改手机/Web 的公开 URL。
 
 ## 开发与构建
 
-推荐 Windows MSVC Rust 工具链和 Visual Studio C++ Build Tools。Python 构建环境依赖 `requirements-desktop.txt`；最终用户不需要 Python、Node 或 Rust。
+推荐 Windows MSVC Rust 工具链和 Visual Studio C++ Build Tools。构建内嵌 Tailscale 还需要 Go 1.27.1 或更高版本；`scripts/build-desktop.py` 会以 `CGO_ENABLED=0` 构建当前目标的 `codex-tsnet` 并交给 PyInstaller。Python 构建环境依赖 `requirements-desktop.txt`；最终用户不需要 Python、Node、Rust 或 Go。
 
 ```powershell
 npm ci --ignore-scripts
@@ -51,7 +53,7 @@ python scripts/measure-tauri.py src-tauri/target/release
 
 烟测使用 WebView2 的进程级调试参数操作自己启动的测试窗口，不改变产品默认调试配置。文件对话框的人工选择、系统登录后的自启、真实用户聊天发送和 SSH 主机信任未计作烟测通过项目。
 
-`measure-tauri.py` 分开报告安装程序、原生主程序、Python 网关及其中 cloudflared 的字节数，应用有效载荷不包含共享 WebView2、用户数据和安装器元数据。不要将 GitHub 上同时包含安装程序与 ZIP 的旧 Electron artifact 总大小与单个 Tauri 安装程序直接计算压缩比例。安装包真实大小应以目标架构和 Python 版本对应的构建报告为准。
+`measure-tauri.py` 分开报告安装程序、原生主程序、Python 网关以及其中 cloudflared、`codex-tsnet` 的字节数，应用有效载荷不包含共享 WebView2、用户数据和安装器元数据。不要将 GitHub 上同时包含安装程序与 ZIP 的旧 Electron artifact 总大小与单个 Tauri 安装程序直接计算压缩比例。安装包真实大小应以目标架构、Go 版本和 Python 版本对应的构建报告为准。Tailscale 及其依赖许可证随包放入 `licenses/tailscale/`。
 
 2026-10-16 本机 Windows x64 实测：567 项 Node 测试通过；后端定向 53 项中 52 通过、1 跳过；3 项 Rust 私有队列测试通过，包含迟到响应排空、结果未知不重发、坏帧关闭通道和业务拒绝后保持原进程。真实 WebView2/随附网关的六组烟测通过，页面无未捕获错误，截图已人工检查。原 Electron 更新器的 32 项回归也通过。未把这些定向检查表述为全量后端通过。
 

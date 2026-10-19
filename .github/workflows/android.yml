@@ -6,9 +6,13 @@ permissions:
 jobs:
   apk:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tsnet/go.mod
+          cache-dependency-path: tsnet/go.sum
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -27,6 +31,9 @@ jobs:
         shell: bash
         run: |
           sdkmanager 'platforms;android-35' 'build-tools;35.0.0'
+          sdkmanager 'ndk;27.2.12479018'
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/27.2.12479018" >> "$GITHUB_ENV"
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
           tools="$GITHUB_WORKSPACE/.tmp/mobile-tools"
           mkdir -p "$tools/jdk/ci/Contents" "$tools/sdk/build-tools" "$tools/sdk/platforms"
           ln -s "$JAVA_HOME" "$tools/jdk/ci/Contents/Home"
@@ -35,22 +42,75 @@ jobs:
           curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' \
             'https://repo.maven.apache.org/maven2/com/google/zxing/core/3.5.3/core-3.5.3.jar' \
             --output "$tools/zxing-core-3.5.3.jar"
+          curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' \
+            'https://dl.google.com/dl/android/maven2/androidx/webkit/webkit/1.17.1/webkit-1.17.1.aar' \
+            --output "$tools/androidx-webkit.aar"
+          curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' \
+            'https://dl.google.com/dl/android/maven2/androidx/core/core/1.1.0/core-1.1.0.aar' \
+            --output "$tools/androidx-core.aar"
+          curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' \
+            'https://dl.google.com/dl/android/maven2/androidx/annotation/annotation-jvm/1.8.1/annotation-jvm-1.8.1.jar' \
+            --output "$tools/androidx-annotation-jvm.jar"
+          curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' \
+            'https://dl.google.com/dl/android/maven2/androidx/annotation/annotation-experimental/1.3.0/annotation-experimental-1.3.0.aar' \
+            --output "$tools/androidx-annotation-experimental.aar"
+          curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' \
+            'https://repo.maven.apache.org/maven2/org/jspecify/jspecify/1.0.0/jspecify-1.0.0.jar' \
+            --output "$tools/jspecify.jar"
+          curl --fail --location --retry 3 --proto '=https' --proto-redir '=https' \
+            'https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-stdlib/1.7.10/kotlin-stdlib-1.7.10.jar' \
+            --output "$tools/kotlin-stdlib.jar"
           python - <<'PY'
           import hashlib
           from pathlib import Path
           tools = Path('.tmp/mobile-tools')
-          jar = (tools/'zxing-core-3.5.3.jar').read_bytes()
-          assert hashlib.sha256(jar).hexdigest() == '8d8064c1636fdaef7189dd9055c7d59950a8940a12f2293956446ec3c109fd82', 'ZXing SHA-256 mismatch'
+          expected = {
+              'zxing-core-3.5.3.jar': '8d8064c1636fdaef7189dd9055c7d59950a8940a12f2293956446ec3c109fd82',
+              'androidx-webkit.aar': '29dc7a9a32614828c97cf85951eb43c9e455157ab411e5e77d2ca4e72da28a36',
+              'androidx-core.aar': '76c7cfbe596fe3c09a6983bf1c89e889299c08ac9a3b52ce5182a088d056647e',
+              'androidx-annotation-jvm.jar': '9aab326d9492800991854360ac248f493ce7f7c3183519309b78ace9e240f6f6',
+              'androidx-annotation-experimental.aar': 'abfd29c8556e5bd0325a9f769ab9e9d154ff4a5515c476cdd5a2a8285b1b19dc',
+              'jspecify.jar': '1fad6e6be7557781e4d33729d49ae1cdc8fdda6fe477bb0cc68ce351eafdfbab',
+              'kotlin-stdlib.jar': 'e771fe74250a943e8f6346713201ff1d8cb95c3a5d1a91a22b65a9e04f6a8901',
+          }
+          for name, digest in expected.items():
+              assert hashlib.sha256((tools/name).read_bytes()).hexdigest() == digest, name+' SHA-256 mismatch'
           (tools/'zxing.sha1').write_text('ca1349214a356cd7958651b2d5a0e1f3811a9c4b\n', encoding='ascii')
           PY
+      - name: Test embedded Tailscale core
+        shell: bash
+        run: |
+          cd tsnet
+          CGO_ENABLED=0 go test ./...
+      - name: Build embedded Tailscale Android AAR
+        shell: bash
+        run: |
+          go install golang.org/x/mobile/cmd/gomobile@v0.0.0-20261011034528-197770444867
+          gomobile init
+          cd tsnet
+          gomobile bind \
+            -target=android/arm64,android/arm \
+            -androidapi 26 \
+            -o ../.tmp/mobile-tools/codex-mobile-tailscale.aar \
+            ./mobiletsnet
       - name: Verify shared mobile resources and Android behavior
         run: |
           node --test mobile/tests/*.test.cjs
           python scripts/test-mobile-session.py
+          python scripts/test-mobile-events.py
+          python scripts/test-mobile-discovery.py
           python scripts/test-mobile-releases.py
           python scripts/test-mobile-downloads.py
       - name: Build installable test APK
-        run: python scripts/build-mobile-android.py
+        run: |
+          python scripts/build-mobile-android.py \
+            --tailscale-aar .tmp/mobile-tools/codex-mobile-tailscale.aar \
+            --androidx-webkit-aar .tmp/mobile-tools/androidx-webkit.aar \
+            --androidx-core-aar .tmp/mobile-tools/androidx-core.aar \
+            --androidx-annotation-jar .tmp/mobile-tools/androidx-annotation-jvm.jar \
+            --androidx-annotation-experimental-aar .tmp/mobile-tools/androidx-annotation-experimental.aar \
+            --jspecify-jar .tmp/mobile-tools/jspecify.jar \
+            --kotlin-stdlib-jar .tmp/mobile-tools/kotlin-stdlib.jar
       - name: Verify APK assets and record test signing certificate
         shell: bash
         run: |
@@ -60,7 +120,13 @@ jobs:
           root = Path.cwd()
           version = json.loads((root/'package.json').read_text(encoding='utf-8'))['version']
           apk = root/'dist/mobile-preview'/f'Codex-Mobile-Bridge-{version}-Android.apk'
-          expected = {'AndroidManifest.xml', 'classes.dex', 'resources.arsc', 'assets/NOTICE.md', 'assets/ZXing-LICENSE.txt'}
+          expected = {
+              'AndroidManifest.xml', 'classes.dex', 'resources.arsc',
+              'assets/NOTICE.md', 'assets/ZXing-LICENSE.txt',
+              'assets/AndroidX-LICENSE.txt', 'assets/gomobile-LICENSE.txt',
+              'assets/Tailscale-LICENSE.txt', 'assets/Tailscale-Third-Party-NOTICES.md',
+              'lib/arm64-v8a/libgojni.so', 'lib/armeabi-v7a/libgojni.so',
+          }
           for directory in (root/'mobile/shared/web', root/'mobile/android/assets'):
               expected.update('assets/'+path.name for path in directory.glob('*.js'))
           expected.update('assets/'+name+'.png' for name in ('codex', 'claude', 'deepseek'))
@@ -76,6 +142,8 @@ jobs:
           assert "versionName='"+version+"'" in badging
           assert re.search(r"^(?:minSdkVersion|sdkVersion):\s*'26(?:\.0)?'\s*$", badging, re.M), 'Unexpected minimum Android version'
           assert re.search(r"^targetSdkVersion:\s*'35(?:\.0)?'\s*$", badging, re.M), 'Unexpected target Android version'
+          assert 'android.permission.BIND_VPN_SERVICE' not in badging, 'Embedded Tailscale must not request VpnService'
+          subprocess.run([str(tools/'zipalign'), '-c', '-P', '16', '4', str(apk)], check=True)
           certificate = subprocess.check_output([str(tools/'apksigner'), 'verify', '--verbose', '--print-certs', str(apk)], text=True)
           (apk.parent/'APK-CERTIFICATE.txt').write_text(certificate, encoding='utf-8')
           digest = hashlib.sha256(apk.read_bytes()).hexdigest()

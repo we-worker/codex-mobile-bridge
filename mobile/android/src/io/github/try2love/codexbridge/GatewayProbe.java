@@ -15,7 +15,7 @@ final class GatewayProbe {
   HttpURLConnection c=null;
   try{
    if(cancelled)return false;
-   c=(HttpURLConnection)new URL(GatewayURL.origin(origin)+"/api/auth").openConnection();connection=c;
+   c=TailnetHttp.open(new URL(GatewayURL.origin(origin)+"/api/auth"));connection=c;
    c.setConnectTimeout(4000);c.setReadTimeout(4000);c.setInstanceFollowRedirects(false);c.setUseCaches(false);
    c.setRequestProperty("Accept","application/json");
    if(cancelled||c.getResponseCode()!=200||c.getContentLengthLong()>16384)return false;

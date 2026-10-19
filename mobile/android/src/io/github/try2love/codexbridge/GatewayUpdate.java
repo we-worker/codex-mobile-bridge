@@ -16,7 +16,7 @@ final class GatewayUpdate {
  void cancel(){cancelled=true;HttpURLConnection c=active;if(c!=null)c.disconnect();}
  private void stopped()throws IOException {if(cancelled||Thread.currentThread().isInterrupted())throw new InterruptedIOException();if(!cookie.equals(cookies.read()))throw new IOException("登录已变化，请重新连接电脑后检查更新");}
  private JSONObject request(String path,JSONObject body)throws IOException {
-  stopped();HttpURLConnection connection=(HttpURLConnection)new URL(base+path).openConnection();active=connection;
+   stopped();HttpURLConnection connection=TailnetHttp.open(new URL(base+path));active=connection;
   try{
    connection.setConnectTimeout(15000);connection.setReadTimeout(20000);connection.setInstanceFollowRedirects(false);connection.setRequestProperty("Cookie",cookie);connection.setRequestProperty("Origin",GatewayURL.httpOrigin(base));connection.setRequestProperty("Accept","application/json");
    if(body!=null){

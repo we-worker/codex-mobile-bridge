@@ -46,7 +46,7 @@ public class JSONObject {
  public JSONObject put(String k,Object v){data.put(k,v);return this;}
  public String getString(String k){return (String)data.get(k);}public long getLong(String k){return ((Number)data.get(k)).longValue();}
  public JSONArray getJSONArray(String k){return (JSONArray)data.get(k);}public boolean optBoolean(String k){return Boolean.TRUE.equals(data.get(k));}
- public String optString(String k){return data.get(k) instanceof String?(String)data.get(k):"";}public long optLong(String k){return data.get(k) instanceof Number?((Number)data.get(k)).longValue():0;}public JSONArray optJSONArray(String k){return (JSONArray)data.get(k);}
+  public String optString(String k){return optString(k,"");}public String optString(String k,String fallback){return data.get(k) instanceof String?(String)data.get(k):fallback;}public long optLong(String k){return data.get(k) instanceof Number?((Number)data.get(k)).longValue():0;}public JSONArray optJSONArray(String k){return (JSONArray)data.get(k);}
  public String toString(){StringJoiner out=new StringJoiner(", ","{","}");for(Map.Entry<String,Object> e:data.entrySet())out.add(encode(e.getKey())+": "+encode(e.getValue()));String s=out.toString();wire.put(s,this);return s;}
  static String encode(Object o){return o instanceof String ? "\""+((String)o).replace("\\","\\\\").replace("\"","\\\"").replace("\n","\\n")+"\"" : String.valueOf(o);}
 }''',
@@ -68,9 +68,10 @@ source = source[:start] + ' static void notifyEvent(Context c,String origin,JSON
 java_home = os.environ.get('JAVA_HOME')
 def java_tool(name):
     return str(Path(java_home) / 'bin' / name) if java_home else shutil.which(name)
-subprocess.run([java_tool('javac'), '-d', str(WORK),
+subprocess.run([java_tool('javac'), '-encoding', 'UTF-8', '-d', str(WORK),
                *[str(WORK / name) for name in stubs], str(WORK / 'MonitorService.java'),
                str(ROOT / 'mobile/android/src/io/github/try2love/codexbridge/GatewayURL.java'),
+               str(ROOT / 'mobile/android/src/io/github/try2love/codexbridge/TailnetHttp.java'),
                str(ROOT / 'mobile/android/src/io/github/try2love/codexbridge/EventClient.java'),
                str(ROOT / 'mobile/android/src/io/github/try2love/codexbridge/ComputerNotifications.java'),
                str(ROOT / 'mobile/tests/MobileEventTests.java')], check=True)

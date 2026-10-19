@@ -35,6 +35,10 @@ jobs:
         with:
           node-version: '24'
           cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tsnet/go.mod
+          cache-dependency-path: tsnet/go.sum
       - run: python -m pip install -r requirements-desktop.txt
       - run: npm ci
       - run: python -B -m unittest discover -s tests -v
@@ -116,6 +120,10 @@ jobs:
         with:
           node-version: '24'
           cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tsnet/go.mod
+          cache-dependency-path: tsnet/go.sum
       - name: Install Linux build and display dependencies
         run: |
           sudo apt-get update

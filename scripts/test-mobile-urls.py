@@ -26,7 +26,7 @@ for identifier, host in cases['desktopRejected']:
 lines += ['try{GatewayURL.chat(base,new String(new char[513]).replace("\\u0000","x"),"desktop:claude");throw new AssertionError();}catch(Exception expected){}', 'System.out.println("Java: 37 URL and route checks passed");}}']
 (work/'URLTests.java').write_text('\n'.join(lines))
 jdk = next((root/'.tmp/mobile-tools/jdk').glob('*/Contents/Home'))
-subprocess.run([str(jdk/'bin/javac'),'-d',str(work),str(root/'mobile/android/src/io/github/try2love/codexbridge/GatewayURL.java'),str(work/'URLTests.java')],check=True)
+subprocess.run([str(jdk/'bin/javac'),'-encoding','UTF-8','-d',str(work),str(root/'mobile/android/src/io/github/try2love/codexbridge/GatewayURL.java'),str(work/'URLTests.java')],check=True)
 subprocess.run([str(jdk/'bin/java'),'-cp',str(work),'URLTests'],check=True)
 subprocess.run(['xcrun','swiftc','-module-cache-path',str(work/'cache'),str(root/'mobile/ios/BridgePreview/GatewayURL.swift'),str(root/'mobile/tests/URLTests.swift'),'-o',str(work/'swift-tests')],check=True)
 subprocess.run([str(work/'swift-tests'),str(root/'mobile/tests/url-cases.json')],check=True)

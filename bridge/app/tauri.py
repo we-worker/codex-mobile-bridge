@@ -160,7 +160,7 @@ class Host:
         if not any(c['id'] == value.get('id') for c in self.desktop.preferences()['connections']):
             raise ValueError('请先保存连接配置。')
         secret = value.get('secrets')
-        if not isinstance(secret, dict) or set(secret) - {'password', 'passphrase', 'tunnelToken', 'clear'}:
+        if not isinstance(secret, dict) or set(secret) - {'password', 'passphrase', 'tunnelToken', 'authKey', 'clear'}:
             raise ValueError('连接凭据格式不正确')
         for key, text in secret.items():
             if (key == 'clear' and not isinstance(text, bool)) or (key != 'clear' and (not isinstance(text, str) or len(text) > 16384 or '\0' in text)):

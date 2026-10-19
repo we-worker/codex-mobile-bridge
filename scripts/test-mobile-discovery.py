@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 WORK = ROOT / '.tmp/mobile-discovery-tests'
@@ -72,7 +73,7 @@ for name, source in files.items():
     path=WORK/name;path.parent.mkdir(parents=True,exist_ok=True);path.write_text(source)
 jdk=Path(os.environ['JAVA_HOME']) if os.environ.get('JAVA_HOME') else next((ROOT/'.tmp/mobile-tools/jdk').glob('*/Contents/Home'))
 source=ROOT/'mobile/android/src/io/github/try2love/codexbridge'
-subprocess.run([str(jdk/'bin/javac'),'-d',str(WORK),str(source/'GatewayURL.java'),str(source/'ConnectionDiscovery.java'),*[str(WORK/name) for name in files]],check=True)
+subprocess.run([str(jdk/'bin/javac'),'-encoding','UTF-8','-d',str(WORK),str(source/'GatewayURL.java'),str(source/'TailnetHttp.java'),str(source/'ConnectionDiscovery.java'),*[str(WORK/name) for name in files]],check=True)
 subprocess.run([str(jdk/'bin/java'),'-cp',str(WORK),'io.github.try2love.codexbridge.DiscoveryTests'],check=True)
 key=hashlib.sha256(b'fixture-mobile-cookie').hexdigest();device='a'*32;nonce='1'*64;target='https://next.example'
 code=hmac.new(key.encode(),(device+'\n'+target+'\n'+nonce).encode(),hashlib.sha256).hexdigest()
@@ -94,5 +95,6 @@ swift='''import Foundation
 }}'''
 for name,value in [('KEY',key),('DEVICE',device),('TARGET',target),('NONCE',nonce),('CODE',code)]:swift=swift.replace(name,json.dumps(value))
 (WORK/'main.swift').write_text(swift)
-subprocess.run(['xcrun','swiftc','-parse-as-library','-module-cache-path',str(WORK/'cache'),str(ROOT/'mobile/ios/BridgePreview/GatewayURL.swift'),str(ROOT/'mobile/ios/BridgePreview/ConnectionDiscovery.swift'),str(WORK/'main.swift'),'-o',str(WORK/'swift-tests')],check=True)
-subprocess.run([str(WORK/'swift-tests')],check=True)
+if sys.platform == 'darwin':
+    subprocess.run(['xcrun','swiftc','-parse-as-library','-module-cache-path',str(WORK/'cache'),str(ROOT/'mobile/ios/BridgePreview/GatewayURL.swift'),str(ROOT/'mobile/ios/BridgePreview/ConnectionDiscovery.swift'),str(WORK/'main.swift'),'-o',str(WORK/'swift-tests')],check=True)
+    subprocess.run([str(WORK/'swift-tests')],check=True)

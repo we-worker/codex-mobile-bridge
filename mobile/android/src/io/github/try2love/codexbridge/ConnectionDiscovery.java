@@ -28,7 +28,7 @@ final class ConnectionDiscovery {
  }
  JSONObject read(String address,String discoveryKey)throws Exception {
   if(cancelled)throw new InterruptedIOException();
-  HttpURLConnection c=(HttpURLConnection)new URL(address).openConnection();active=c;
+   HttpURLConnection c=TailnetHttp.open(new URL(address));active=c;
   c.setInstanceFollowRedirects(false);c.setUseCaches(false);c.setConnectTimeout(1800);c.setReadTimeout(1800);c.setRequestProperty("Accept","application/json");
   if(discoveryKey!=null)c.setRequestProperty("X-Discovery-Key",discoveryKey);
   try{

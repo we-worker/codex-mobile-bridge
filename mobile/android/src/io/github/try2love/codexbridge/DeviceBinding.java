@@ -60,7 +60,7 @@ final class DeviceBinding {
   HttpURLConnection connection=null;
   try{
    if(!GatewayURL.origin(origin).equals(origin))return false;
-   connection=(HttpURLConnection)new URL(origin+"/api/auth").openConnection();
+   connection=TailnetHttp.open(new URL(origin+"/api/auth"));
    connection.setInstanceFollowRedirects(false);connection.setConnectTimeout(4000);connection.setReadTimeout(4000);
    connection.setRequestProperty("Cookie",credential.cookie());connection.setRequestProperty("Origin",GatewayURL.httpOrigin(origin));connection.setRequestProperty("User-Agent",EventClient.USER_AGENT);
    if(connection.getResponseCode()!=200||!GatewayURL.sameOrigin(connection.getURL().toString(),origin))return null;

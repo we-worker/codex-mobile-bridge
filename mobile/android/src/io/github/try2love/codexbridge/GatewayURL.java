@@ -25,6 +25,9 @@ public final class GatewayURL {
         return base+"/"+(fragment==null?"":"#"+fragment);
     }
     public static String httpOrigin(String base){try{URI u=new URI(base);return u.getScheme()+"://"+u.getRawAuthority();}catch(Exception e){return "";}}
+ public static boolean tailnetOrigin(String value){
+  try{URI u=new URI(value);String host=u.getHost();return "https".equalsIgnoreCase(u.getScheme())&&host!=null&&host.toLowerCase(java.util.Locale.ROOT).endsWith(".ts.net")&&host.length()>7;}catch(Exception invalid){return false;}
+ }
     public static String cookiePath(String base){return base.substring(httpOrigin(base).length())+"/";}
     public static String apiPath(String url,String base)throws Exception {String path=new URI(url).getRawPath();String prefix=cookiePath(base);return path.startsWith(prefix)?"/"+path.substring(prefix.length()):"";}
     public static boolean sameOrigin(String url,String origin){try{URI u=new URI(url);return u.getRawUserInfo()==null&&httpOrigin(url).equals(httpOrigin(origin))&&u.getRawPath()!=null&&u.getRawPath().startsWith(cookiePath(origin))&&!u.getRawPath().contains("%")&&!u.getRawPath().contains("/../");}catch(Exception e){return false;}}

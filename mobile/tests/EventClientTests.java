@@ -8,6 +8,8 @@ import java.util.concurrent.atomic.AtomicReference;
 
 public final class EventClientTests {
  public static void main(String[] args)throws Exception {
+  check(GatewayURL.tailnetOrigin("https://phone.tail1234.ts.net/"),"Tailnet HTTPS origins use the embedded node");
+  for(String value:new String[]{"http://phone.tail1234.ts.net/","https://phone.tail1234.ts.net.evil.example/","https://ts.net/","https://127.0.0.1/"})check(!GatewayURL.tailnetOrigin(value),"Only HTTPS *.ts.net targets use the embedded node: "+value);
   HttpServer server=HttpServer.create(new InetSocketAddress("127.0.0.1",0),0);
   String origin="http://127.0.0.1:"+server.getAddress().getPort();
   AtomicReference<String> agent=new AtomicReference<>(""),mode=new AtomicReference<>("");

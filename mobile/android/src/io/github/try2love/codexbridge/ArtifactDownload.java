@@ -101,7 +101,7 @@ public final class ArtifactDownload {
    HttpURLConnection active=null;String target=url;
    try{
     for(int redirect=0;;redirect++){
-     active=(HttpURLConnection)new URL(target).openConnection();
+      active=TailnetHttp.open(new URL(target));
      active.setConnectTimeout(15000);active.setReadTimeout(30000);active.setInstanceFollowRedirects(false);
      active.setRequestProperty("Range","bytes="+start+"-"+end);active.setRequestProperty("Accept-Encoding","identity");active.setRequestProperty("User-Agent","BridgeMobile/0.1-Android");
      if(!update||gatewayUpdate){String cookie=cookies.read();if(cookie!=null&&!cookie.isEmpty())active.setRequestProperty("Cookie",cookie);}if(etag!=null)active.setRequestProperty("If-Range",etag);

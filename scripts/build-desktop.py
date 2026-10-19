@@ -13,10 +13,14 @@ root = Path(__file__).resolve().parents[1]
 (root/'dist/update-version.json').write_text(json.dumps({'version': json.loads((root/'package.json').read_text(encoding='utf-8'))['version'], 'platform': sys.platform, 'arch': {'aarch64':'arm64', 'arm64':'arm64', 'AMD64':'x64', 'x86_64':'x64'}.get(platform.machine(), platform.machine())}), encoding='utf-8')
 subprocess.run([sys.executable, str(root/'scripts/build-client-helpers.py')], check=True)
 subprocess.run([sys.executable, str(root/'scripts/bundle-cloudflared.py')], check=True)
+subprocess.run([sys.executable, str(root/'scripts/build-tsnet.py')], check=True)
 command = [sys.executable, '-m', 'PyInstaller', '--noconfirm', '--clean', '--onedir', '--name', 'codex-mobile-gateway',
            '--distpath', str(root/'dist'), '--workpath', str(root/'.tmp/pyinstaller'), '--specpath', str(root/'.tmp'),
            '--add-data', str(root/'web')+':web']
 command.extend(['--add-data', str(root/'dist/update-version.json')+':.', '--add-data', str(root/'dist/cloudflared')+':cloudflared', '--collect-all', 'paramiko', '--collect-all', 'keyring', '--collect-all', 'aiohttp'])
+tsnet_helper = root/'dist/tsnet'/('codex-tsnet.exe' if sys.platform == 'win32' else 'codex-tsnet')
+command.extend(['--add-binary', str(tsnet_helper)+':tsnet'])
+command.extend(['--add-data', str(root/'tsnet/third_party/tailscale')+':licenses/tailscale'])
 if sys.platform == 'darwin':
     command.extend(['--target-arch', platform.machine()])
 # Ship roots and their license explicitly; source users still need only stdlib.

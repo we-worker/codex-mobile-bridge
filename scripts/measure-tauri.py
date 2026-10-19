@@ -15,10 +15,12 @@ def measure(release):
         raise ValueError('Tauri executable not found')
     files = [p for p in runtime.rglob('*') if p.is_file()]
     cloudflared = sum(p.stat().st_size for p in files if p.name == 'cloudflared.exe')
+    tailscale_helper = sum(p.stat().st_size for p in files if p.name == 'codex-tsnet.exe')
     runtime_size = sum(p.stat().st_size for p in files)
     loader_size = sum(p.stat().st_size for p in release.glob('*.dll'))
     result = {'nativeExecutableBytes': executable.stat().st_size, 'gatewayBytes': runtime_size,
-              'cloudflaredBytes': cloudflared, 'nativeLoaderBytes': loader_size, 'applicationPayloadBytes': runtime_size+executable.stat().st_size+loader_size,
+              'cloudflaredBytes': cloudflared, 'tailscaleHelperBytes': tailscale_helper,
+              'nativeLoaderBytes': loader_size, 'applicationPayloadBytes': runtime_size+executable.stat().st_size+loader_size,
               'installers': [{'name':p.name,'bytes':p.stat().st_size} for p in sorted((release/'bundle/nsis').glob('*.exe'))],
               'excludes': 'WebView2 shared runtime, user data, installer/uninstaller metadata'}
     (ROOT/'.tmp').mkdir(exist_ok=True)

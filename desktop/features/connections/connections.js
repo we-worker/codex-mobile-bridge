@@ -87,8 +87,29 @@ function renderConnections(){
       const status=note(quickTunnelMessage());status.dataset.quickStatus='true';
       note('无需账号或域名；地址会随隧道重建变化。可在手机通知中配置入口通知。');
     }else if(row.accessMode==='tailscale'){
-      note('无需自建服务器。先登录官方 Tailscale 客户端，检测并保存固定地址，再启动网关。');
-      note('Tailscale 公网转发或中继链路可能经过境外节点，中国大陆直连可能较慢或超时；稳定的代理线路可能改善访问体验，实际速度以当前网络为准。');
+      function choice(key,label,values,defaultValue){
+        const wrap=document.createElement('label'),text=document.createElement('span'),select=document.createElement('select');text.textContent=t(label);select.dataset.connectionField=key;
+        for(const [value,optionLabel] of values){const option=document.createElement('option');option.value=value;option.textContent=t(optionLabel);select.append(option);}
+        select.value=row[key]??defaultValue;select.disabled=!!snapshot?.runtime.running;
+        select.onchange=()=>{row[key]=select.value;connectionSetupState.delete(row.id);renderConnections();updateDirty();};wrap.append(text,select);card.append(wrap);return select;
+      }
+      const runtime=choice('tailscaleRuntime','Tailscale 运行方式',[
+        ['embedded','App 内嵌 Tailscale（无需安装客户端）'],['system','系统 Tailscale 客户端']
+      ],'system');
+      runtime.onchange=()=>{row.tailscaleRuntime=runtime.value;row.publicUrl='';row.tailscaleNodeId='';connectionSetupState.delete(row.id);renderConnections();updateDirty();};
+      if(row.tailscaleRuntime==='embedded'){
+        note('由 App 启动用户态 Tailscale 节点，不安装 tailscaled、不接管系统路由，也不创建 VPN 接口。P2P 直连不可用时会使用 Tailscale DERP 中继。');
+        field('tailscaleHostname','设备名称','text','codex-mobile-bridge');
+        const authMode=choice('tailscaleAuthMode','登录方式',[
+          ['interactive','交互登录（首次打开授权链接）'],['authKey','Tailscale 认证密钥（适合无桌面环境）']
+        ],'interactive');
+        authMode.onchange=()=>{row.tailscaleAuthMode=authMode.value;renderConnections();updateDirty();};
+        if(row.tailscaleAuthMode==='authKey')secretFields([['authKey','Tailscale 认证密钥']]);
+        note('认证密钥只保存到系统凭据存储，并通过私密进程输入传递；不会写入普通配置、日志或命令行。');
+      }else{
+        note('无需自建服务器。先登录官方 Tailscale 客户端，检测并保存固定地址，再启动网关。');
+      }
+      note('Tailscale 公网转发或中继链路可能经过境外节点，实际速度取决于当前网络；内嵌 tsnet 不保证比系统客户端更快。');
       for(const [key,label,values] of [
         ['tailscaleMode','访问范围',[['funnel','公网访问 · Funnel'],['serve','私有组网 · Serve']]],
         ['tailscalePort','HTTPS 端口',[[443,'443（默认）'],[8443,'8443'],[10000,'10000']]]
@@ -99,16 +120,17 @@ function renderConnections(){
         select.onchange=()=>{row[key]=key==='tailscalePort'?Number(select.value):select.value;if(key==='tailscalePort'){row.publicUrl='';row.tailscaleNodeId='';}connectionSetupState.delete(row.id);renderConnections();updateDirty();};
         wrap.append(text,select);card.append(wrap);
       }
-      note(row.tailscaleMode==='serve'?'只有已接入同一 Tailscale 网络的手机或浏览器可以访问。':'手机和普通浏览器无需安装 Tailscale；需开启网关登录验证。首次使用可能需要授权 HTTPS 和 Funnel。');
+      note(row.tailscaleMode==='serve'?'只有已接入同一 Tailscale 网络的手机或浏览器可以访问；手机端需使用 Tailscale 客户端或其他 Tailnet 接入方式。':'手机和普通浏览器无需安装 Tailscale；需开启网关登录验证。首次使用可能需要授权 HTTPS 和 Funnel。');
+      if(row.tailscaleRuntime==='embedded')note('内嵌节点在 App 退出网关时停止。首次交互登录会生成一次性 Tailscale 官方登录地址；无桌面主机建议使用认证密钥。');
       const address=field('publicUrl','固定访问地址','text','检测后自动读取');address.readOnly=true;address.onfocus=null;address.onblur=null;
       note('保留 Tailscale 设备与名称时，重启后地址不变。国内访问速度取决于实际线路，请用蜂窝网络验证。');
       if(row.tailscaleMode!=='serve')note('首次启用后，公网 DNS 生效可能需要最多 10 分钟。');
       const actions=document.createElement('div');actions.className='actions';
-      const help=document.createElement('button');help.type='button';help.textContent=t('安装与登录指引');help.onclick=()=>api.open('tailscale-help').catch(showError);actions.append(help);
-      actions.append(action('检测 Tailscale 并读取地址','tailscaleInspect',async()=>{
+      if(row.tailscaleRuntime==='system'){const help=document.createElement('button');help.type='button';help.textContent=t('安装与登录指引');help.onclick=()=>api.open('tailscale-help').catch(showError);actions.append(help);}
+      actions.append(action(row.tailscaleRuntime==='embedded'?'检测内嵌 Tailscale 并读取地址':'检测 Tailscale 并读取地址','tailscaleInspect',async()=>{
         const result=await api.tailscaleSetup({id:row.id});connectionSetupState.set(row.id,result.message);
         if(result.state==='ready'){
-          if(snapshot?.runtime.running&&(row.publicUrl!==result.url||row.tailscaleNodeId!==result.nodeId))throw Error(t('请先停止网关，再更新 Tailscale 固定地址。'));
+          if(snapshot?.runtime.running&&row.publicUrl&&row.tailscaleNodeId&&(row.publicUrl!==result.url||row.tailscaleNodeId!==result.nodeId))throw Error(t('请先停止网关，再更新 Tailscale 固定地址。'));
           row.publicUrl=result.url;row.tailscaleNodeId=result.nodeId;
         }
         return result;
@@ -116,7 +138,7 @@ function renderConnections(){
       actions.append(action('继续 Tailscale 授权','tailscaleAuthorize',()=>api.tailscaleAuthorize({id:row.id})));
       actions.append(action('检测固定入口','checkEntry',()=>api.checkEntry({id:row.id})));card.append(actions);
       const status=note([connectionSetupState.get(row.id),snapshot?.externalStatus?.[row.id]?.message].filter(Boolean).map(t).join(' ')||'先保存连接配置，然后检测 Tailscale。');status.dataset.connectionStatus=row.id;
-      note('入口随网关启停；退出网关不会退出 Tailscale 或修改其他服务。');
+      note(row.tailscaleRuntime==='embedded'?'入口与内嵌节点随网关启停；不会修改系统 Tailscale 或其他服务。':'入口随网关启停；退出网关不会退出 Tailscale 或修改其他服务。');
     }else if(row.accessMode==='external'||row.accessMode==='nas'){
       const address=field('publicUrl','手机访问地址（HTTPS）','text','https://bridge.example.com');
       address.required=true;
@@ -220,7 +242,7 @@ function renderConnections(){
 document.getElementById('port').addEventListener?.('input',()=>{for(const target of document.querySelectorAll('[data-loopback-target]'))target.textContent='http://127.0.0.1:'+($('port').value||8787);});
 function addConnection(){
   if(snapshot?.runtime.running)return;
-  connectionDraft.push({id:crypto.randomUUID(),name:'',enabled:true,accessMode:$('connection-kind').value,publicUrl:'',sshTarget:'',sshRemotePort:18787,proxyUpstream:'',sshAuth:'password',sshHost:'',sshUser:'',sshPort:22,sshKeyPath:'',tailscaleMode:'funnel',tailscalePort:443,tailscaleNodeId:''});
+  connectionDraft.push({id:crypto.randomUUID(),name:'',enabled:true,accessMode:$('connection-kind').value,publicUrl:'',sshTarget:'',sshRemotePort:18787,proxyUpstream:'',sshAuth:'password',sshHost:'',sshUser:'',sshPort:22,sshKeyPath:'',tailscaleMode:'funnel',tailscalePort:443,tailscaleNodeId:'',tailscaleRuntime:'embedded',tailscaleHostname:'codex-mobile-bridge',tailscaleAuthMode:'interactive'});
   connectionExpanded.set(connectionDraft[connectionDraft.length-1].id,true);
   renderConnections();updateDirty();
 }

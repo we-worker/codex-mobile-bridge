@@ -14,6 +14,8 @@ from bridge.app.desktop import Desktop
 ROOT = Path(__file__).resolve().parents[1]
 ENTRY = {**access.DEFAULTS, 'id': 'ts', 'name': '', 'enabled': True, 'accessMode': 'tailscale',
          'publicUrl': 'https://computer.example.ts.net', 'tailscaleNodeId': 'n123'}
+EMBEDDED = {**ENTRY, 'publicUrl': '', 'tailscaleNodeId': '', 'tailscaleRuntime': 'embedded',
+            'tailscaleHostname': 'embedded-bridge', 'tailscaleAuthMode': 'interactive'}
 STATUS = {'Version': '1.102.4', 'BackendState': 'Running',
           'Self': {'DNSName': 'computer.example.ts.net.', 'ID': 'n123'}}
 
@@ -132,6 +134,155 @@ class TailscaleTests(unittest.TestCase):
         preferences = {'connections': [ENTRY]}
         self.assertEqual(entry_urls(preferences, [], '', {'ts': {'state': 'connecting'}}), [])
         self.assertEqual(entry_urls(preferences, [], '', {'ts': {'state': 'connected'}}), [ENTRY['publicUrl']])
+        live = 'https://actual-network.example.ts.net:8443'
+        self.assertEqual(entry_urls(preferences, [], '',
+                                    {'ts': {'state': 'connected', 'url': live}}), [live])
+
+    def test_embedded_status_requires_the_current_gateway_runtime(self):
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            directory = Path(folder)
+            helper = directory/'codex-tsnet'
+            helper.write_text('fixture')
+            from bridge.features.notifications.channels import write_json
+            write_json(tailscale.status_path(directory, EMBEDDED), {
+                'pid': 41, 'state': 'connected', 'url': ENTRY['publicUrl'],
+                'nodeId': 'n123', 'instanceId': 'gateway-instance',
+            })
+            with patch.object(tailscale, 'embedded_executable', return_value=str(helper)):
+                current = tailscale.inspect(EMBEDDED, directory, 41, 'gateway-instance')
+                stale = tailscale.inspect(EMBEDDED, directory, 42)
+                other_instance = tailscale.inspect(EMBEDDED, directory, 41, 'another-instance')
+                desktop = Desktop(directory)
+                desktop.preferences = lambda: {
+                    'connections': [ENTRY | {'tailscaleRuntime': 'embedded'}],
+                    'lan': False, 'port': 8787,
+                }
+                desktop.status = lambda: {'running': False}
+                stopped = desktop.tailscale_setup({'id': 'ts'})
+            self.assertEqual(current['state'], 'ready')
+            self.assertEqual(current['url'], ENTRY['publicUrl'])
+            self.assertEqual(stale['state'], 'stopped')
+            self.assertEqual(other_instance['state'], 'stopped')
+            self.assertEqual(stopped['state'], 'stopped')
+
+    def test_saved_embedded_address_is_not_a_persistent_trusted_origin(self):
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            desktop = Desktop(folder)
+            desktop.status = lambda: {'running': False}
+            value = desktop.snapshot()
+            value['preferences'].update(codexHome=folder, connections=[ENTRY | {
+                'tailscaleRuntime': 'embedded',
+            }])
+            desktop.save(value)
+            config = desktop.config()
+            self.assertNotIn(ENTRY['publicUrl'], config['origins'])
+            self.assertEqual(config['publicUrl'], '')
+            self.assertNotIn(ENTRY['publicUrl'], desktop.snapshot()['urls'])
+
+    def test_embedded_helper_receives_auth_key_only_on_private_stdin(self):
+        secret = 'tskey-auth-fixture-private'
+        live = 'https://embedded-bridge.example.ts.net'
+        origins = []
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            process = MagicMock()
+            process.pid = 123
+            process.poll.return_value = 0
+            entry = {**EMBEDDED, 'tailscaleAuthMode': 'authKey'}
+            tunnel = tailscale.TailscaleTunnel(
+                entry, 8787, folder, {'authKey': secret},
+                allow_origin=lambda entry_id, origin, node_id:
+                    origins.append((entry_id, origin, node_id)),
+                instance_id='0123456789abcdef0123456789abcdef')
+            class Output:
+                def __iter__(self):
+                    yield json.dumps({
+                        'state': 'listening', 'url': live, 'nodeId': 'n123',
+                        'instanceId': '0123456789abcdef0123456789abcdef',
+                    }) + '\n'
+                    tunnel.stopped.set()
+                def close(self):
+                    pass
+            process.stdout = Output()
+            with patch.object(tailscale, 'embedded_executable', return_value='/fixture/codex-tsnet'), \
+                 patch.object(tailscale.subprocess, 'Popen', return_value=process) as spawn:
+                tunnel.start()
+                tunnel.thread.join(3)
+            self.assertFalse(tunnel.thread.is_alive())
+            argv = spawn.call_args.args[0]
+            self.assertNotIn(secret, ' '.join(argv))
+            self.assertIn(secret, process.stdin.write.call_args.args[0])
+            persisted = (Path(folder)/'ssh-status-ts.json').read_text(encoding='utf-8')
+            self.assertNotIn(secret, persisted)
+            self.assertEqual(origins[1], ('ts', live, 'n123'))
+            self.assertEqual(tunnel.last_status['state'], 'connected')
+
+    def test_embedded_helper_requires_the_current_gateway_instance(self):
+        live = 'https://embedded-bridge.example.ts.net'
+        origins = []
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            process = MagicMock()
+            process.pid = 123
+            process.poll.return_value = 0
+            tunnel = tailscale.TailscaleTunnel(
+                EMBEDDED, 8787, folder, {},
+                allow_origin=lambda entry_id, origin, node_id:
+                    origins.append((entry_id, origin, node_id)),
+                instance_id='0123456789abcdef0123456789abcdef')
+            class Output:
+                def __iter__(self):
+                    yield json.dumps({
+                        'state': 'listening', 'url': live, 'nodeId': 'n123',
+                        'instanceId': 'ffffffffffffffffffffffffffffffff',
+                    }) + '\n'
+                    tunnel.stopped.set()
+                def close(self):
+                    pass
+            process.stdout = Output()
+            with patch.object(tailscale, 'embedded_executable', return_value='/fixture/codex-tsnet'), \
+                 patch.object(tailscale.subprocess, 'Popen', return_value=process):
+                tunnel.start()
+                tunnel.thread.join(3)
+            self.assertFalse(tunnel.thread.is_alive())
+            self.assertNotIn(('ts', live, 'n123'), origins)
+            self.assertNotEqual((tunnel.last_status or {}).get('state'), 'connected')
+
+    def test_embedded_origin_is_published_only_after_exact_live_identity(self):
+        import run
+        old = ENTRY['publicUrl']
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            config_path = Path(folder)/'config.json'
+            config_path.write_text(json.dumps({
+                'auth': {'mode': 'password'}, 'origins': [old],
+            }))
+            main, private = MagicMock(), MagicMock()
+            main.origins, main.hosts, main.secure_hosts = set(), set(), set()
+            private.server_address = ('127.0.0.1', 45678)
+            with patch.object(run.sys, 'argv', ['run.py', '--config', str(config_path)]), \
+                 patch.object(run.sys, 'stdout', MagicMock()), patch.object(run, 'Bridge'), \
+                 patch.object(run, 'Notifications'), patch.object(run, 'AddressNotifications'), \
+                 patch.object(run, 'GatewayControl'), patch.object(run.signal, 'signal'), \
+                 patch.object(run, 'GatewayServer', side_effect=[main, private]) as listeners, \
+                 patch('bridge.features.network.discovery.ConnectionDiscovery'), \
+                 patch('bridge.features.network.shared_relay.start', return_value=None), \
+                 patch.object(tailscale, 'TailscaleTunnel') as tunnel:
+                run.main(connections=[{**ENTRY, 'tailscaleRuntime': 'embedded'}])
+            runtime_config = next(row.args[2] for row in listeners.call_args_list)
+            self.assertNotIn(old, runtime_config['origins'])
+            self.assertEqual(runtime_config['publicUrl'], '')
+            allow = tunnel.call_args.kwargs['allow_origin']
+            live = 'https://actual-network.example.ts.net'
+            allow('ts', live, 'n123')
+            self.assertIn(live, main.origins)
+            self.assertIn('actual-network.example.ts.net', main.hosts)
+            self.assertIn('actual-network.example.ts.net', main.secure_hosts)
+            self.assertEqual(runtime_config['publicUrl'], live)
+            allow('ts', 'https://actual-network.example.ts.net.evil.test', 'n123')
+            self.assertNotIn(live, main.origins)
+            self.assertNotIn('actual-network.example.ts.net', main.hosts)
+            self.assertEqual(runtime_config['publicUrl'], '')
+            allow('ts', live, 'n123')
+            allow('ts', '', '')
+            self.assertNotIn(live, main.origins)
 
     def test_fixed_entry_uses_verified_owner_when_loopback_port_is_shadowed(self):
         preferences = {**ENTRY, 'port': 8787}

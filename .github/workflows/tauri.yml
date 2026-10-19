@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-    paths: ['src-tauri/**', 'desktop/**', 'desktop.py', 'bridge/**', 'web/**', 'scripts/**', 'tests/**', 'package*.json', 'requirements*.txt', '.github/workflows/tauri.yml']
+    paths: ['src-tauri/**', 'desktop/**', 'desktop.py', 'bridge/**', 'web/**', 'scripts/**', 'tests/**', 'tsnet/**', 'package*.json', 'requirements*.txt', '.github/workflows/tauri.yml']
 permissions:
   contents: read
 jobs:
@@ -18,6 +18,10 @@ jobs:
         with:
           node-version: '24'
           cache: npm
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: tsnet/go.mod
+          cache-dependency-path: tsnet/go.sum
       - uses: dtolnay/rust-toolchain@stable
         with:
           toolchain: stable

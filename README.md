@@ -206,7 +206,7 @@ Windows 关闭窗口会收起到系统托盘；双击托盘或再次启动 App �
 
 右上角可切换 **简体中文 / English**，与 Mac 新界面位置一致。首次启动按系统语言选择（英文系统使用英文，其他语言回退简体中文），之后记住手动选择，并保留旧 Windows 版已保存的语言偏好。切换立即更新桌面页面、连接配置、状态提示和 Windows 托盘，不重启网关、不丢弃未保存配置。桌面偏好保存在 App 用户目录的 `language.json`。手机网页使用同一翻译表，但语言可独立选择并记忆；原始运行日志和聊天内容不翻译，未知系统错误保留原始诊断信息。
 
-外网访问在“网络访问 → 添加连接”添加并启用连接，可选择临时 HTTPS、已有穿透 / 反向代理、自有服务器 SSH 或 NAS 反代。桌面 App 已内置 `cloudflared.exe`，临时和固定 Cloudflare 隧道无需另行安装；复用旧 `.local` 时会查找其 `bin/cloudflared.exe`，旧单入口配置也会自动迁移为连接项。等待入口就绪并检查实际 HTTPS 地址，`127.0.0.1` 不是手机外网入口。默认保留账号密码保护。
+外网访问在“网络访问 → 添加连接”添加并启用连接，可选择临时 HTTPS、已有穿透 / 反向代理、自有服务器 SSH、NAS 反代或 Tailscale。桌面 App 已内置 `cloudflared.exe`；Tailscale 可选择 App 内嵌用户态节点，无需安装系统 Tailscale 或创建 VPN 接口。Android App 也内置独立 `tsnet` 节点，可直接访问私有 Serve 的 `.ts.net` 地址，同样不接管系统 VPN 或手机路由。复用旧 `.local` 时会查找其 `bin/cloudflared.exe`，旧单入口配置也会自动迁移为连接项。等待入口就绪并检查实际 HTTPS 地址，`127.0.0.1` 不是手机外网入口。默认保留账号密码保护。
 
 未保存修改会在对应设置页的侧栏入口和底部保存栏显示小红点；切换页面仍保留提示，保存成功或改回原值后清除，保存失败时继续保留。
 
@@ -233,7 +233,7 @@ Windows 关闭窗口会收起到系统托盘；双击托盘或再次启动 App �
 | 临时 HTTPS | 无域名，愿意使用 Cloudflare | 添加连接、保存并启动；自动使用内置程序 |
 | 已有穿透 / 反向代理 | 已自行配置好到本机回环网关的 HTTPS 入口 | 只填手机 HTTPS 根地址（可含端口）；见[配置指南](docs/external-tunnel.md) |
 | Cloudflare 固定隧道 | 有私人域名，没有服务器 | 在 Cloudflare 配置 DNS 与公开主机名，填写域名和 Tunnel Token |
-| 固定 HTTPS · Tailscale | 希望固定地址且不自建服务器 | 安装登录官方 Tailscale，检测地址并完成 Funnel/Serve 授权，见[指引](docs/tailscale.md) |
+| 固定 HTTPS · Tailscale | 希望固定地址且不自建服务器 | 可选 App 内嵌用户态节点或系统客户端，完成登录、Serve/Funnel 和入口检测，见[指引](docs/tailscale.md) |
 | 自有服务器 + SSH | 有 Linux 公网服务器；电脑在校园网或 NAT 后 | 准备 HTTPS 与转发权限，再填普通用户 SSH；域名需绑定公网 IP，留空使用 HTTPS 公网 IP 时须有匹配 IP 的受信任证书 |
 | NAS / 其他设备（已有穿透的高级选项） | NAS 已能访问电脑，已有域名和 HTTPS 反代 | 填固定 HTTPS 地址、NAS 可达的电脑 HTTP 地址；直接反代或导出 Nginx Docker 包 |
 
