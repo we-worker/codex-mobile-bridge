@@ -2,6 +2,7 @@
 // Node is build tooling only; it is never shipped with the Tauri application.
 const {spawnSync}=require('node:child_process');
 const fs=require('node:fs'),path=require('node:path');
+const {validateGatewayMetadata}=require('./tauri-build-metadata.cjs');
 const root=path.resolve(__dirname,'..');
 const command=process.argv[2]||'dev';
 if(!['dev','build'].includes(command))throw Error('Use dev or build');
@@ -32,6 +33,10 @@ const args=process.argv.slice(3);
 // npm on Windows can consume the unknown `--target` option while leaving its
 // value behind. A lone Rust target triple is unambiguous, so restore the flag.
 if(command==='build'&&args.length===1&&/^[a-z0-9_]+(?:-[a-z0-9_]+)+$/i.test(args[0]))args.unshift('--target');
+if(command==='build'){
+  const targetIndex=args.indexOf('--target');
+  validateGatewayMetadata(root,targetIndex>=0?args[targetIndex+1]:null);
+}
 const result=spawnSync(process.execPath,[cli,command,...args],{cwd:root,env,stdio:'inherit'});
 if(result.error)throw result.error;
 process.exitCode=result.status??1;
