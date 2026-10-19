@@ -17,6 +17,7 @@ from bridge.clients.codex.catalog import Catalog
 from bridge.features.sessions.model import normalize_state, normalize_request, computer_use_approval
 from bridge.features.sessions.timeline import Timeline
 from bridge.features.sessions.store import StoreUnavailable
+from bridge.features.sessions.projects import Projects
 from bridge.features.workspace.uploads import Uploads
 from bridge.platforms.windows import wsl
 from bridge.resources import source_text
@@ -89,6 +90,7 @@ class WslEntry:
         self.creations_path = self.data_dir / 'creations.json'
         self.creations = json.loads(self.creations_path.read_text(encoding='utf-8')) if self.creations_path.exists() else {}
         self.store = WslStore(self)
+        self.directory_projects = Projects(self.data_dir)
         self.uploads = Uploads(self.data_dir, lambda *args: upload_file(self.row['distribution'], *args, reader=self.read))
         self.worker = threading.Thread(target=self._maintain, daemon=True)
         self.worker.start()
@@ -197,7 +199,7 @@ class WslEntry:
                     if not cursor:
                         break
                 turns.reverse()
-                state = {'id': session.id, 'title': thread.get('name') or metadata.get('name') or metadata.get('title'),
+                state = {'id': session.id, 'title': thread.get('name') or metadata.get('name') or metadata.get('display_title') or metadata.get('title'),
                          'cwd': thread.get('cwd'), 'latestModel': thread.get('model'),
                          'latestReasoningEffort': thread.get('reasoningEffort'), 'modelProvider': thread.get('modelProvider'),
                          'threadRuntimeStatus': thread.get('status') or {},
@@ -209,6 +211,7 @@ class WslEntry:
                     raise IPCError('WSL 原连接已变化')
             except IPCError as exc:
                 state = self.store.history(session.id, turn_limit=session.history_limit)
+                state['title'] = metadata.get('display_title') or state.get('title')
                 connected, error = False, str(exc)
             with session.condition:
                 requests = session.state.get('requests', [])
@@ -270,7 +273,7 @@ class WslEntry:
         for row in rows:
             cwd = row.get('cwd') or ''
             row.update(host=self.host, endpointId=self.host, hostLabel=self.row['label'],
-                       title=row.get('name') or row.get('title') or '未命名聊天',
+                       title=row.get('name') or row.get('display_title') or row.get('title') or '未命名聊天',
                        projectKey=self.host + '|' + cwd, projectName=cwd.rstrip('/').rsplit('/', 1)[-1] or '未归类',
                        recency=row.get('recency_at_ms') or (row.get('recency_at') or 0) * 1000 or row.get('updated_at_ms') or (row.get('updated_at') or 0) * 1000)
             with self.lock:
@@ -390,14 +393,34 @@ class WslEntry:
         return {'ok': True, 'host': self.host}
 
     def projects(self):
-        """Offer existing WSL workspaces; phone input never supplies a raw path."""
+        """History workspaces plus explicitly validated directory selections."""
         try:
             rows = self.store.list(limit=1000)
         except StoreUnavailable:
             rows = []
         roots = sorted({row['cwd'] for row in rows if isinstance(row.get('cwd'), str) and row['cwd'].startswith('/')})
-        return [{'key': self.host + '|' + cwd, 'host': self.host, 'hostLabel': self.row['label'],
-                 'cwd': cwd, 'name': cwd.rstrip('/').rsplit('/', 1)[-1] or cwd} for cwd in roots]
+        registered = self.directory_projects.list({self.host})
+        known = {row['cwd'] for row in registered}
+        return registered + [{'key': self.host + '|' + cwd, 'host': self.host, 'hostLabel': self.row['label'],
+                 'cwd': cwd, 'name': cwd.rstrip('/').rsplit('/', 1)[-1] or cwd} for cwd in roots if cwd not in known]
+
+    def register_project(self, path, create=False, host=None):
+        if host not in (None, self.host): raise ValueError('请选择当前 WSL 应用的目录')
+        # Explicit action can wake only this already registered distribution.
+        self.runtime(allow_start=True)
+        source = source_text('features/sessions/create.py')
+        source += '\ntry:\n result=project_directory(**' + payload({'value': path, 'create': create}) + ')\nexcept ValueError as error: result={"error":str(error)}\nprint(json.dumps(result))\n'
+        identity = self.read(self.row['distribution'], source)
+        if identity.get('error'): raise ValueError(identity['error'])
+        return self.directory_projects.save(self.host, self.row['label'], identity)
+
+    def project_directories(self, host, path=None, hidden=False, name=None, identity=None):
+        if host != self.host: raise ValueError('请选择当前 WSL 应用')
+        source = source_text('features/sessions/create.py')
+        source += '\ntry:\n result=project_directory_listing(**' + payload({'value':path,'hidden':hidden,'name':name,'identity':identity}) + ')\nexcept ValueError as error: result={"error":str(error)}\nprint(json.dumps(result))\n'
+        result = self.read(self.row['distribution'], source)
+        if result.get('error'): raise ValueError(result['error'])
+        return result
 
     def create_chat(self, project_key, title, request_id):
         if not isinstance(request_id, str):
@@ -427,7 +450,8 @@ class WslEntry:
                     source += source_text('features/sessions/create.py')
                     source += '\nprint(json.dumps({"cwd":independent_directory(' + repr(self.row['home'] + '/mobile-bridge') + ',' + repr(request_id) + ')}))\n'
                 else:
-                    source += 'p=Path(' + repr(project['cwd']) + ')\nif not p.is_dir():raise ValueError("Workspace unavailable")\nprint(json.dumps({"cwd":str(p.resolve())}))\n'
+                    source += source_text('features/sessions/create.py')
+                    source += '\nprint(json.dumps(project_directory(**' + payload({'value': project['cwd'], 'expected': project.get('directoryIdentity')}) + ')))\n'
                 cwd = self.read(self.row['distribution'], source)['cwd']
                 receipt = self.creations[request_id] = {'project': project_key, 'title': title, 'cwd': cwd}
                 self.data_dir.mkdir(parents=True, exist_ok=True)

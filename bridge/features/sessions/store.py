@@ -23,16 +23,47 @@ class SessionStore:
         self.home = Path(codex_home).resolve()
         self.history_cache = OrderedDict()
         self.history_lock = threading.Lock()
+        self.cli_inputs_lock = threading.Lock()
+        self.cli_inputs_cache = None
+
+    def _cli_inputs(self, query=''):
+        """CLI resume labels/search, without changing saved titles or ownership."""
+        if self.source != 'cli': return {}, set()
+        path = self.home/'history.jsonl'
+        try:
+            st = path.stat()
+            signature = (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns, query)
+        except OSError:
+            return {}, set()
+        with self.cli_inputs_lock:
+            if self.cli_inputs_cache and self.cli_inputs_cache[0] == signature:
+                return self.cli_inputs_cache[1:]
+            latest, matches = {}, set()
+            needle = query.casefold()
+            try:
+                with path.open(encoding='utf-8', errors='replace') as stream:
+                    for line in stream:
+                        try: record = json.loads(line)
+                        except ValueError: continue
+                        if not isinstance(record, dict): continue
+                        identifier, text = record.get('session_id'), record.get('text')
+                        if not isinstance(identifier, str) or not isinstance(text, str) or not text.strip(): continue
+                        latest[identifier] = ' '.join(text.split())[:200]
+                        if needle and needle in text.casefold(): matches.add(identifier)
+            except OSError:
+                return {}, set()
+            self.cli_inputs_cache = (signature, latest, matches)
+            return latest, matches
 
     def _owner_filter(self, columns):
         if self.source == 'cli':
-            return "((source = 'cli' AND originator IS NULL) OR (source IN ('cli', 'vscode') AND originator IN ('codex-tui', 'codex_mobile_bridge_wsl')))" if 'originator' in columns else "source = 'cli'"
+            return "((source = 'cli' AND originator IS NULL) OR (source IN ('cli', 'vscode') AND originator IN ('codex-tui', 'codex_mobile_bridge', 'codex_mobile_bridge_wsl')))" if 'originator' in columns else "source = 'cli'"
         return "(originator IN ('Codex Desktop', 'codex_work_desktop', 'codex_mobile_bridge') OR (originator IS NULL AND source = 'vscode'))" if 'originator' in columns else '1'
 
     def _matches(self, row):
         if self.source == 'cli':
             return ((row.get('source') == 'cli' and row.get('originator') is None)
-                    or (row.get('source') in ('cli', 'vscode') and row.get('originator') in ('codex-tui', 'codex_mobile_bridge_wsl')))
+                    or (row.get('source') in ('cli', 'vscode') and row.get('originator') in ('codex-tui', 'codex_mobile_bridge', 'codex_mobile_bridge_wsl')))
         return row.get('originator') in ('Codex Desktop', 'codex_work_desktop', 'codex_mobile_bridge') or (row.get('originator') is None and row.get('source') == 'vscode')
 
     @contextmanager
@@ -75,6 +106,7 @@ class SessionStore:
             raise StoreUnavailable("暂时无法读取 Codex 会话数据库，请稍后重试或重新打开电脑 Codex。") from exc
 
     def list(self, query="", limit=100, offset=0, archived=False):
+        labels, matches = self._cli_inputs(query)
         with self._connect() as conn:
             columns = {r[1] for r in conn.execute("PRAGMA table_info(threads)")}
             fields = [name for name in ("id", "name", "title", "cwd", "updated_at", "updated_at_ms", "recency_at", "recency_at_ms", "model_provider", "model", "originator", "source", "archived", "is_pinned") if name in columns]
@@ -87,11 +119,18 @@ class SessionStore:
                 where.append("COALESCE(source, '') NOT LIKE '%\"subagent\"%'")
             if query:
                 search_fields = [name for name in ("name", "title", "cwd") if name in columns]
-                where.append("(" + " OR ".join(name + " LIKE ?" for name in search_fields) + ")")
+                # History can contain many matching IDs; a read-only function
+                # avoids SQLite's placeholder limit, before sorting/pagination.
+                conn.create_function('bridge_cli_input_match', 1, lambda identifier: identifier in matches)
+                where.append("(" + " OR ".join([name + " LIKE ?" for name in search_fields] + ['bridge_cli_input_match(id)']) + ")")
                 params += ["%" + query + "%"] * len(search_fields)
             recency = "COALESCE(recency_at_ms, recency_at * 1000, updated_at * 1000)" if "recency_at_ms" in columns else "COALESCE(recency_at, updated_at)" if "recency_at" in columns else "updated_at"
             rows = conn.execute("SELECT " + ",".join(fields) + " FROM threads WHERE " + " AND ".join(where) + " ORDER BY " + recency + " DESC, id DESC LIMIT ? OFFSET ?", params + [limit, offset]).fetchall()
-            return [dict(row) for row in rows]
+            result = [dict(row) for row in rows]
+            for row in result:
+                if self.source == 'cli':
+                    row['display_title'] = row.get('name') or labels.get(row['id']) or row.get('title')
+            return result
 
     def notification_changes(self, since=0):
         """Only metadata changed since discovery; never read rollout history."""
@@ -148,6 +187,9 @@ class SessionStore:
             desktop = self._matches(result)
             if not desktop or result.get("thread_source") == "subagent" or '"subagent"' in (result.get("source") or ""):
                 raise KeyError("不是桌面 App 会话")
+            if self.source == 'cli':
+                labels, _ = self._cli_inputs()
+                result['display_title'] = result.get('name') or labels.get(thread_id) or result.get('title')
             return result
 
     @staticmethod

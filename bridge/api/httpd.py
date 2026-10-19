@@ -575,13 +575,26 @@ class Handler(BaseHTTPRequestHandler):
                 if set(body) != {'action', 'id', 'enabled'} or body['action'] != 'configure':
                     raise ValueError('Codex 入口请求无效')
                 return self.output(200, entries.configure(body['id'], body['enabled']))
-            if not write and path == '/api/projects':
+            if path in ('/api/projects', '/api/projects/browse'):
                 entry = query.get('entry', ['desktop'])[0]
                 if self.server.desktop_sessions:
                     self.server.desktop_sessions.require_enabled(entry if entry.startswith('wsl:') else 'codex')
                 if entry != 'desktop':
-                    return self.output(200, {'projects': self.server.bridge.entries.get(entry).projects()})
-                return self.output(200, {'projects': self.server.bridge.hosts.projects()})
+                    target = self.server.bridge.entries.get(entry)
+                else:
+                    target = self.server.bridge
+                if path.endswith('/browse'):
+                    if not write: return self.output(405, {'error': '请通过目录选择器浏览'})
+                    body = self.read_json()
+                    if not isinstance(body, dict) or set(body) != {'host', 'path', 'hidden', 'name', 'identity'}:
+                        raise ValueError('目录浏览请求无效')
+                    return self.output(200, target.project_directories(**body))
+                if write:
+                    body = self.read_json()
+                    if not isinstance(body, dict) or set(body) != {'path', 'createDirectory', 'host'}:
+                        raise ValueError('项目目录请求无效')
+                    return self.output(200, {'project': target.register_project(body['path'], body['createDirectory'], body['host'])})
+                return self.output(200, {'projects': target.projects()})
             if write and path == '/api/activity':
                 groups = self.read_json().get('hosts')
                 if not isinstance(groups, dict) or len(groups) > 20:

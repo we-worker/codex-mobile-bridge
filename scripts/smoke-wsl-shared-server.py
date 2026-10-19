@@ -219,6 +219,16 @@ def main():
                 wait(lambda: len(requests) == count + 2 and entry.server.request('thread/read', {'threadId': created['id'], 'includeTurns': False})['thread']['status']['type'] == 'idle')
                 assert config.read_bytes() == original_config and not (home/'auth.json').exists()
                 print('PASS: mobile creates a durable WSL chat once, lists it only in WSL, and sends without opening a TUI.', flush=True)
+                parent = entry.project_directories(entry.host, str(root.resolve()))
+                selected = entry.project_directories(entry.host, parent['path'], name='chosen project', identity=parent['identity'])
+                directory = Path(selected['path'])
+                project = entry.register_project(str(directory.resolve()), False, entry.host)
+                chosen = entry.create_chat(project['key'], 'Synthetic chosen project', str(uuid.uuid4()))
+                assert directory.is_dir()
+                assert entry.store.get(chosen['id'])['cwd'] == str(directory.resolve())
+                assert entry.server.request('thread/read', {'threadId': chosen['id'], 'includeTurns': False})['thread']['cwd'] == str(directory.resolve())
+                assert len(requests) == count + 2, 'Choosing a directory unexpectedly sent a model request'
+                print('PASS: explicit project directory is created, revalidated and used as the durable native thread cwd without a model request.', flush=True)
             except Exception as error:
                 if entry is not None:
                     pending = [r for session in entry.live.values() for r in session.state.get('requests', [])]

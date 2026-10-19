@@ -96,6 +96,40 @@ class RegistryTests(unittest.TestCase):
 
 
 class CliStoreTests(unittest.TestCase):
+    def test_cli_later_inputs_are_searchable_before_paging_and_do_not_rename_originals(self):
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            home = Path(folder)
+            with closing(sqlite3.connect(home/'state_5.sqlite')) as db:
+                db.execute('CREATE TABLE threads (id TEXT, name TEXT, title TEXT, cwd TEXT, originator TEXT, source TEXT, archived INTEGER, updated_at INTEGER)')
+                db.executemany('INSERT INTO threads VALUES (?,?,?,?,?,?,?,?)', [
+                    ('old', None, 'Original question', '/fixture/old', 'codex-tui', 'cli', 0, 1),
+                    ('named', 'Custom name', 'First prompt', '/fixture/named', 'codex_mobile_bridge', 'vscode', 0, 2),
+                    ('child', None, 'Child', '/fixture', 'codex_mobile_bridge', '{"subagent":{}}', 0, 3),
+                    ('archived', None, 'Archived', '/fixture', 'codex-tui', 'cli', 1, 4),
+                    *[('new-'+str(i), None, 'New', '/fixture', 'codex-tui', 'cli', 0, i+10) for i in range(120)]])
+                db.commit()
+            history = home/'history.jsonl'
+            records = [{'session_id': 'old', 'text': 'First later input'},
+                       {'session_id': 'old', 'text': 'Use ROS2'},
+                       {'session_id': 'named', 'text': 'Use ROS2 for this too'},
+                       {'session_id': 'child', 'text': 'Use ROS2'},
+                       {'session_id': 'archived', 'text': 'Use ROS2'}]
+            original = '\n'.join(json.dumps(r) for r in records)+'\ninvalid partial record\n'
+            history.write_text(original, encoding='utf8')
+            store = SessionStore(home, source='cli')
+            self.assertEqual([r['id'] for r in store.list(query='ros2', limit=1)], ['named'])
+            old = store.list(query='ros2', limit=1, offset=1)[0]
+            self.assertEqual((old['id'], old['display_title'], old['title']), ('old', 'Use ROS2', 'Original question'))
+            self.assertEqual(store.get('named')['display_title'], 'Custom name')
+            self.assertEqual([r['id'] for r in store.list(query='ros2', archived=True)], ['archived'])
+            self.assertEqual([r['id'] for r in store.list(query='First later')], ['old'])
+            with history.open('a', encoding='utf8') as f: f.write(json.dumps({'session_id':'old','text':'Latest input'})+'\n')
+            self.assertEqual(store.get('old')['display_title'], 'Latest input')
+            self.assertEqual(store.get('old')['title'], 'Original question')
+            self.assertTrue(history.read_text(encoding='utf8').startswith(original))
+            desktop = SessionStore(home)
+            self.assertFalse(desktop.list(query='ROS2'))
+
     def test_cli_source_is_explicit_and_subagents_remain_excluded(self):
         with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
             home = Path(folder)
@@ -106,15 +140,19 @@ class CliStoreTests(unittest.TestCase):
                     ('shared', 'codex-tui', 'vscode', None, 0, 11, '/fixture', 'Shared CLI'),
                     ('old', None, 'cli', None, 0, 12, '/fixture', 'Old'),
                     ('mobile', 'codex_mobile_bridge_wsl', 'vscode', None, 0, 12, '/fixture', 'Mobile'),
+                    ('legacy-mobile', 'codex_mobile_bridge', 'vscode', None, 0, 12, '/fixture', 'Legacy mobile'),
+                    ('legacy-child', 'codex_mobile_bridge', '{"subagent":{"thread_spawn":{}}}', None, 0, 12, '/fixture', 'Child'),
                     ('desktop', 'codex_work_desktop', 'vscode', None, 0, 13, '/fixture', 'Desktop'),
                     ('vscode', None, 'vscode', None, 0, 13, '/fixture', 'Extension'),
                     ('child', 'codex-tui', 'cli', 'subagent', 0, 14, '/fixture', 'Child'),
                     ('exec', 'codex_exec', 'exec', None, 0, 15, '/fixture', 'Exec')])
                 db.commit()
             cli, desktop = SessionStore(home, source='cli'), SessionStore(home)
-            self.assertEqual({r['id'] for r in cli.list()}, {'cli', 'shared', 'old', 'mobile'})
-            self.assertEqual({r['id'] for r in desktop.list()}, {'desktop', 'vscode'})
-            for identifier in ('desktop', 'vscode', 'child', 'exec'):
+            self.assertEqual({r['id'] for r in cli.list()}, {'cli', 'shared', 'old', 'mobile', 'legacy-mobile'})
+            self.assertEqual({r['id'] for r in desktop.list()}, {'desktop', 'vscode', 'legacy-mobile'})
+            self.assertEqual(cli.get('legacy-mobile')['title'], 'Legacy mobile')
+            self.assertEqual([r['id'] for r in cli.list(query='Legacy')], ['legacy-mobile'])
+            for identifier in ('desktop', 'vscode', 'child', 'legacy-child', 'exec'):
                 with self.assertRaises(KeyError):
                     cli.get(identifier)
             self.assertEqual(cli.get('shared')['originator'], 'codex-tui')
@@ -219,6 +257,18 @@ class Runtime:
 
 
 class WslSessionTests(unittest.TestCase):
+    def test_register_project_executes_on_selected_wsl_and_persists_identity(self):
+        identity = {'cwd': '/home/fixture/new-project', 'device': 1, 'inode': 42}
+        with patch.object(self.entry, 'read', return_value=identity) as read:
+            project = self.entry.register_project('~/new-project', True, self.entry.host)
+        self.assertEqual(project['host'], self.entry.host)
+        self.assertEqual(project['directoryIdentity'], identity)
+        self.assertIn('project_directory(**', read.call_args.args[1])
+        self.assertEqual(read.call_args.args[0], self.row['distribution'])
+        self.entry.store.list = lambda **k: []
+        self.assertEqual(self.entry.projects()[0]['key'], project['key'])
+        with self.assertRaises(ValueError): self.entry.register_project('/fixture', False, 'local')
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(dir=ROOT/'.tmp')
         self.addCleanup(self.temp.cleanup)

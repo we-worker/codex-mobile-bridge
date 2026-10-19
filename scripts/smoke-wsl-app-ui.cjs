@@ -30,8 +30,10 @@ async function main(){
    if(pathname==='/api/account')return json({visible:false});
    if(pathname==='/api/activity')return json({sessions:[]});
    if(pathname==='/api/codex/entries'&&body?.action==='connect'){assert.equal(body.id,wsl);return json({ok:true,host:wsl});}
-   if(pathname==='/api/projects'){assert.equal(url.searchParams.get('entry'),wsl);return json({projects:[{key:wsl+'|/fixture',name:'fixture',host:wsl,hostLabel:'WSL fixture',cwd:'/fixture'}]});}
-   if(pathname==='/api/sessions'&&body){assert.equal(url.searchParams.get('entry'),wsl);assert.equal(body.project,wsl+'|independent');return json({id:sid,host:wsl,opened:true,message:'聊天已创建，可以直接发送消息'});}
+   if(pathname==='/api/projects/browse'){assert.equal(url.searchParams.get('entry'),wsl);assert.equal(body.host,wsl);const selected=body.name?body.path+'/'+body.name:body.path||'/home/fixture';if(body.name)assert.deepEqual(body.identity,{cwd:body.path,device:1,inode:42});return json({path:selected,parent:selected==='/home/fixture'?'/home':'/home/fixture',home:'/home/fixture',roots:[{name:'/',path:'/'}],identity:{cwd:selected,device:1,inode:42},directories:selected==='/home/fixture'?[{name:'works',path:'/home/fixture/works'}]:[]});}
+   if(pathname==='/api/projects'){assert.equal(url.searchParams.get('entry'),wsl);if(body){assert.deepEqual(body,{path:'/home/fixture/works/new fixture',createDirectory:false,host:wsl});return json({project:{key:wsl+'|directory:fixture',cwd:'/home/fixture/works/new fixture',host:wsl,name:'new fixture'}});}return json({projects:[{key:wsl+'|/fixture',name:'fixture',host:wsl,hostLabel:'WSL fixture',cwd:'/fixture'}]});}
+   if(pathname==='/api/sessions'&&body){assert.equal(url.searchParams.get('entry'),wsl);assert.ok([wsl+'|independent',wsl+'|directory:fixture'].includes(body.project));assert.deepEqual(Object.keys(body).sort(),['id','project','title']);return json({id:sid,host:wsl,opened:true,message:'聊天已创建，可以直接发送消息'});}
+   if(pathname==='/api/sessions'&&url.searchParams.get('q')==='paging-fixture'){const offset=Number(url.searchParams.get('offset'));return json({sessions:Array.from({length:101},(_,i)=>({id:'12345678-1234-4234-9234-'+String(i).padStart(12,'0'),host:wsl,title:'Paging fixture '+i,projectName:'fixture',projectKey:'fixture',cwd:'/fixture',recency:101-i})).slice(offset,offset+100),unavailableHosts:[]});}
    if(pathname==='/api/sessions')return json({sessions:[{id:sid,host:url.searchParams.get('entry')===wsl?wsl:'local',hostLabel:'Synthetic fixture',title:url.searchParams.get('entry')===wsl?'WSL fixture conversation':'Windows fixture conversation',projectName:'fixture',projectKey:'fixture',cwd:'/fixture',recency:Date.now()}],unavailableHosts:[]});
    if(pathname.startsWith('/api/sessions/'+sid+'/')){
     const meta={id:sid,host:url.searchParams.get('host')||wsl,hostLabel:'WSL fixture',title:'WSL fixture conversation',cwd:'/fixture',model:models[0].id,provider:'magpie',effort:'high',requests:[],status:'idle',connected:true,historyComplete:true,capabilities:{send:true,stop:true,settings:true,workspace:true,attachments:true,permissions:false,skills:false,notifications:false,queue:false,plan:false,goal:false,terminal:false,sideChat:false,messageActions:false}};
@@ -54,12 +56,17 @@ async function main(){
   await cdp.call('Runtime.enable');await cdp.call('Page.enable');await cdp.call('Emulation.setDeviceMetricsOverride',{width:492,height:850,deviceScaleFactor:1,mobile:true});await cdp.call('Page.navigate',{url:origin});
   await until(()=>cdp.evaluate('typeof clientNavigation!=="undefined"&&clientNavigation.clients.length===3'));
   await cdp.evaluate(fs.readFileSync(path.join(root,'tests/browser/codex-entries.browser.js'),'utf8'));
-  const result=await cdp.evaluate('checkCodexEntries()');assert.equal(result.passed,20);
+  const result=await cdp.evaluate('checkCodexEntries()');assert.equal(result.passed,30);
+  await cdp.evaluate('(async()=>{clientNavigation.manager?.dialog.close();await clientNavigation.toggle("'+wsl+'",true);await clientNavigation.choose("'+wsl+'");await document.getElementById("new-chat").onclick();document.getElementById("new-chat-project").value="__directory__";document.getElementById("new-chat-project").onchange();await document.getElementById("new-chat-directory-browse").onclick();})()');
+  const pickerScreenshot=await cdp.call('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(root,'.tmp/wsl-folder-picker.png'),Buffer.from(pickerScreenshot.data,'base64'));
+  await cdp.evaluate('document.getElementById("folder-picker-select").onclick()');
+  const directoryScreenshot=await cdp.call('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(root,'.tmp/wsl-app-directory.png'),Buffer.from(directoryScreenshot.data,'base64'));
+  await cdp.evaluate('document.getElementById("new-chat-dialog").close()');
   await cdp.evaluate('(async()=>{clientNavigation.manager?.dialog.close();await clientNavigation.toggle("'+wsl+'",true);await clientNavigation.choose("'+wsl+'");await openChat("'+sid+'","'+wsl+'");await document.getElementById("model-button").onclick();})()');
   const screenshot=await cdp.call('Page.captureScreenshot',{format:'png'});fs.writeFileSync(path.join(root,'.tmp/wsl-app-models.png'),Buffer.from(screenshot.data,'base64'));
   await cdp.call('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false});assert.equal(await cdp.evaluate('document.documentElement.scrollWidth<=innerWidth'),true);
   assert.deepEqual(cdp.errors,[]);assert.deepEqual(unexpected,[]);assert.equal(requests.some(row=>row.path.endsWith('/send')||row.path.endsWith('/respond')||row.path.endsWith('/stop')),false);
-  const creationRequests=requests.filter(row=>row.path==='/api/sessions'&&row.body).length;assert.equal(creationRequests,1);
+  const creationRequests=requests.filter(row=>row.path==='/api/sessions'&&row.body).length;assert.equal(creationRequests,2);
   const summary={...result,wideViewport:1280,browserErrors:cdp.errors,unexpectedAPI:unexpected,creationRequests,executionRequests:0};fs.writeFileSync(path.join(root,'.tmp/wsl-app-ui-result.json'),JSON.stringify(summary,null,2));console.log(JSON.stringify(summary));
  }finally{cdp?.close();child.kill();server.closeAllConnections();await new Promise(r=>server.close(r));}
 }

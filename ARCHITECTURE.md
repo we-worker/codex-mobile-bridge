@@ -40,7 +40,7 @@ Codex 列表下拉刷新使用浮层提示与按动画帧更新的位移，不�
 
 ## 新建聊天
 
-登录后的 `GET /api/projects` 返回 App 已保存的本机及 SSH 项目；`POST /api/sessions` 接受项目键、名称和请求 UUID。服务端重新解析已保存项目，不接受客户端任意目录、主机、程序路径或配置覆盖。创建接口沿用 Host、Origin、登录和 CSRF 校验。
+登录后的 `GET /api/projects` 返回 App 已保存的本机及 SSH 项目；`POST /api/sessions` 接受项目键、名称和请求 UUID。服务端重新解析已保存项目，创建线程接口不接受客户端任意目录、主机、程序路径或配置覆盖。用户先用 POST /api/projects/browse 的目录浏览器选择目录或在当前目录中新建，再使用带登录、Origin 和 CSRF 校验的 POST /api/projects 明确登记：主机必须已登记，在目标系统验证绝对路径、可读写性并规范化；勾选创建时仅在已存在的父目录下创建最后一层。网关自己的 projects.json 保存 canonical cwd 与目录身份，创建前再次核对，不修改 App 全局项目配置。创建接口沿用 Host、Origin、登录和 CSRF 校验。
 
 `bridge/features/sessions/create.py` 使用所选主机的官方运行时完成 `initialize → thread/start → thread/name/set → thread/read(includeTurns=true)`，随后关闭 stdio 并等待进程退出。读取完整空历史是必需步骤：仅设置名称会留下目录元数据，却未必落盘可恢复的 rollout。整个辅助进程不调用 `turn/start`，不会发送模型任务。新线程使用该主机、工作目录的运行时默认配置；不克隆已有聊天的临时设置。
 

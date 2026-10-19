@@ -277,7 +277,7 @@ test('refresh retains unchanged chat nodes but renders title and selection updat
   await ui.run('loadList(true)');assert.equal(root.children[0],first);
   ui.run("listRows[0].title='Renamed';renderList()");assert.notEqual(root.children[0],first);assert.equal(root.children[0].children[0].textContent,'Renamed');
   ui.run("currentId='chat-0';renderList()");assert.match(root.children[0].className,/selected/);
-  root.replaceChildren();ui.run('renderList()');assert.equal(root.children.length,100);
+  root.replaceChildren();ui.run('renderList()');assert.equal(root.children.filter(row=>row.dataset?.id).length,100);
 });
 
 test('chat list scroll loads one page at a time, preserves position and stops at the end',async()=>{
@@ -291,7 +291,7 @@ test('chat list scroll loads one page at a time, preserves position and stops at
   for(let i=0;i<5;i++)root.dispatchEvent({type:'scroll'});
   assert.equal(ui.listRequests.length,2);assert.match(ui.listRequests[1],/offset=100/);
   finish(ui.response(sessionPage(100,20)));await new Promise(setImmediate);
-  assert.equal(root.children.length,120);assert.equal(root.scrollTop,11500);
+  assert.equal(root.children.filter(row=>row.dataset?.id).length,120);assert.equal(root.scrollTop,11500);
   root.dispatchEvent({type:'scroll'});await new Promise(setImmediate);assert.equal(ui.listRequests.length,2);
 });
 
@@ -300,9 +300,9 @@ test('failed continuation retains rows and retries the same page on a new scroll
   Object.assign(root,{clientHeight:400,scrollHeight:12000});
   ui.setList(()=>ui.response(sessionPage(0,100)));await ui.run('loadList(true)');
   ui.setList(()=>ui.response({error:'Offline'},503));root.scrollTop=11500;root.dispatchEvent({type:'scroll'});await new Promise(setImmediate);
-  assert.equal(root.children.length,100);assert.equal(ui.nodes.get('toast').textContent,'Offline');assert.equal(ui.listRequests.length,2);
+  assert.equal(root.children.filter(row=>row.dataset?.id).length,100);assert.equal(ui.nodes.get('toast').textContent,'Offline');assert.equal(ui.listRequests.length,2);
   ui.setList(()=>ui.response(sessionPage(100,10)));root.dispatchEvent({type:'scroll'});await new Promise(setImmediate);
-  assert.equal(ui.listRequests[2],ui.listRequests[1]);assert.equal(root.children.length,110);
+  assert.equal(ui.listRequests[2],ui.listRequests[1]);assert.equal(root.children.filter(row=>row.dataset?.id).length,110);
 });
 
 test('failed refresh keeps the loaded page available for scroll continuation',async()=>{
@@ -310,9 +310,9 @@ test('failed refresh keeps the loaded page available for scroll continuation',as
   Object.assign(root,{clientHeight:400,scrollHeight:12000});
   ui.setList(()=>ui.response(sessionPage(0,100)));await ui.run('loadList(true)');
   ui.setList(()=>ui.response({error:'Offline'},503));await assert.rejects(ui.run('loadList(true)'),/Offline/);
-  assert.equal(root.children.length,100);
+  assert.equal(root.children.filter(row=>row.dataset?.id).length,100);
   ui.setList(()=>ui.response(sessionPage(100,20)));root.scrollTop=11500;root.dispatchEvent({type:'scroll'});await new Promise(setImmediate);
-  assert.match(ui.listRequests[2]||'',/offset=100/);assert.equal(root.children.length,120);
+  assert.match(ui.listRequests[2]||'',/offset=100/);assert.equal(root.children.filter(row=>row.dataset?.id).length,120);
 });
 
 test('new filters start at the top, including a retry after their first request fails',async()=>{
@@ -354,7 +354,7 @@ test('changed search and archive conditions block old continuation and discard i
   ui.setList(()=>ui.response(sessionPage(200,2)));await ui.run('loadList(true)');
   assert.match(ui.listRequests[2],/q=new&offset=0&archived=true/);
   finish(ui.response(sessionPage(100,100)));await new Promise(setImmediate);
-  assert.equal(root.children.length,2);assert.equal(root.children[0].dataset.id,'chat-200');
+  assert.equal(root.children.filter(row=>row.dataset?.id).length,2);assert.equal(root.children[0].dataset.id,'chat-200');
   root.dispatchEvent({type:'scroll'});assert.equal(ui.listRequests.length,3);
 });
 
@@ -366,9 +366,9 @@ test('downward gestures load more when collapsed projects cannot scroll, without
   ui.nodes.get('app').hidden=false;ui.run("clientNavigation.provider='claude'");root.dispatchEvent({type:'scroll'});assert.equal(ui.listRequests.length,1);
   ui.run("clientNavigation.provider='codex'");root.dispatchEvent({type:'wheel',deltaY:-100});assert.equal(ui.listRequests.length,1);
   ui.setList(()=>ui.response(sessionPage(100,100)));root.dispatchEvent({type:'wheel',deltaY:100});await new Promise(setImmediate);
-  assert.equal(ui.listRequests.length,2);assert.equal(root.children.length,200);
+  assert.equal(ui.listRequests.length,2);assert.equal(root.children.filter(row=>row.dataset?.id).length,200);
   ui.setList(()=>ui.response(sessionPage(200,1)));
   root.dispatchEvent({type:'touchstart',touches:[{clientY:100,clientX:20}]});
   root.dispatchEvent({type:'touchmove',touches:[{clientY:40,clientX:20}]});await new Promise(setImmediate);
-  assert.equal(ui.listRequests.length,3);assert.match(ui.listRequests[2],/offset=200/);assert.equal(root.children.length,201);
+  assert.equal(ui.listRequests.length,3);assert.match(ui.listRequests[2],/offset=200/);assert.equal(root.children.filter(row=>row.dataset?.id).length,201);
 });

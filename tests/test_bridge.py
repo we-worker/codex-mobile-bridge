@@ -725,6 +725,26 @@ class ModelTests(unittest.TestCase):
 
 
 class HttpTests(unittest.TestCase):
+    def test_explicit_project_directory_requires_auth_csrf_and_selected_host(self):
+        from unittest.mock import Mock
+        target = self.server.bridge
+        target.register_project = Mock(return_value={'key': 'local|directory:fixture', 'cwd': '/fixture'})
+        body = {'path': '/fixture', 'createDirectory': True, 'host': 'local'}
+        self.assertEqual(self.request('POST', '/api/projects', body)[0], 401)
+        headers = self.login()
+        self.assertEqual(self.request('POST', '/api/projects', body, {'Cookie': headers['Cookie']})[0], 403)
+        self.assertEqual(self.request('POST', '/api/projects', body, {**headers, 'Origin': 'https://other.test'})[0], 403)
+        target.register_project.assert_not_called()
+        self.assertEqual(self.request('POST', '/api/projects', body, headers)[0], 200)
+        target.register_project.assert_called_once_with('/fixture', True, 'local')
+        self.assertEqual(self.request('POST', '/api/projects', {**body, 'command': 'unwanted'}, headers)[0], 400)
+        target.project_directories = Mock(return_value={'path': '/fixture', 'directories': []})
+        browse = {'host':'local','path':None,'hidden':False,'name':None,'identity':None}
+        self.assertEqual(self.request('POST', '/api/projects/browse', browse, {'Cookie':headers['Cookie']})[0], 403)
+        target.project_directories.assert_not_called()
+        self.assertEqual(self.request('POST', '/api/projects/browse', browse, headers)[0], 200)
+        target.project_directories.assert_called_once_with(**browse)
+
     def test_wsl_create_and_connect_require_auth_csrf_and_selected_application(self):
         from unittest.mock import Mock
         identifier = 'wsl:' + 'a' * 32
@@ -742,6 +762,12 @@ class HttpTests(unittest.TestCase):
         self.assertEqual(self.request('POST', path, body, {'Cookie': headers['Cookie']})[0], 403)
         target.create_chat.assert_not_called()
         self.assertEqual(self.request('GET', '/api/projects?entry=' + identifier, headers=headers)[0], 200)
+        directory = {'path': '~/fixture', 'createDirectory': True, 'host': identifier}
+        target.register_project.return_value = {'key': identifier + '|directory:fixture', 'host': identifier}
+        self.assertEqual(self.request('POST', '/api/projects?entry=' + identifier, directory, {'Cookie': headers['Cookie']})[0], 403)
+        target.register_project.assert_not_called()
+        self.assertEqual(self.request('POST', '/api/projects?entry=' + identifier, directory, headers)[0], 200)
+        target.register_project.assert_called_once_with('~/fixture', True, identifier)
         self.assertEqual(self.request('POST', path, body, headers)[0], 200)
         target.create_chat.assert_called_once_with(body['project'], body['title'], body['id'])
         self.assertEqual(self.request('POST', '/api/codex/entries', {'action': 'connect', 'id': identifier}, headers)[0], 200)
@@ -749,6 +775,7 @@ class HttpTests(unittest.TestCase):
         manager.require_enabled.side_effect = ValueError('Application disabled')
         target.create_chat.reset_mock(); target.connect.reset_mock()
         self.assertEqual(self.request('POST', path, body, headers)[0], 400)
+        self.assertEqual(self.request('POST', '/api/projects?entry=' + identifier, directory, headers)[0], 400)
         self.assertEqual(self.request('POST', '/api/codex/entries', {'action': 'connect', 'id': identifier}, headers)[0], 400)
         target.create_chat.assert_not_called(); target.connect.assert_not_called()
 
@@ -1136,7 +1163,7 @@ class HttpTests(unittest.TestCase):
     def test_create_chat_requires_login_csrf_and_saved_project(self):
         from types import SimpleNamespace
         calls=[]
-        self.server.bridge.hosts=SimpleNamespace(projects=lambda:[{'key':'local|p','name':'Test'}])
+        self.server.bridge.projects=lambda:[{'key':'local|p','name':'Test'}]
         self.server.bridge.create_chat=lambda *args: calls.append(args) or {'id':THREAD,'host':'local'}
         body={'project':'local|p','title':'New chat','id':str(uuid.uuid4())}
         self.assertEqual(self.request('GET','/api/projects')[0],401)
