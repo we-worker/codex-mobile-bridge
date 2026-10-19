@@ -4,6 +4,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -25,14 +26,27 @@ import (
 	"syscall"
 	"time"
 
+	"tailscale.com/ipn"
+	"tailscale.com/tailcfg/nodecap"
 	"tailscale.com/tsnet"
 )
 
 const (
-	version               = "1.0.1"
+	version               = "1.0.2"
 	controlPlaneHost      = "controlplane.tailscale.com"
 	controlProbeTimeout   = 4 * time.Second
 	authKeyStartupTimeout = 75 * time.Second
+)
+
+var (
+	publicPublishWindow   = 90 * time.Second
+	publicProbeInterval   = 3 * time.Second
+	funnelReregisterDelay = 10 * time.Second
+	funnelPublishAttempts = 3
+	funnelHealthInterval  = 45 * time.Second
+	funnelHealthRetry     = 5 * time.Second
+	funnelHealthFailures  = 2
+	tailnetAddressRange   = netip.MustParsePrefix("100.64.0.0/10")
 )
 
 var authURLPattern = regexp.MustCompile(`https://login\.tailscale\.com/[^\s<>"']+`)
@@ -42,14 +56,25 @@ type launchConfig struct {
 }
 
 type statusRecord struct {
-	State      string `json:"state"`
-	Code       string `json:"code,omitempty"`
-	AuthURL    string `json:"authUrl,omitempty"`
-	URL        string `json:"url,omitempty"`
-	NodeID     string `json:"nodeId,omitempty"`
-	InstanceID string `json:"instanceId,omitempty"`
-	Version    string `json:"version,omitempty"`
-	Message    string `json:"message,omitempty"`
+	State      string            `json:"state"`
+	Code       string            `json:"code,omitempty"`
+	AuthURL    string            `json:"authUrl,omitempty"`
+	URL        string            `json:"url,omitempty"`
+	NodeID     string            `json:"nodeId,omitempty"`
+	InstanceID string            `json:"instanceId,omitempty"`
+	Version    string            `json:"version,omitempty"`
+	Message    string            `json:"message,omitempty"`
+	Diagnostic *statusDiagnostic `json:"diagnostic,omitempty"`
+}
+
+type statusDiagnostic struct {
+	BackendState     string `json:"backendState,omitempty"`
+	HealthCount      int    `json:"healthCount"`
+	OnlinePeers      int    `json:"onlinePeers"`
+	FunnelCapability bool   `json:"funnelCapability"`
+	HTTPSCapability  bool   `json:"httpsCapability"`
+	FunnelPortsCap   bool   `json:"funnelPortsCapability"`
+	FunnelRegistered bool   `json:"funnelRegistered"`
 }
 
 type statusWriter struct {
@@ -172,22 +197,160 @@ func run(ctx context.Context, output *statusWriter, launch launchConfig, stateDi
 	if port != 443 {
 		deviceURL += ":" + strconv.Itoa(port)
 	}
+	// The gateway must allow this exact origin before the loopback identity
+	// probe below. This is a provisional authorization for the current child
+	// process; the "listening" event is only emitted after the gateway instance
+	// and URL have both been verified.
+	output.write(statusRecord{
+		State:      "resolved",
+		URL:        deviceURL,
+		NodeID:     nodeID,
+		InstanceID: expectedInstance,
+		Version:    version,
+	})
 
-	var listener net.Listener
 	if mode == "funnel" {
+		return runFunnel(ctx, output, server, deviceURL, nodeID, upstream, port, expectedInstance)
+	}
+	return runServe(ctx, output, server, deviceURL, nodeID, upstream, port, expectedInstance)
+}
+
+func runServe(ctx context.Context, output *statusWriter, server *tsnet.Server, deviceURL, nodeID, upstream string, port int, expectedInstance string) error {
+	listener, httpServer, serveErrors, err := openListener(server, upstream, port, false)
+	if err != nil {
+		return err
+	}
+	defer closeListener(httpServer, listener)
+
+	instanceID, diagnostic, err := verifyListener(ctx, output, server, deviceURL, nodeID, port, expectedInstance)
+	if err != nil {
+		return err
+	}
+	output.write(statusRecord{
+		State:      "connected",
+		URL:        deviceURL,
+		NodeID:     nodeID,
+		InstanceID: instanceID,
+		Version:    version,
+		Diagnostic: diagnostic,
+	})
+	return waitForServer(ctx, serveErrors)
+}
+
+func runFunnel(ctx context.Context, output *statusWriter, server *tsnet.Server, deviceURL, nodeID, upstream string, port int, expectedInstance string) error {
+	attempts := 0
+	for {
+		attempts++
+		err := runFunnelRound(ctx, output, server, deviceURL, nodeID, upstream, port, expectedInstance)
+		if ctx.Err() != nil {
+			return nil
+		}
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, errFunnelPublishTimeout) && !errors.Is(err, errFunnelHealthLost) {
+			return err
+		}
+		if attempts >= funnelPublishAttempts {
+			return err
+		}
+		message := "Funnel 已在 Tailnet 内登记，但公网入口尚未发布；正在自动重新登记。"
+		if errors.Is(err, errFunnelHealthLost) {
+			message = "公网入口运行中失效；正在撤回临时来源并重新登记 Funnel。"
+		}
+		output.write(statusRecord{
+			State:      "retrying",
+			Code:       "funnel_publishing",
+			URL:        deviceURL,
+			NodeID:     nodeID,
+			InstanceID: expectedInstance,
+			Version:    version,
+			Message:    message,
+		})
+		retryDelay := funnelReregisterDelay
+		for retryAttempt := 1; retryAttempt < attempts && retryDelay < time.Minute; retryAttempt++ {
+			retryDelay *= 2
+		}
+		timer := time.NewTimer(retryDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil
+		case <-timer.C:
+		}
+	}
+}
+
+var errFunnelPublishTimeout = errors.New("funnel public endpoint was not published")
+var errFunnelHealthLost = errors.New("funnel public endpoint became unavailable")
+
+func runFunnelRound(ctx context.Context, output *statusWriter, server *tsnet.Server, deviceURL, nodeID, upstream string, port int, expectedInstance string) error {
+	listener, httpServer, serveErrors, err := openListener(server, upstream, port, true)
+	if err != nil {
+		return err
+	}
+	defer closeListener(httpServer, listener)
+
+	instanceID, diagnostic, err := verifyListener(ctx, output, server, deviceURL, nodeID, port, expectedInstance)
+	if err != nil {
+		return err
+	}
+	output.write(statusRecord{
+		State:      "listening",
+		URL:        deviceURL,
+		NodeID:     nodeID,
+		InstanceID: instanceID,
+		Version:    version,
+		Message:    "Tailnet 内入口已就绪，正在验证公网 Funnel、TLS 与当前网关身份…",
+		Diagnostic: diagnostic,
+	})
+
+	verified, err := waitForPublicGateway(ctx, deviceURL, expectedInstance, func() {
+		output.write(statusRecord{
+			State:      "publishing",
+			URL:        deviceURL,
+			NodeID:     nodeID,
+			InstanceID: instanceID,
+			Version:    version,
+			Message:    "Funnel 已在本机登记，正在等待公网 DNS 与 HTTPS 生效…",
+			Diagnostic: diagnostic,
+		})
+	}, serveErrors)
+	if err != nil || verified != expectedInstance {
+		if err != nil && !errors.Is(err, errFunnelPublishTimeout) {
+			return err
+		}
+		return errFunnelPublishTimeout
+	}
+
+	output.write(statusRecord{
+		State:      "connected",
+		URL:        deviceURL,
+		NodeID:     nodeID,
+		InstanceID: verified,
+		Version:    version,
+		Message:    "公网 Funnel、TLS 和当前网关身份均已验证。",
+		Diagnostic: diagnostic,
+	})
+	return waitForFunnelHealth(ctx, deviceURL, verified, serveErrors)
+}
+
+func openListener(server *tsnet.Server, upstream string, port int, funnel bool) (net.Listener, *http.Server, <-chan error, error) {
+	var (
+		listener net.Listener
+		err      error
+	)
+	if funnel {
 		listener, err = server.ListenFunnel("tcp", ":"+strconv.Itoa(port))
 	} else {
 		listener, err = server.ListenTLS("tcp", ":"+strconv.Itoa(port))
 	}
 	if err != nil {
-		return fmt.Errorf("listen on tailnet: %w", err)
+		return nil, nil, nil, fmt.Errorf("listen on tailnet: %w", err)
 	}
-	defer listener.Close()
-
 	target, _ := url.Parse(upstream)
-	proxy := newProxy(target)
 	httpServer := &http.Server{
-		Handler:           proxy,
+		Handler:           newProxy(target),
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    1 << 20,
@@ -196,25 +359,23 @@ func run(ctx context.Context, output *statusWriter, launch launchConfig, stateDi
 	go func() {
 		serveErrors <- httpServer.Serve(listener)
 	}()
+	return listener, httpServer, serveErrors, nil
+}
 
-	output.write(statusRecord{State: "verifying", URL: deviceURL, NodeID: nodeID, Version: version})
-	instanceID := verifyLoopback(ctx, server, deviceURL, expectedInstance)
-	if instanceID != expectedInstance {
-		return errors.New("verify gateway instance")
+func closeListener(httpServer *http.Server, listener net.Listener) {
+	if httpServer != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_ = httpServer.Shutdown(shutdownCtx)
+		cancel()
 	}
-	output.write(statusRecord{
-		State:      "listening",
-		URL:        deviceURL,
-		NodeID:     nodeID,
-		InstanceID: instanceID,
-		Version:    version,
-	})
+	if listener != nil {
+		_ = listener.Close()
+	}
+}
 
+func waitForServer(ctx context.Context, serveErrors <-chan error) error {
 	select {
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = httpServer.Shutdown(shutdownCtx)
 		return nil
 	case err := <-serveErrors:
 		if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
@@ -222,6 +383,346 @@ func run(ctx context.Context, output *statusWriter, launch launchConfig, stateDi
 		}
 		return fmt.Errorf("serve tailnet listener: %w", err)
 	}
+}
+
+func verifyListener(ctx context.Context, output *statusWriter, server *tsnet.Server, deviceURL, nodeID string, port int, expectedInstance string) (string, *statusDiagnostic, error) {
+	output.write(statusRecord{
+		State:   "verifying",
+		URL:     deviceURL,
+		NodeID:  nodeID,
+		Version: version,
+		Message: "Tailscale 地址已就绪，正在校验它连接到当前网关…",
+	})
+	instanceID := verifyLoopback(ctx, server, deviceURL, expectedInstance)
+	if instanceID != expectedInstance {
+		return "", nil, errors.New("verify gateway instance")
+	}
+	diagnostic := collectDiagnostic(ctx, server, deviceURL, port)
+	return instanceID, diagnostic, nil
+}
+
+type publicDNSLookup func(context.Context, string) ([]netip.Addr, error)
+type publicGatewayProbe func(context.Context, *url.URL, []netip.Addr, string) (string, error)
+
+var resolvePublicAddresses publicDNSLookup = lookupPublicAddresses
+var probePublicGateway publicGatewayProbe = probePublicGatewayHTTP
+
+func waitForPublicGateway(ctx context.Context, deviceURL, expectedInstance string, notify func(), serveErrors <-chan error) (string, error) {
+	parsed, err := url.Parse(deviceURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" {
+		return "", errors.New("invalid public gateway URL")
+	}
+	publishCtx, cancelPublish := context.WithTimeout(ctx, publicPublishWindow)
+	defer cancelPublish()
+	for {
+		select {
+		case err := <-serveErrors:
+			if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
+				return "", errors.New("funnel listener closed")
+			}
+			return "", fmt.Errorf("serve tailnet listener: %w", err)
+		default:
+		}
+
+		addresses, lookupErr := resolvePublicAddresses(publishCtx, parsed.Hostname())
+		if lookupErr == nil && len(addresses) > 0 {
+			probeCtx, cancel := context.WithTimeout(publishCtx, 20*time.Second)
+			instanceID, probeErr := probePublicGateway(probeCtx, parsed, addresses, expectedInstance)
+			cancel()
+			if probeErr == nil && instanceID == expectedInstance {
+				return instanceID, nil
+			}
+		}
+		notify()
+
+		timer := time.NewTimer(publicProbeInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return "", ctx.Err()
+		case <-publishCtx.Done():
+			timer.Stop()
+			return "", errFunnelPublishTimeout
+		case err := <-serveErrors:
+			timer.Stop()
+			if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
+				return "", errors.New("funnel listener closed")
+			}
+			return "", fmt.Errorf("serve tailnet listener: %w", err)
+		case <-timer.C:
+		}
+	}
+}
+
+func waitForFunnelHealth(ctx context.Context, deviceURL, instanceID string, serveErrors <-chan error) error {
+	parsed, err := url.Parse(deviceURL)
+	if err != nil || parsed.Scheme != "https" || parsed.Hostname() == "" {
+		return errors.New("invalid public gateway URL")
+	}
+	failures := 0
+	timer := time.NewTimer(funnelHealthInterval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case err := <-serveErrors:
+			if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
+				return nil
+			}
+			return fmt.Errorf("serve tailnet listener: %w", err)
+		case <-timer.C:
+			probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			addresses, probeErr := resolvePublicAddresses(probeCtx, parsed.Hostname())
+			if probeErr == nil && len(addresses) == 0 {
+				probeErr = errors.New("public DNS returned no public address")
+			}
+			if probeErr == nil {
+				var got string
+				got, probeErr = probePublicGateway(probeCtx, parsed, addresses, instanceID)
+				if probeErr == nil && got != instanceID {
+					probeErr = errors.New("public gateway instance mismatch")
+				}
+			}
+			cancel()
+			if ctx.Err() != nil {
+				return nil
+			}
+			if probeErr == nil {
+				failures = 0
+				timer.Reset(funnelHealthInterval)
+				continue
+			}
+			failures++
+			if failures < funnelHealthFailures {
+				timer.Reset(funnelHealthRetry)
+				continue
+			}
+			return fmt.Errorf("%w: %v", errFunnelHealthLost, probeErr)
+		}
+	}
+}
+
+type dohAnswer struct {
+	Name string `json:"name"`
+	Type int    `json:"type"`
+	Data string `json:"data"`
+}
+
+type dohResponse struct {
+	Status int         `json:"Status"`
+	Answer []dohAnswer `json:"Answer"`
+}
+
+var dohClient = &http.Client{Timeout: 6 * time.Second}
+
+func lookupPublicAddresses(ctx context.Context, hostname string) ([]netip.Addr, error) {
+	endpoints := []string{
+		"https://223.5.5.5/resolve",
+		"https://1.12.12.12/resolve",
+		"https://dns.alidns.com/resolve",
+		"https://doh.pub/dns-query",
+		"https://cloudflare-dns.com/dns-query",
+		"https://dns.google/resolve",
+	}
+	var (
+		lastErr   error
+		completed bool
+		successes int
+	)
+	for _, endpoint := range endpoints {
+		var found []netip.Addr
+		endpointCompleted := true
+		for _, recordType := range []string{"A", "AAAA"} {
+			query, _ := url.Parse(endpoint)
+			values := query.Query()
+			values.Set("name", hostname)
+			values.Set("type", recordType)
+			query.RawQuery = values.Encode()
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, query.String(), nil)
+			if err != nil {
+				lastErr = err
+				endpointCompleted = false
+				break
+			}
+			request.Header.Set("Accept", "application/dns-json")
+			response, err := dohClient.Do(request)
+			if err != nil {
+				lastErr = err
+				endpointCompleted = false
+				break
+			}
+			addresses, parseErr := parseDoHAddresses(io.LimitReader(response.Body, 256<<10))
+			response.Body.Close()
+			if parseErr != nil || response.StatusCode != http.StatusOK {
+				lastErr = errors.New("public DNS resolver returned an invalid response")
+				endpointCompleted = false
+				break
+			}
+			found = append(found, addresses...)
+		}
+		if endpointCompleted {
+			completed = true
+			successes++
+		}
+		unique := uniqueAddresses(found)
+		if len(unique) > 0 {
+			return unique, nil
+		}
+		// Two independent responses are enough to treat NODATA as negative.
+		// This avoids waiting on blocked resolvers after a usable regional
+		// pair has already answered.
+		if successes >= 2 {
+			break
+		}
+	}
+	if completed {
+		return nil, nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("public DNS lookup failed")
+	}
+	return nil, lastErr
+}
+
+func parseDoHAddresses(reader io.Reader) ([]netip.Addr, error) {
+	var response dohResponse
+	if err := json.NewDecoder(reader).Decode(&response); err != nil {
+		return nil, err
+	}
+	if response.Status != 0 && response.Status != 3 {
+		return nil, errors.New("public DNS resolver error")
+	}
+	var result []netip.Addr
+	for _, answer := range response.Answer {
+		if answer.Type != 1 && answer.Type != 28 {
+			continue
+		}
+		address, err := netip.ParseAddr(answer.Data)
+		if err == nil && publicAddress(address.Unmap()) {
+			result = append(result, address.Unmap())
+		}
+	}
+	return uniqueAddresses(result), nil
+}
+
+func publicAddress(address netip.Addr) bool {
+	return address.IsValid() && address.IsGlobalUnicast() &&
+		!address.IsPrivate() && !address.IsLoopback() && !address.IsLinkLocalUnicast() &&
+		!address.IsMulticast() && !tailnetAddressRange.Contains(address)
+}
+
+func uniqueAddresses(values []netip.Addr) []netip.Addr {
+	seen := make(map[netip.Addr]bool)
+	result := make([]netip.Addr, 0, len(values))
+	for _, value := range values {
+		value = value.Unmap()
+		if !value.IsValid() || seen[value] {
+			continue
+		}
+		seen[value] = true
+		result = append(result, value)
+	}
+	return result
+}
+
+func probePublicGatewayHTTP(ctx context.Context, deviceURL *url.URL, addresses []netip.Addr, expectedInstance string) (string, error) {
+	hostname := deviceURL.Hostname()
+	port := deviceURL.Port()
+	if port == "" {
+		port = "443"
+	}
+	dialer := &net.Dialer{Timeout: 4 * time.Second, KeepAlive: 30 * time.Second}
+	transport := &http.Transport{
+		Proxy: nil,
+		DialContext: func(dialCtx context.Context, network, _ string) (net.Conn, error) {
+			var lastErr error
+			for _, address := range uniqueAddresses(addresses) {
+				connection, err := dialer.DialContext(dialCtx, network, net.JoinHostPort(address.String(), port))
+				if err == nil {
+					return connection, nil
+				}
+				lastErr = err
+			}
+			if lastErr == nil {
+				lastErr = errors.New("public DNS returned no usable addresses")
+			}
+			return nil, lastErr
+		},
+		TLSClientConfig: &tls.Config{
+			ServerName: hostname,
+			MinVersion: tls.VersionTLS12,
+		},
+		DisableKeepAlives:     true,
+		ForceAttemptHTTP2:     true,
+		TLSHandshakeTimeout:   6 * time.Second,
+		ResponseHeaderTimeout: 8 * time.Second,
+	}
+	defer transport.CloseIdleConnections()
+	client := &http.Client{Transport: transport, Timeout: 15 * time.Second}
+	probeURL := strings.TrimSuffix(deviceURL.String(), "/") + "/api/auth"
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, probeURL, nil)
+	if err != nil {
+		return "", err
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		return "", err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("public gateway returned HTTP %d", response.StatusCode)
+	}
+	var value struct {
+		InstanceID string `json:"instanceId"`
+	}
+	if err := json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&value); err != nil {
+		return "", err
+	}
+	if value.InstanceID == "" || (expectedInstance != "" && value.InstanceID != expectedInstance) {
+		return "", errors.New("public gateway instance mismatch")
+	}
+	return value.InstanceID, nil
+}
+
+func collectDiagnostic(ctx context.Context, server *tsnet.Server, deviceURL string, port int) *statusDiagnostic {
+	diagnosticCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	value := &statusDiagnostic{}
+	local, err := server.LocalClient()
+	if err != nil {
+		return value
+	}
+	status, err := local.Status(diagnosticCtx)
+	if err == nil && status != nil {
+		value.BackendState = status.BackendState
+		value.HealthCount = len(status.Health)
+		for _, peer := range status.Peer {
+			if peer != nil && peer.Online {
+				value.OnlinePeers++
+			}
+		}
+		if status.Self != nil {
+			value.FunnelCapability = status.Self.HasCap(nodecap.Funnel)
+			value.HTTPSCapability = status.Self.HasCap(nodecap.HTTPS)
+			for capability := range status.Self.CapMap {
+				if strings.HasPrefix(string(capability), string(nodecap.FunnelPorts)) {
+					value.FunnelPortsCap = true
+					break
+				}
+			}
+		}
+	}
+	config, err := local.GetServeConfig(diagnosticCtx)
+	if err == nil && config != nil {
+		hostname := deviceURL
+		if parsed, parseErr := url.Parse(deviceURL); parseErr == nil {
+			hostname = parsed.Hostname()
+		}
+		hostPort := ipn.HostPort(hostname + ":" + strconv.Itoa(port))
+		value.FunnelRegistered = config.AllowFunnel[hostPort]
+	}
+	return value
 }
 
 func newProxy(target *url.URL) *httputil.ReverseProxy {
@@ -431,6 +932,8 @@ func errorCode(err error) string {
 	switch {
 	case strings.Contains(text, "startup timed out"):
 		return "network_timeout"
+	case strings.Contains(text, "funnel public endpoint"):
+		return "funnel_publishing"
 	case strings.Contains(text, "invalid auth key") ||
 		(strings.Contains(text, "auth key") && strings.Contains(text, "reject")):
 		return "auth_key_rejected"

@@ -196,8 +196,25 @@ class TailscaleTests(unittest.TestCase):
             class Output:
                 def __iter__(self):
                     yield json.dumps({
+                        'state': 'resolved', 'url': live, 'nodeId': 'n123',
+                        'instanceId': '0123456789abcdef0123456789abcdef',
+                    }) + '\n'
+                    yield json.dumps({
                         'state': 'listening', 'url': live, 'nodeId': 'n123',
                         'instanceId': '0123456789abcdef0123456789abcdef',
+                    }) + '\n'
+                    yield json.dumps({
+                        'state': 'connected', 'url': live, 'nodeId': 'n123',
+                        'instanceId': '0123456789abcdef0123456789abcdef',
+                        'diagnostic': {
+                            'backendState': 'Running',
+                            'healthCount': 0,
+                            'onlinePeers': 3,
+                            'funnelCapability': True,
+                            'httpsCapability': True,
+                            'funnelPortsCapability': True,
+                            'funnelRegistered': True,
+                        },
                     }) + '\n'
                     tunnel.stopped.set()
                 def close(self):
@@ -213,8 +230,131 @@ class TailscaleTests(unittest.TestCase):
             self.assertIn(secret, process.stdin.write.call_args.args[0])
             persisted = (Path(folder)/'ssh-status-ts.json').read_text(encoding='utf-8')
             self.assertNotIn(secret, persisted)
-            self.assertEqual(origins[1], ('ts', live, 'n123'))
+            self.assertIn('"funnelRegistered": true', persisted)
+            self.assertIn(('ts', live, 'n123'), origins)
             self.assertEqual(tunnel.last_status['state'], 'connected')
+
+    def test_embedded_tailnet_listener_is_not_reported_as_publicly_connected(self):
+        live = 'https://embedded-bridge.example.ts.net'
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            process = MagicMock()
+            process.pid = 123
+            process.poll.return_value = 0
+            tunnel = tailscale.TailscaleTunnel(
+                EMBEDDED, 8787, folder, {},
+                instance_id='0123456789abcdef0123456789abcdef')
+
+            class Output:
+                def __iter__(self):
+                    yield json.dumps({
+                        'state': 'resolved', 'url': live, 'nodeId': 'n123',
+                        'instanceId': '0123456789abcdef0123456789abcdef',
+                    }) + '\n'
+                    yield json.dumps({
+                        'state': 'listening', 'url': live, 'nodeId': 'n123',
+                        'instanceId': '0123456789abcdef0123456789abcdef',
+                        'message': '正在验证公网 Funnel。',
+                    }) + '\n'
+                    yield json.dumps({
+                        'state': 'publishing', 'url': live, 'nodeId': 'n123',
+                        'instanceId': '0123456789abcdef0123456789abcdef',
+                        'message': '正在等待公网 DNS。',
+                    }) + '\n'
+                    tunnel.stopped.set()
+
+                def close(self):
+                    pass
+
+            process.stdout = Output()
+            with patch.object(tailscale, 'embedded_executable', return_value='/fixture/codex-tsnet'), \
+                 patch.object(tailscale.subprocess, 'Popen', return_value=process):
+                tunnel.start()
+                tunnel.thread.join(3)
+            self.assertFalse(tunnel.thread.is_alive())
+            self.assertNotEqual(tunnel.last_status['state'], 'connected')
+            self.assertIn('公网', tunnel.last_status['message'])
+
+    def test_embedded_retry_withdraws_stale_origin_until_next_registration(self):
+        live = 'https://embedded-bridge.example.ts.net'
+        origins = []
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            process = MagicMock()
+            process.pid = 123
+            process.poll.return_value = 0
+            tunnel = tailscale.TailscaleTunnel(
+                EMBEDDED, 8787, folder, {},
+                allow_origin=lambda entry_id, origin, node_id:
+                    origins.append((entry_id, origin, node_id)),
+                instance_id='0123456789abcdef0123456789abcdef')
+
+            class Output:
+                def __iter__(self):
+                    yield json.dumps({
+                        'state': 'resolved', 'url': live, 'nodeId': 'n123',
+                        'instanceId': '0123456789abcdef0123456789abcdef',
+                    }) + '\n'
+                    yield json.dumps({
+                        'state': 'connected', 'url': live, 'nodeId': 'n123',
+                        'instanceId': '0123456789abcdef0123456789abcdef',
+                    }) + '\n'
+                    yield json.dumps({
+                        'state': 'retrying', 'url': live, 'nodeId': 'n123',
+                        'instanceId': '0123456789abcdef0123456789abcdef',
+                        'message': '公网入口在运行中失效，正在重新登记。',
+                    }) + '\n'
+                    self.cleared_on_retry = origins[-1] == ('ts', '', '')
+                    tunnel.stopped.set()
+
+                def close(self):
+                    pass
+
+            output = Output()
+            process.stdout = output
+            with patch.object(tailscale, 'embedded_executable', return_value='/fixture/codex-tsnet'), \
+                 patch.object(tailscale.subprocess, 'Popen', return_value=process):
+                tunnel.start()
+                tunnel.thread.join(3)
+            self.assertFalse(tunnel.thread.is_alive())
+            self.assertTrue(output.cleared_on_retry)
+            self.assertEqual(tunnel.last_status['state'], 'retrying')
+
+    def test_embedded_resolved_origin_is_published_before_listening(self):
+        live = 'https://embedded-bridge.example.ts.net'
+        origins = []
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            process = MagicMock()
+            process.pid = 123
+            process.poll.return_value = 0
+            tunnel = tailscale.TailscaleTunnel(
+                EMBEDDED, 8787, folder, {},
+                allow_origin=lambda entry_id, origin, node_id:
+                    origins.append((entry_id, origin, node_id)),
+                instance_id='0123456789abcdef0123456789abcdef')
+
+            class Output:
+                def __iter__(self):
+                    yield json.dumps({
+                        'state': 'resolved', 'url': live, 'nodeId': 'n123',
+                        'instanceId': '0123456789abcdef0123456789abcdef',
+                    }) + '\n'
+                    self.published_before_listening = ('ts', live, 'n123') in origins
+                    yield json.dumps({
+                        'state': 'failed', 'code': 'verification_failed',
+                    }) + '\n'
+                    tunnel.stopped.set()
+
+                def close(self):
+                    pass
+
+            output = Output()
+            process.stdout = output
+            with patch.object(tailscale, 'embedded_executable', return_value='/fixture/codex-tsnet'), \
+                 patch.object(tailscale.subprocess, 'Popen', return_value=process):
+                tunnel.start()
+                tunnel.thread.join(3)
+            self.assertTrue(output.published_before_listening)
+            self.assertEqual(tunnel.last_status['state'], 'failed')
+            self.assertEqual(origins[-1], ('ts', '', ''))
 
     def test_embedded_helper_reports_network_timeout_without_staying_in_starting_state(self):
         with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:

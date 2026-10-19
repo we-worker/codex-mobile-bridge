@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -85,14 +86,16 @@ func TestSafeAuthorizationURL(t *testing.T) {
 
 func TestErrorCode(t *testing.T) {
 	for message, want := range map[string]string{
-		"startup timed out":         "network_timeout",
-		"invalid auth key provided": "auth_key_rejected",
-		"verify gateway instance":   "verification_failed",
-		"funnel is unavailable":     "funnel_unavailable",
-		"HTTPS certificate":         "https_unavailable",
-		"authentication required":   "authentication_failed",
-		"listen tcp":                "listener_failed",
-		"other failure":             "tailscale_failed",
+		"startup timed out":                         "network_timeout",
+		"invalid auth key provided":                 "auth_key_rejected",
+		"verify gateway instance":                   "verification_failed",
+		"funnel public endpoint was not published":  "funnel_publishing",
+		"funnel public endpoint became unavailable": "funnel_publishing",
+		"funnel is unavailable":                     "funnel_unavailable",
+		"HTTPS certificate":                         "https_unavailable",
+		"authentication required":                   "authentication_failed",
+		"listen tcp":                                "listener_failed",
+		"other failure":                             "tailscale_failed",
 	} {
 		if got := errorCode(errors.New(message)); got != want {
 			t.Fatalf("errorCode(%q) = %q, want %q", message, got, want)
@@ -136,5 +139,119 @@ func TestTargetPort(t *testing.T) {
 		if got := targetPort(authority); got != want {
 			t.Fatalf("targetPort(%q) = %q, want %q", authority, got, want)
 		}
+	}
+}
+
+func TestParseDoHAddresses(t *testing.T) {
+	addresses, err := parseDoHAddresses(strings.NewReader(`{
+		"Status": 0,
+		"Answer": [
+			{"name":"bridge.example.ts.net","type":5,"data":"edge.example."},
+			{"name":"bridge.example.ts.net","type":1,"data":"203.0.113.10"},
+			{"name":"bridge.example.ts.net","type":28,"data":"2001:db8::10"},
+			{"name":"bridge.example.ts.net","type":1,"data":"203.0.113.10"},
+			{"name":"bridge.example.ts.net","type":1,"data":"100.64.0.2"},
+			{"name":"bridge.example.ts.net","type":1,"data":"192.168.1.2"},
+			{"name":"bridge.example.ts.net","type":1,"data":"not-an-address"}
+		]
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addresses) != 2 || addresses[0].String() != "203.0.113.10" ||
+		addresses[1].String() != "2001:db8::10" {
+		t.Fatalf("unexpected addresses: %v", addresses)
+	}
+}
+
+func TestWaitForPublicGatewayUsesIndependentDNSAndCurrentInstance(t *testing.T) {
+	oldLookup, oldProbe := resolvePublicAddresses, probePublicGateway
+	oldWindow, oldInterval := publicPublishWindow, publicProbeInterval
+	defer func() {
+		resolvePublicAddresses, probePublicGateway = oldLookup, oldProbe
+		publicPublishWindow, publicProbeInterval = oldWindow, oldInterval
+	}()
+	publicPublishWindow = 100 * time.Millisecond
+	publicProbeInterval = 5 * time.Millisecond
+	instance := "0123456789abcdef0123456789abcdef"
+	lookupHost := ""
+	resolvePublicAddresses = func(_ context.Context, host string) ([]netip.Addr, error) {
+		lookupHost = host
+		return []netip.Addr{netip.MustParseAddr("203.0.113.10")}, nil
+	}
+	probePublicGateway = func(_ context.Context, endpoint *url.URL, addresses []netip.Addr, expected string) (string, error) {
+		if endpoint.Hostname() != "bridge.example.ts.net" || len(addresses) != 1 ||
+			expected != instance {
+			t.Fatal("public probe received the wrong endpoint or identity")
+		}
+		return instance, nil
+	}
+	got, err := waitForPublicGateway(context.Background(),
+		"https://bridge.example.ts.net", instance, func() {}, make(chan error))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != instance || lookupHost != "bridge.example.ts.net" {
+		t.Fatalf("unexpected public verification: got=%q host=%q", got, lookupHost)
+	}
+}
+
+func TestWaitForPublicGatewayStopsAfterPublishWindow(t *testing.T) {
+	oldLookup, oldProbe := resolvePublicAddresses, probePublicGateway
+	oldWindow, oldInterval := publicPublishWindow, publicProbeInterval
+	defer func() {
+		resolvePublicAddresses, probePublicGateway = oldLookup, oldProbe
+		publicPublishWindow, publicProbeInterval = oldWindow, oldInterval
+	}()
+	publicPublishWindow = 25 * time.Millisecond
+	publicProbeInterval = 5 * time.Millisecond
+	resolvePublicAddresses = func(context.Context, string) ([]netip.Addr, error) {
+		return nil, nil
+	}
+	probePublicGateway = func(context.Context, *url.URL, []netip.Addr, string) (string, error) {
+		t.Fatal("probe must not run without a public DNS address")
+		return "", nil
+	}
+	notifications := 0
+	_, err := waitForPublicGateway(context.Background(),
+		"https://bridge.example.ts.net", "0123456789abcdef0123456789abcdef",
+		func() { notifications++ }, make(chan error))
+	if !errors.Is(err, errFunnelPublishTimeout) {
+		t.Fatalf("expected publish timeout, got %v", err)
+	}
+	if notifications == 0 {
+		t.Fatal("expected an intermediate publishing status")
+	}
+}
+
+func TestWaitForFunnelHealthRechecksAndDetectsPublicFailure(t *testing.T) {
+	oldLookup, oldProbe := resolvePublicAddresses, probePublicGateway
+	oldInterval, oldRetry, oldFailures := funnelHealthInterval, funnelHealthRetry, funnelHealthFailures
+	defer func() {
+		resolvePublicAddresses, probePublicGateway = oldLookup, oldProbe
+		funnelHealthInterval, funnelHealthRetry, funnelHealthFailures = oldInterval, oldRetry, oldFailures
+	}()
+	funnelHealthInterval = time.Millisecond
+	funnelHealthRetry = time.Millisecond
+	funnelHealthFailures = 2
+	instance := "0123456789abcdef0123456789abcdef"
+	resolvePublicAddresses = func(context.Context, string) ([]netip.Addr, error) {
+		return []netip.Addr{netip.MustParseAddr("203.0.113.10")}, nil
+	}
+	probes := 0
+	probePublicGateway = func(context.Context, *url.URL, []netip.Addr, string) (string, error) {
+		probes++
+		if probes == 1 {
+			return instance, nil
+		}
+		return "", errors.New("synthetic public outage")
+	}
+	err := waitForFunnelHealth(context.Background(),
+		"https://bridge.example.ts.net", instance, make(chan error))
+	if !errors.Is(err, errFunnelHealthLost) {
+		t.Fatalf("expected health loss, got %v", err)
+	}
+	if probes != 3 {
+		t.Fatalf("public probe count = %d, want 3", probes)
 	}
 }

@@ -29,6 +29,8 @@ EMBEDDED_ERRORS = {
     'invalid_launch': '无法把登录凭据安全交给内嵌 Tailscale。',
     'verification_failed': '内嵌 Tailscale 已启动，但尚未验证它确实连到当前网关；'
                            '正在等待 Tailscale 域名或 Funnel 生效后重试。',
+    'funnel_publishing': 'Tailscale 已登记本机入口，但公网 Funnel 尚未发布；'
+                         'App 正在自动重新登记，请检查 Tailscale Funnel 与 HTTPS 设置。',
     'tailscale_failed': '内嵌 Tailscale 未能连接，请检查网络和管理员策略。',
     'stopped': '内嵌 Tailscale 已停止。',
 }
@@ -162,7 +164,7 @@ def inspect_embedded(entry, data_dir=None, runtime_pid=None, instance_id=None):
         return {'state': 'authorization', 'available': True, 'runtime': 'embedded',
                 'authUrl': authorization_url(status.get('authUrl', '')),
                 'message': '请在 Tailscale 官方页面完成内嵌节点授权，然后重新检测。'}
-    if state in ('starting', 'connecting', 'retrying', 'authenticating'):
+    if state in ('starting', 'connecting', 'publishing', 'listening', 'retrying', 'authenticating'):
         return {'state': 'starting', 'available': True, 'runtime': 'embedded',
                 'message': status.get('message') or '内嵌 Tailscale 正在启动。'}
     if state in ('blocked', 'failed'):
@@ -248,7 +250,8 @@ class TailscaleTunnel:
         self.process = self.thread = None
         self.last_status = None
 
-    def status(self, state, message, auth_url='', url=None, node_id=None, instance_id=''):
+    def status(self, state, message, auth_url='', url=None, node_id=None, instance_id='',
+               diagnostic=None):
         instance_id = instance_id or self.instance_id
         record = {'pid': os.getpid(), 'state': state, 'message': message,
                   'runtime': self.entry.get('tailscaleRuntime', 'system'),
@@ -258,6 +261,8 @@ class TailscaleTunnel:
             record['nodeId'] = node_id
         if instance_id:
             record['instanceId'] = instance_id
+        if isinstance(diagnostic, dict):
+            record['diagnostic'] = diagnostic
         if self.process:
             record['childPid'] = self.process.pid
         if record != self.last_status:
@@ -394,10 +399,42 @@ class TailscaleTunnel:
                             watchdog.cancel()
                         self.status('authorization', '请完成内嵌 Tailscale 登录授权，完成后会继续连接。',
                                     event.get('authUrl', ''))
-                    elif state in ('listening', 'connected'):
+                    elif state == 'resolved':
                         url = str(event.get('url') or '')
                         node_id = str(event.get('nodeId') or '')
                         event_instance = str(event.get('instanceId') or '')
+                        diagnostic = event.get('diagnostic')
+                        if (not url or not node_id
+                                or not self.instance_id
+                                or event_instance != self.instance_id):
+                            continue
+                        # The Go helper reaches the gateway through the exact
+                        # public .ts.net URL. Publish that provisional origin
+                        # before its pre-listening identity probe so the gateway
+                        # can accept the request. A failed probe clears it in
+                        # the finally block below.
+                        self._publish_origin(url, node_id)
+                        self.status('connecting', 'App 内嵌 Tailscale 已取得固定地址，正在校验当前网关身份…',
+                                    url=url, node_id=node_id, diagnostic=diagnostic)
+                    elif state in ('listening', 'publishing'):
+                        url = str(event.get('url') or '')
+                        node_id = str(event.get('nodeId') or '')
+                        event_instance = str(event.get('instanceId') or '')
+                        diagnostic = event.get('diagnostic')
+                        if (not url or not node_id
+                                or not self.instance_id
+                                or event_instance != self.instance_id):
+                            continue
+                        self._publish_origin(url, node_id)
+                        message = str(event.get('message') or
+                                      'Tailscale 已在 Tailnet 内就绪，正在验证公网 Funnel…')
+                        self.status('connecting', message, url=url, node_id=node_id,
+                                    diagnostic=diagnostic)
+                    elif state == 'connected':
+                        url = str(event.get('url') or '')
+                        node_id = str(event.get('nodeId') or '')
+                        event_instance = str(event.get('instanceId') or '')
+                        diagnostic = event.get('diagnostic')
                         if (not url or not node_id
                                 or not self.instance_id
                                 or event_instance != self.instance_id):
@@ -406,12 +443,31 @@ class TailscaleTunnel:
                             watchdog.cancel()
                         self._publish_origin(url, node_id)
                         delay = 3
-                        self.status('connected', 'App 内嵌 Tailscale 入口已启动，请检测固定入口并用手机验证。',
+                        self.status('connected', '公网 Funnel、TLS 和当前网关身份均已验证；'
+                                                '请用手机完成登录与聊天验证。',
                                     url=url, node_id=node_id,
-                                    instance_id=event_instance)
+                                    instance_id=event_instance, diagnostic=diagnostic)
+                    elif state == 'retrying':
+                        diagnostic = event.get('diagnostic')
+                        url = str(event.get('url') or '')
+                        node_id = str(event.get('nodeId') or '')
+                        event_instance = str(event.get('instanceId') or '')
+                        # A retry can follow either the first publish attempt or
+                        # a previously healthy public endpoint. Do not leave an
+                        # old origin trusted while the helper is re-registering.
+                        # The next "resolved" event publishes it again before
+                        # the identity-safe probe.
+                        self._publish_origin()
+                        self.status('retrying',
+                                    str(event.get('message') or
+                                        EMBEDDED_ERRORS['funnel_publishing']),
+                                    url=url or None, node_id=node_id or None,
+                                    instance_id=event_instance, diagnostic=diagnostic)
                     elif state in ('failed', 'error'):
                         code = str(event.get('code') or 'tailscale_failed')
-                        self.status('failed', EMBEDDED_ERRORS.get(code, EMBEDDED_ERRORS['tailscale_failed']))
+                        status_state = 'retrying' if code == 'funnel_publishing' else 'failed'
+                        self.status(status_state,
+                                    EMBEDDED_ERRORS.get(code, EMBEDDED_ERRORS['tailscale_failed']))
                         if code in EMBEDDED_TERMINAL_ERRORS:
                             return
                 process.wait()

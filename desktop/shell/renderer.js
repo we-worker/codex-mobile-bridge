@@ -163,7 +163,8 @@ function render(value,watchRevision=watchPanel.revision){
   document.querySelectorAll('[data-connection-field],[data-remove-connection]').forEach(node=>node.disabled=running);
   for(const node of document.querySelectorAll('[data-connection-status]')){
     const row=connectionDraft.find(c=>c.id===node.dataset.connectionStatus),mode=row?.accessMode;
-    node.textContent=t([connectionSetupState.get(node.dataset.connectionStatus),value.externalStatus?.[node.dataset.connectionStatus]?.message].filter(Boolean).map(t).join(' ')||(!running?t(mode==='tailscale'?'先保存连接配置，然后检测 Tailscale。':mode==='external'?'保存并启动网关后可检测入口。':'网关未启动。可先保存配置并导出部署包。'):t('网关正在运行；固定入口是否可用，请点击检测。')));
+    const statusText=[...new Set([connectionSetupState.get(node.dataset.connectionStatus),value.externalStatus?.[node.dataset.connectionStatus]?.message].filter(Boolean))].map(t).join(' ');
+    node.textContent=statusText||(!running?t(mode==='tailscale'?'先保存连接配置，然后检测 Tailscale。':mode==='external'?'保存并启动网关后可检测入口。':'网关未启动。可先保存配置并导出部署包。'):t('网关正在运行；固定入口是否可用，请点击检测。'));
     const summary=node.closest('.connection-card')?.querySelector('.connection-summary');if(summary&&row)summary.textContent=connectionSummary(row);
   }
   document.querySelectorAll('[data-pick]').forEach(button=>button.disabled=running);

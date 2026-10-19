@@ -27,6 +27,33 @@
 
 交互登录适合有人操作桌面的电脑。无人值守或纯远程部署应使用 Tailscale 认证密钥。需要固定设备身份和地址时，不要使用会在节点离线后删除设备的 ephemeral key；密钥应按最小权限创建并妥善轮换。
 
+### 公网发布校验
+
+Funnel 模式下，`ListenFunnel` 返回成功、或从同一 Tailnet 内访问成功，只证明本机监听和 Tailnet 内链路成立，不能证明公网入口已发布。App 会继续执行以下检查，全部通过后才报告“已连接”：
+
+1. 通过阿里、腾讯、Cloudflare 和 Google 的独立 DoH 服务查询该 `.ts.net` 地址的 A/AAAA 记录；不使用可能被 MagicDNS 或系统代理影响的普通解析结果。
+2. 直接连接公开解析出的地址，使用真实 `.ts.net` 主机名执行证书校验。
+3. 请求公网 `/api/auth`，并确认返回的 `instanceId` 与当前网关完全一致。
+
+地址尚未发布时，界面会显示“Funnel 已在本机登记，正在等待公网 DNS 与 HTTPS 生效”，不会一直停在“正在启动”。等待窗口结束后，sidecar 会撤销并重新登记 Funnel；连续失败后会自动重建 sidecar，并逐步增加间隔。状态 JSON 只保留后端状态、健康项数量、在线节点数、能力标记和本机 Funnel 登记状态，不记录认证密钥、节点私钥或原始日志。
+
+入口显示“已连接”后，sidecar 仍会每 45 秒重新查询公共 DNS、验证 `.ts.net` 证书并核对当前网关身份。单次网络抖动会立即复核；连续两次失败才会撤回临时 Origin、关闭旧 Funnel 监听并重新登记。这样既不会因一次短暂超时频繁重建，也不会在公网 DNS 被控制面删除后继续向手机展示一个已经失效的地址。
+
+如果诊断中 `funnelCapability`、`httpsCapability`、`funnelPortsCapability` 和 `funnelRegistered` 均为 `true`，但多个公共 DoH 仍返回 NODATA，说明问题位于 Tailscale 控制面的公网发布，而不是 App 的监听、证书或 ACL 解析。此时应先停止反复手工重启，让 App 的退避重试继续，并检查 Tailscale 服务状态和管理后台设备记录。
+
+公网 Funnel 需要账号策略同时满足 HTTPS 与 `funnel` 节点属性。默认 ACL 可在 Tailscale 管理后台的 `nodeAttrs` 中加入：
+
+```json
+{
+  "nodeAttrs": [
+    {
+      "target": ["autogroup:member"],
+      "attr": ["funnel"]
+    }
+  ]
+}
+```
+
 ### 生命周期与安全边界
 
 - sidecar 随网关启停，只终止本实例创建的 `codex-tsnet` 子进程。
@@ -72,7 +99,8 @@ macOS 建议使用官方独立安装包。Funnel 的平台和权限要求见其�
 | 等待登录 | 打开 **继续 Tailscale 授权**，或检查认证密钥是否有效、未过期且允许当前 Tailnet |
 | HTTPS / MagicDNS 不可用 | 在 Tailscale 管理后台启用 HTTPS 与 MagicDNS |
 | Funnel 不可用 | 启用 Funnel、确认账号/节点有权限，或先改用私有 Serve |
-| 正在验证但未就绪 | 等待证书、DNS 和 Funnel 生效；确认访问端可到达当前网关，不要跳过 TLS 验证 |
+| Funnel 已在本机登记但公网 NODATA | 能力项和 `funnelRegistered` 为真时，问题在控制面公网发布；保留 App 的自动重登记，检查 Tailscale 状态和后台设备记录 |
+| 正在验证但未就绪 | 只表示 Tailnet 内检查已完成；公网 DNS、TLS 或当前实例身份仍未全部通过，不要跳过这些校验 |
 | 地址或身份变化 | 停止网关后重新检测并确认；旧地址会被动态撤回 |
 | 私有 Serve 打不开 | Android 可在 App 内完成内置节点授权；其他设备需接入同一 Tailnet。再检查 Tailscale ACL 和设备授权 |
 

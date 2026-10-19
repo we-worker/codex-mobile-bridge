@@ -155,6 +155,24 @@ test('Tailscale detection fills a read-only URL and preserves its unsaved identi
   assert.equal(controls.find(node=>node.dataset.connectionAction==='tailscaleInspect').textContent,'Detect Tailscale and read URL');
 });
 
+test('repeated Tailscale startup text is rendered once in the card and summary',async()=>{
+  const ui=await renderer();
+  const message='正在启动 App 内嵌 Tailscale…';
+  const row={id:'ts',name:'WSL Codex',enabled:true,accessMode:'tailscale',publicUrl:'',
+    tailscaleMode:'funnel',tailscalePort:443,tailscaleNodeId:'',tailscaleRuntime:'embedded',
+    tailscaleHostname:'codex-mobile-bridge',tailscaleAuthMode:'interactive'};
+  ui.value.preferences.connections=[row];
+  ui.value.externalStatus={ts:{message}};
+  ui.run(`connectionSetupState.set('ts',${JSON.stringify(message)});connectionDraft=${JSON.stringify([row])};savedConnections=JSON.stringify(connectionDraft);renderConnections();`);
+  await ui.poll();
+  const descendants=node=>[node,...(node.children||[]).flatMap(descendants)];
+  const items=descendants(ui.nodes.get('connections'));
+  const status=items.find(node=>node.dataset.connectionStatus==='ts');
+  const summary=items.find(node=>node.className==='connection-summary');
+  assert.equal(status.textContent.split(message).length-1,1);
+  assert.equal(summary.textContent.split(message).length-1,1);
+});
+
 test('existing tunnel needs only an HTTPS address and keeps NAS upstream in the advanced location',async()=>{
   const descendants=node=>[node,...(node.children||[]).flatMap(descendants)];
   for(const language of ['zh-CN','en']){

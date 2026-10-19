@@ -137,7 +137,8 @@ function renderConnections(){
       }));
       actions.append(action('继续 Tailscale 授权','tailscaleAuthorize',()=>api.tailscaleAuthorize({id:row.id})));
       actions.append(action('检测固定入口','checkEntry',()=>api.checkEntry({id:row.id})));card.append(actions);
-      const status=note([connectionSetupState.get(row.id),snapshot?.externalStatus?.[row.id]?.message].filter(Boolean).map(t).join(' ')||'先保存连接配置，然后检测 Tailscale。');status.dataset.connectionStatus=row.id;
+      const statusText=[...new Set([connectionSetupState.get(row.id),snapshot?.externalStatus?.[row.id]?.message].filter(Boolean))].map(t).join(' ');
+      const status=note(statusText||'先保存连接配置，然后检测 Tailscale。');status.dataset.connectionStatus=row.id;
       note(row.tailscaleRuntime==='embedded'?'入口与内嵌节点随网关启停；不会修改系统 Tailscale 或其他服务。':'入口随网关启停；退出网关不会退出 Tailscale 或修改其他服务。');
     }else if(row.accessMode==='external'||row.accessMode==='nas'){
       const address=field('publicUrl','手机访问地址（HTTPS）','text','https://bridge.example.com');
