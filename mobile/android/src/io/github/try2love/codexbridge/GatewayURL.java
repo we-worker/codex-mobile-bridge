@@ -4,11 +4,13 @@ import java.net.URLEncoder;
 
 /** Origins are explicit user choices; credentials never move to another origin. */
 public final class GatewayURL {
+    private static final int TAILNET_HTTP_PORT=8787;
     public static String origin(String value) throws Exception {
         URI u=new URI(value.trim());String host=u.getHost();
         if(host==null||u.getRawUserInfo()!=null||u.getRawQuery()!=null||u.getPort()>65535||u.getPort()==0)throw new Exception("请填写完整网关地址，不含账号或参数");
         String scheme=u.getScheme()==null?"":u.getScheme().toLowerCase();
-        if(!scheme.equals("https")&&!(scheme.equals("http")&&local(host)))throw new Exception("公网地址必须使用 HTTPS；HTTP 仅限局域网");
+        if(!scheme.equals("https")&&!(scheme.equals("http")&&local(host)))throw new Exception("公网地址必须使用 HTTPS；HTTP 仅限局域网或 Tailnet 私有地址");
+        if(scheme.equals("http")&&tailnet(host)&&u.getPort()!=TAILNET_HTTP_PORT)throw new Exception("Tailnet 私有 HTTP 地址必须使用端口 8787");
         String path=u.getRawPath()==null?"":u.getRawPath();
         if(!path.isEmpty()&&!path.equals("/")&&!path.matches("/d/[a-f0-9]{32}/?"))throw new Exception("网关地址不应包含路径");
         return scheme+"://"+u.getRawAuthority().toLowerCase()+(path.startsWith("/d/")?path.replaceAll("/$",""):"");
@@ -17,7 +19,7 @@ public final class GatewayURL {
         if(host.equalsIgnoreCase("localhost")||host.equals("[::1]"))return true;
         String[] p=host.split("\\.");if(p.length!=4)return false;
         int[] n=new int[4];try{for(int i=0;i<4;i++){n[i]=Integer.parseInt(p[i]);if(n[i]<0||n[i]>255||!p[i].equals(Integer.toString(n[i])))return false;}}catch(Exception e){return false;}
-        return n[0]==10||n[0]==127||n[0]==192&&n[1]==168||n[0]==172&&n[1]>=16&&n[1]<=31;
+        return n[0]==10||n[0]==127||n[0]==192&&n[1]==168||n[0]==172&&n[1]>=16&&n[1]<=31||n[0]==100&&n[1]>=64&&n[1]<=127;
     }
     public static String connection(String value)throws Exception {
         String base=origin(value);String fragment=new URI(value.trim()).getRawFragment();
@@ -26,7 +28,20 @@ public final class GatewayURL {
     }
     public static String httpOrigin(String base){try{URI u=new URI(base);return u.getScheme()+"://"+u.getRawAuthority();}catch(Exception e){return "";}}
  public static boolean tailnetOrigin(String value){
-  try{URI u=new URI(value);String host=u.getHost();return "https".equalsIgnoreCase(u.getScheme())&&host!=null&&host.toLowerCase(java.util.Locale.ROOT).endsWith(".ts.net")&&host.length()>7;}catch(Exception invalid){return false;}
+  try{
+    URI u=new URI(value);String host=u.getHost(),scheme=u.getScheme()==null?"":u.getScheme().toLowerCase(java.util.Locale.ROOT);
+    if(host==null||u.getRawUserInfo()!=null||u.getRawFragment()!=null)return false;
+   if("https".equals(scheme))return tailnetHost(host)&&(u.getPort()==-1||u.getPort()==443||u.getPort()==8443||u.getPort()==10000);
+   return "http".equals(scheme)&&u.getPort()==TAILNET_HTTP_PORT&&tailnet(host);
+  }catch(Exception invalid){return false;}
+ }
+ static boolean tailnet(String host){
+  String[] p=host.split("\\.");if(p.length!=4)return false;
+  int[] n=new int[4];try{for(int i=0;i<4;i++){n[i]=Integer.parseInt(p[i]);if(n[i]<0||n[i]>255||!p[i].equals(Integer.toString(n[i])))return false;}}catch(Exception e){return false;}
+  return n[0]==100&&n[1]>=64&&n[1]<=127;
+ }
+ static boolean tailnetHost(String host){
+  return host!=null&&host.toLowerCase(java.util.Locale.ROOT).matches("^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\\.ts\\.net$");
  }
     public static String cookiePath(String base){return base.substring(httpOrigin(base).length())+"/";}
     public static String apiPath(String url,String base)throws Exception {String path=new URI(url).getRawPath();String prefix=cookiePath(base);return path.startsWith(prefix)?"/"+path.substring(prefix.length()):"";}

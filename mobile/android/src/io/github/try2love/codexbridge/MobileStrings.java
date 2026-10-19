@@ -115,10 +115,14 @@ values.put("请选择本次允许、拒绝或取消","Choose allow once, deny or
 values.put("请选择本次允许或拒绝","Choose allow once or deny");
 values.put("这个模型不支持所选推理强度","This model does not support the selected reasoning effort");
 values.put("公网地址必须使用 HTTPS；HTTP 仅限局域网","Public addresses require HTTPS. HTTP is only allowed on a local network.");
+values.put("公网地址必须使用 HTTPS；HTTP 仅限局域网或 Tailnet 私有地址","Public addresses require HTTPS. HTTP is only allowed on a LAN or Tailnet private address.");
+ values.put("Tailnet 私有 HTTP 地址必须使用端口 8787","Tailnet private HTTP addresses must use port 8787");
 values.put("网关地址不应包含路径","Gateway addresses must not include a path");
 values.put("请使用电脑网关提供的地址或二维码","Use the address or QR code from your computer\u2019s gateway");
 values.put("请填写完整网关地址，不含账号或参数","Enter a complete gateway address without credentials or query parameters");
 values.put("请填写完整的 HTTPS 网关地址，或局域网 HTTP 地址，不含路径、账号和参数。","Enter a complete HTTPS gateway address, or a local HTTP address, without a path, credentials or parameters.");
+values.put("请填写完整的 HTTPS 网关地址，或局域网或 Tailnet 私有 HTTP 地址，不含路径、账号和参数。","Enter a complete HTTPS gateway address, or a LAN or Tailnet private HTTP address, without a path, credentials or parameters.");
+values.put("使用 App 进程内的 Tailscale 节点访问 .ts.net HTTPS 或 100.x 私有 HTTP 网关，不创建系统 VPN，也不接管手机路由。","Use the Tailscale node inside the app to reach .ts.net HTTPS or 100.x private HTTP gateways without creating a system VPN or taking over phone routes.");
   values.put("检查中…","Checking…");
   values.put("在线","Online");
   values.put("暂不可达","Unreachable");

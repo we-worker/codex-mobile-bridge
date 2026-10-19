@@ -182,43 +182,90 @@ def main(connections=None, connection_secrets=None):
         raise
     server = servers[0]
     tailscale_origins = {}
+    from bridge.features.network.tailscale import TAILNET_HTTP_PORT
 
-    def allow_tailscale_origin(entry_id, origin='', node_id=''):
-        """Allow only the exact .ts.net identity returned by this live node."""
-        old = tailscale_origins.pop(entry_id, None)
-        if old:
-            old_host = urlsplit(old).netloc
-            server.origins.discard(old)
+    def forget_origin(origin):
+        server.origins.discard(origin)
+        old_host = urlsplit(origin).netloc
+        if not any(urlsplit(value).netloc == old_host for value in server.origins):
             server.hosts.discard(old_host)
             server.secure_hosts.discard(old_host)
+
+    def allow_tailscale_origin(entry_id, origins=(), node_id=''):
+        """Allow only exact live Tailnet origins plus the exact private HTTP entry."""
+        old_value = tailscale_origins.pop(entry_id, ())
+        old_origins = (old_value,) if isinstance(old_value, str) else old_value
+        for old in old_origins:
+            forget_origin(old)
         entry = next((row for row in entries if row['id'] == entry_id), None)
         if not entry:
             return
-        if not origin:
+
+        def clear():
             entry['publicUrl'] = ''
             entry['tailscaleNodeId'] = ''
             config['publicUrl'] = public_url(preferences)
-            return
-        parsed = urlsplit(origin)
-        if (parsed.scheme != 'https' or parsed.username or parsed.password
-                or parsed.path not in ('', '/') or parsed.query or parsed.fragment
-                or not re.fullmatch(
-                    r'(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+ts\.net',
-                    parsed.hostname or '')
-                or (parsed.port or 443) != entry['tailscalePort']
+
+        if (not isinstance(origins, (list, tuple)) or not origins
                 or not re.fullmatch(r'[A-Za-z0-9_-]{1,128}', node_id or '')):
-            entry['publicUrl'] = ''
-            entry['tailscaleNodeId'] = ''
-            config['publicUrl'] = public_url(preferences)
+            clear()
             return
-        canonical = origin.rstrip('/')
-        tailscale_origins[entry_id] = canonical
-        entry['publicUrl'] = canonical
+        accepted = []
+        for origin in origins:
+            if not isinstance(origin, str) or origin != origin.strip():
+                clear()
+                return
+            try:
+                parsed = urlsplit(origin)
+                port = parsed.port
+            except ValueError:
+                clear()
+                return
+            if (parsed.username or parsed.password or parsed.path not in ('', '/')
+                    or parsed.query or parsed.fragment or not parsed.hostname):
+                clear()
+                return
+            host = parsed.hostname
+            if parsed.scheme == 'https':
+                if (not re.fullmatch(
+                        r'(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+ts\.net',
+                        host)
+                        or (port or 443) != entry['tailscalePort']):
+                    clear()
+                    return
+            elif parsed.scheme == 'http' and entry['tailscaleMode'] == 'serve':
+                try:
+                    address = ipaddress.ip_address(host)
+                except ValueError:
+                    clear()
+                    return
+                if (address.version != 4
+                        or address not in ipaddress.ip_network('100.64.0.0/10')
+                        or port != TAILNET_HTTP_PORT):
+                    clear()
+                    return
+            else:
+                clear()
+                return
+            accepted.append(origin.rstrip('/'))
+        accepted = list(dict.fromkeys(accepted))
+        https_urls = [value for value in accepted if value.startswith('https://')]
+        http_urls = [value for value in accepted if value.startswith('http://')]
+        expected_http = 1 if entry['tailscaleMode'] == 'serve' else 0
+        if (len(https_urls) != 1 or len(http_urls) != expected_http
+                or len(accepted) != 1 + expected_http):
+            clear()
+            return
+        tailscale_origins[entry_id] = tuple(accepted)
+        entry['publicUrl'] = https_urls[0]
         entry['tailscaleNodeId'] = node_id
         config['publicUrl'] = public_url(preferences)
-        server.origins.add(canonical)
-        server.hosts.add(parsed.netloc)
-        server.secure_hosts.add(parsed.netloc)
+        for value in accepted:
+            parsed = urlsplit(value)
+            server.origins.add(value)
+            server.hosts.add(parsed.netloc)
+            if parsed.scheme == 'https':
+                server.secure_hosts.add(parsed.netloc)
 
     listener_threads = []
     pid_file = args.config.parent / "gateway.pid"
@@ -277,7 +324,8 @@ def main(connections=None, connection_secrets=None):
                     entry, tailscale_port, args.config.parent,
                     secrets=connection_secrets.get(entry['id']),
                     allow_origin=allow_tailscale_origin,
-                    instance_id=server.instance_id)
+                    instance_id=server.instance_id,
+                    http_port=TAILNET_HTTP_PORT)
                 ssh_tunnels.append(tailscale)
                 tailscale.start()
             if entry['enabled'] and entry['accessMode'] == 'cloudflare':

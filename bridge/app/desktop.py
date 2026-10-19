@@ -184,11 +184,18 @@ class Desktop:
             status = read_json(self.data_dir/('ssh-status-'+entry['id']+'.json'), {})
             if runtime['running'] and status.get('pid') == runtime.get('pid'):
                 external[entry['id']] = status
-        dynamic_fixed = [status.get('url', '').rstrip('/') + '/'
-                         for entry in preferences['connections']
-                         if entry['accessMode'] == 'tailscale'
-                         for status in [external.get(entry['id'], {})]
-                         if status.get('state') == 'connected' and status.get('url')]
+        dynamic_fixed = []
+        for entry in preferences['connections']:
+            if entry['accessMode'] != 'tailscale':
+                continue
+            status = external.get(entry['id'], {})
+            if status.get('state') != 'connected':
+                continue
+            endpoints = status.get('urls') if isinstance(status.get('urls'), list) else []
+            endpoints = [value for value in endpoints if isinstance(value, str) and value]
+            if not endpoints and isinstance(status.get('url'), str) and status['url']:
+                endpoints = [status['url']]
+            dynamic_fixed.extend(value.rstrip('/') + '/' for value in endpoints)
         urls = list(dict.fromkeys(dynamic_fixed + urls))
         executable = preferences['cloudflared']
         cloudflared = {'path': executable, 'available': bool(executable and Path(executable).is_file() and os.access(executable, os.X_OK))}

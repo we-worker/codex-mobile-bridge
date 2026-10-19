@@ -59,7 +59,11 @@ type statusRecord struct {
 	State      string            `json:"state"`
 	Code       string            `json:"code,omitempty"`
 	AuthURL    string            `json:"authUrl,omitempty"`
+	Mode       string            `json:"mode,omitempty"`
 	URL        string            `json:"url,omitempty"`
+	URLs       []string          `json:"urls,omitempty"`
+	TailnetURL string            `json:"tailnetUrl,omitempty"`
+	TailnetIPs []string          `json:"tailnetIps,omitempty"`
 	NodeID     string            `json:"nodeId,omitempty"`
 	InstanceID string            `json:"instanceId,omitempty"`
 	Version    string            `json:"version,omitempty"`
@@ -93,17 +97,18 @@ func main() {
 	log.SetOutput(io.Discard)
 
 	var stateDir, hostname, mode, upstream, expectedInstance string
-	var port int
+	var port, httpPort int
 	flag.StringVar(&stateDir, "state-dir", "", "private directory for the embedded node state")
 	flag.StringVar(&hostname, "hostname", "codex-mobile-bridge", "Tailscale device hostname")
 	flag.StringVar(&mode, "mode", "serve", "serve or funnel")
 	flag.IntVar(&port, "port", 443, "HTTPS listener port")
+	flag.IntVar(&httpPort, "http-port", 8787, "Tailnet-only HTTP listener port")
 	flag.StringVar(&upstream, "upstream", "", "loopback HTTP upstream")
 	flag.StringVar(&expectedInstance, "instance-id", "", "gateway instance expected behind the listener")
 	flag.Parse()
 
 	status := &statusWriter{output: os.Stdout}
-	if err := validateFlags(stateDir, hostname, mode, port, upstream, expectedInstance); err != nil {
+	if err := validateFlags(stateDir, hostname, mode, port, httpPort, upstream, expectedInstance); err != nil {
 		status.write(statusRecord{State: "failed", Code: "invalid_configuration", Version: version})
 		return
 	}
@@ -115,12 +120,12 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := run(ctx, status, launch, stateDir, hostname, mode, port, upstream, expectedInstance); err != nil {
+	if err := run(ctx, status, launch, stateDir, hostname, mode, port, httpPort, upstream, expectedInstance); err != nil {
 		status.write(statusRecord{State: "failed", Code: errorCode(err), Version: version})
 	}
 }
 
-func run(ctx context.Context, output *statusWriter, launch launchConfig, stateDir, hostname, mode string, port int, upstream, expectedInstance string) error {
+func run(ctx context.Context, output *statusWriter, launch launchConfig, stateDir, hostname, mode string, port, httpPort int, upstream, expectedInstance string) error {
 	if err := os.MkdirAll(stateDir, 0o700); err != nil {
 		return fmt.Errorf("create state directory: %w", err)
 	}
@@ -182,20 +187,20 @@ func run(ctx context.Context, output *statusWriter, launch launchConfig, stateDi
 		}
 		return fmt.Errorf("join tailnet: %w", err)
 	}
+	if status.Self == nil {
+		return errors.New("tailnet did not provide this device")
+	}
 	if len(status.CertDomains) == 0 {
 		return errors.New("HTTPS is not enabled for this tailnet")
-	}
-	dnsName := strings.TrimSuffix(status.Self.DNSName, ".")
-	if dnsName == "" {
-		return errors.New("tailnet did not provide a device DNS name")
 	}
 	nodeID := string(status.Self.ID)
 	if nodeID == "" {
 		return errors.New("tailnet did not provide a stable device ID")
 	}
-	deviceURL := "https://" + dnsName
-	if port != 443 {
-		deviceURL += ":" + strconv.Itoa(port)
+	deviceURL, tailnetURL, tailnetIP, urls, err := resolveEndpoints(
+		status.Self.DNSName, port, httpPort, status.Self.TailscaleIPs, mode)
+	if err != nil {
+		return err
 	}
 	// The gateway must allow this exact origin before the loopback identity
 	// probe below. This is a provisional authorization for the current child
@@ -203,7 +208,11 @@ func run(ctx context.Context, output *statusWriter, launch launchConfig, stateDi
 	// and URL have both been verified.
 	output.write(statusRecord{
 		State:      "resolved",
+		Mode:       mode,
 		URL:        deviceURL,
+		URLs:       urls,
+		TailnetURL: tailnetURL,
+		TailnetIPs: optionalValues(tailnetIP),
 		NodeID:     nodeID,
 		InstanceID: expectedInstance,
 		Version:    version,
@@ -212,29 +221,42 @@ func run(ctx context.Context, output *statusWriter, launch launchConfig, stateDi
 	if mode == "funnel" {
 		return runFunnel(ctx, output, server, deviceURL, nodeID, upstream, port, expectedInstance)
 	}
-	return runServe(ctx, output, server, deviceURL, nodeID, upstream, port, expectedInstance)
+	return runServe(ctx, output, server, deviceURL, tailnetURL, tailnetIP, nodeID, upstream, port, httpPort, expectedInstance)
 }
 
-func runServe(ctx context.Context, output *statusWriter, server *tsnet.Server, deviceURL, nodeID, upstream string, port int, expectedInstance string) error {
-	listener, httpServer, serveErrors, err := openListener(server, upstream, port, false)
+func runServe(ctx context.Context, output *statusWriter, server *tsnet.Server, deviceURL, tailnetURL, tailnetIP, nodeID, upstream string, port, httpPort int, expectedInstance string) error {
+	listener, httpServer, secureErrors, err := openListener(server, upstream, port, false, "https")
 	if err != nil {
 		return err
 	}
 	defer closeListener(httpServer, listener)
+	tailnetListener, tailnetHTTPServer, tailnetErrors, err := openTailnetHTTPListener(server, upstream, httpPort)
+	if err != nil {
+		return err
+	}
+	defer closeListener(tailnetHTTPServer, tailnetListener)
 
 	instanceID, diagnostic, err := verifyListener(ctx, output, server, deviceURL, nodeID, port, expectedInstance)
 	if err != nil {
 		return err
 	}
+	if got := verifyLoopback(ctx, server, tailnetURL, expectedInstance); got != expectedInstance {
+		return errors.New("verify tailnet HTTP gateway instance")
+	}
 	output.write(statusRecord{
 		State:      "connected",
+		Mode:       "serve",
 		URL:        deviceURL,
+		URLs:       []string{deviceURL, tailnetURL},
+		TailnetURL: tailnetURL,
+		TailnetIPs: []string{tailnetIP},
 		NodeID:     nodeID,
 		InstanceID: instanceID,
 		Version:    version,
+		Message:    "Tailnet HTTPS、私有 HTTP 入口和当前网关身份均已验证。",
 		Diagnostic: diagnostic,
 	})
-	return waitForServer(ctx, serveErrors)
+	return waitForServerPair(ctx, secureErrors, tailnetErrors)
 }
 
 func runFunnel(ctx context.Context, output *statusWriter, server *tsnet.Server, deviceURL, nodeID, upstream string, port int, expectedInstance string) error {
@@ -261,7 +283,9 @@ func runFunnel(ctx context.Context, output *statusWriter, server *tsnet.Server, 
 		output.write(statusRecord{
 			State:      "retrying",
 			Code:       "funnel_publishing",
+			Mode:       "funnel",
 			URL:        deviceURL,
+			URLs:       []string{deviceURL},
 			NodeID:     nodeID,
 			InstanceID: expectedInstance,
 			Version:    version,
@@ -285,7 +309,7 @@ var errFunnelPublishTimeout = errors.New("funnel public endpoint was not publish
 var errFunnelHealthLost = errors.New("funnel public endpoint became unavailable")
 
 func runFunnelRound(ctx context.Context, output *statusWriter, server *tsnet.Server, deviceURL, nodeID, upstream string, port int, expectedInstance string) error {
-	listener, httpServer, serveErrors, err := openListener(server, upstream, port, true)
+	listener, httpServer, serveErrors, err := openListener(server, upstream, port, true, "https")
 	if err != nil {
 		return err
 	}
@@ -297,7 +321,9 @@ func runFunnelRound(ctx context.Context, output *statusWriter, server *tsnet.Ser
 	}
 	output.write(statusRecord{
 		State:      "listening",
+		Mode:       "funnel",
 		URL:        deviceURL,
+		URLs:       []string{deviceURL},
 		NodeID:     nodeID,
 		InstanceID: instanceID,
 		Version:    version,
@@ -308,7 +334,9 @@ func runFunnelRound(ctx context.Context, output *statusWriter, server *tsnet.Ser
 	verified, err := waitForPublicGateway(ctx, deviceURL, expectedInstance, func() {
 		output.write(statusRecord{
 			State:      "publishing",
+			Mode:       "funnel",
 			URL:        deviceURL,
+			URLs:       []string{deviceURL},
 			NodeID:     nodeID,
 			InstanceID: instanceID,
 			Version:    version,
@@ -325,7 +353,9 @@ func runFunnelRound(ctx context.Context, output *statusWriter, server *tsnet.Ser
 
 	output.write(statusRecord{
 		State:      "connected",
+		Mode:       "funnel",
 		URL:        deviceURL,
+		URLs:       []string{deviceURL},
 		NodeID:     nodeID,
 		InstanceID: verified,
 		Version:    version,
@@ -335,7 +365,7 @@ func runFunnelRound(ctx context.Context, output *statusWriter, server *tsnet.Ser
 	return waitForFunnelHealth(ctx, deviceURL, verified, serveErrors)
 }
 
-func openListener(server *tsnet.Server, upstream string, port int, funnel bool) (net.Listener, *http.Server, <-chan error, error) {
+func openListener(server *tsnet.Server, upstream string, port int, funnel bool, forwardedProto string) (net.Listener, *http.Server, <-chan error, error) {
 	var (
 		listener net.Listener
 		err      error
@@ -348,9 +378,21 @@ func openListener(server *tsnet.Server, upstream string, port int, funnel bool) 
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("listen on tailnet: %w", err)
 	}
+	return serveProxyListener(listener, upstream, forwardedProto)
+}
+
+func openTailnetHTTPListener(server *tsnet.Server, upstream string, port int) (net.Listener, *http.Server, <-chan error, error) {
+	listener, err := server.Listen("tcp", ":"+strconv.Itoa(port))
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("listen on private tailnet HTTP: %w", err)
+	}
+	return serveProxyListener(listener, upstream, "http")
+}
+
+func serveProxyListener(listener net.Listener, upstream, forwardedProto string) (net.Listener, *http.Server, <-chan error, error) {
 	target, _ := url.Parse(upstream)
 	httpServer := &http.Server{
-		Handler:           newProxy(target),
+		Handler:           newProxy(target, forwardedProto),
 		ReadHeaderTimeout: 15 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    1 << 20,
@@ -382,6 +424,23 @@ func waitForServer(ctx context.Context, serveErrors <-chan error) error {
 			return nil
 		}
 		return fmt.Errorf("serve tailnet listener: %w", err)
+	}
+}
+
+func waitForServerPair(ctx context.Context, secureErrors, privateErrors <-chan error) error {
+	select {
+	case <-ctx.Done():
+		return nil
+	case err := <-secureErrors:
+		if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
+			return nil
+		}
+		return fmt.Errorf("serve tailnet HTTPS listener: %w", err)
+	case err := <-privateErrors:
+		if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
+			return nil
+		}
+		return fmt.Errorf("serve private tailnet HTTP listener: %w", err)
 	}
 }
 
@@ -725,7 +784,7 @@ func collectDiagnostic(ctx context.Context, server *tsnet.Server, deviceURL stri
 	return value
 }
 
-func newProxy(target *url.URL) *httputil.ReverseProxy {
+func newProxy(target *url.URL, forwardedProto string) *httputil.ReverseProxy {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = nil
 	transport.MaxIdleConns = 100
@@ -740,10 +799,10 @@ func newProxy(target *url.URL) *httputil.ReverseProxy {
 			originalHost := request.In.Host
 			request.SetURL(target)
 			// The Python gateway validates the externally visible Host and
-			// Origin pair. Preserve the exact .ts.net authority.
+			// Origin pair. Preserve the exact tailnet authority.
 			request.Out.Host = originalHost
 			request.SetXForwarded()
-			request.Out.Header.Set("X-Forwarded-Proto", "https")
+			request.Out.Header.Set("X-Forwarded-Proto", forwardedProto)
 			request.Out.Header.Set("X-Forwarded-Host", originalHost)
 			request.Out.Header.Set("X-Forwarded-Port", targetPort(originalHost))
 		},
@@ -762,6 +821,43 @@ func targetPort(authority string) string {
 		return port
 	}
 	return "443"
+}
+
+func firstTailnetIPv4(addresses []netip.Addr) string {
+	for _, address := range addresses {
+		address = address.Unmap()
+		if address.Is4() && tailnetAddressRange.Contains(address) {
+			return address.String()
+		}
+	}
+	return ""
+}
+
+func resolveEndpoints(dnsName string, port, httpPort int, addresses []netip.Addr, mode string) (string, string, string, []string, error) {
+	dnsName = strings.TrimSuffix(dnsName, ".")
+	if dnsName == "" {
+		return "", "", "", nil, errors.New("tailnet did not provide a device DNS name")
+	}
+	deviceURL := "https://" + dnsName
+	if port != 443 {
+		deviceURL += ":" + strconv.Itoa(port)
+	}
+	if mode != "serve" {
+		return deviceURL, "", "", []string{deviceURL}, nil
+	}
+	tailnetIP := firstTailnetIPv4(addresses)
+	if tailnetIP == "" {
+		return "", "", "", nil, errors.New("tailnet did not provide a private IPv4 address")
+	}
+	tailnetURL := "http://" + net.JoinHostPort(tailnetIP, strconv.Itoa(httpPort))
+	return deviceURL, tailnetURL, tailnetIP, []string{deviceURL, tailnetURL}, nil
+}
+
+func optionalValues(value string) []string {
+	if value == "" {
+		return nil
+	}
+	return []string{value}
 }
 
 // chooseControlURL avoids a Tailscale DNS cache trap on networks where the
@@ -894,7 +990,7 @@ func readLaunch(stream io.Reader) (launchConfig, error) {
 	return value, nil
 }
 
-func validateFlags(stateDir, hostname, mode string, port int, upstream, expectedInstance string) error {
+func validateFlags(stateDir, hostname, mode string, port, httpPort int, upstream, expectedInstance string) error {
 	if stateDir == "" {
 		return errors.New("state directory is required")
 	}
@@ -906,6 +1002,9 @@ func validateFlags(stateDir, hostname, mode string, port int, upstream, expected
 	}
 	if port != 443 && port != 8443 && port != 10000 {
 		return errors.New("unsupported HTTPS port")
+	}
+	if httpPort != 8787 || httpPort == port {
+		return errors.New("invalid private HTTP port")
 	}
 	parsed, err := url.Parse(upstream)
 	if err != nil || parsed.Scheme != "http" || parsed.Hostname() != "127.0.0.1" ||

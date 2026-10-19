@@ -46,9 +46,14 @@ def entry_urls(preferences, hosts, quick_url='', external_status=None):
         status = (external_status or {}).get(entry['id'], {})
         if mode in ('nas', 'external') or (mode in ('server', 'cloudflare', 'tailscale') and
                 status.get('state') == 'connected'):
-            url = (status.get('url') or entry['publicUrl']) if mode == 'tailscale' else entry['publicUrl']
-            if url:
-                urls.append(url.rstrip('/'))
+            if mode == 'tailscale':
+                endpoints = status.get('urls') if isinstance(status.get('urls'), list) else []
+                endpoints = [value for value in endpoints if isinstance(value, str) and value]
+                url = status.get('url') or entry['publicUrl']
+                endpoints = endpoints or ([url] if url else [])
+                urls.extend(value.rstrip('/') for value in endpoints)
+            elif entry['publicUrl']:
+                urls.append(entry['publicUrl'].rstrip('/'))
     if quick_url:
         urls.append(quick_url.rstrip('/'))
     if preferences.get('lan'):

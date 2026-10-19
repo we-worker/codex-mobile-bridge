@@ -33,6 +33,14 @@
       "http://172.31.0.1/"
     ],
     [
+      "http://100.64.0.0:8787",
+      "http://100.64.0.0:8787/"
+    ],
+    [
+      "http://100.127.255.255:8787",
+      "http://100.127.255.255:8787/"
+    ],
+    [
       "https://relay.example.com/d/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "https://relay.example.com/d/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"
     ],
@@ -83,6 +91,10 @@
   "rejected": [
     "http://codex.try2love.com",
     "http://8.8.8.8",
+    "http://100.63.255.255:8787",
+    "http://100.128.0.0:8787",
+    "http://100.64.0.1",
+    "http://100.64.0.1:80",
     "http://172.32.0.1",
     "http://169.254.1.1",
     "https://user:password@codex.try2love.com",

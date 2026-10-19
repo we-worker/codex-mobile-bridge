@@ -5,13 +5,22 @@ enum GatewayURL {
         guard let c = URLComponents(string: input.trimmingCharacters(in: .whitespacesAndNewlines)),
               let host = c.host, !host.isEmpty, let scheme = c.scheme?.lowercased(), c.user == nil, c.password == nil,
               c.query == nil, c.percentEncodedPath.isEmpty || c.percentEncodedPath == "/" || c.percentEncodedPath.range(of: "^/d/[a-f0-9]{32}/?$", options: .regularExpression) != nil, c.port == nil || (1...65535).contains(c.port!) else { throw InvalidURL() }
-        guard scheme == "https" || (scheme == "http" && local(host)) else { throw InvalidURL() }
+        guard scheme == "https" || (scheme == "http" && local(host) && (!tailnet(host) || c.port == 8787)) else { throw InvalidURL() }
         var clean = URLComponents(); clean.scheme = scheme; clean.host = host.lowercased(); clean.port = c.port
         if c.path.hasPrefix("/d/") { clean.path = c.path.hasSuffix("/") ? String(c.path.dropLast()) : c.path }
         guard let value = clean.string else { throw InvalidURL() }; return value
     }
     static func local(_ host: String) -> Bool {
         if host.lowercased() == "localhost" || host == "::1" || host == "[::1]" { return true }
+        return privateIPv4(host) || tailnet(host)
+    }
+    static func tailnet(_ host: String) -> Bool {
+        let parts = host.split(separator: ".").map(String.init)
+        let n = parts.compactMap(Int.init)
+        guard n.count == 4, zip(parts,n).allSatisfy({ $0.0 == String($0.1) && (0...255).contains($0.1) }) else { return false }
+        return n[0] == 100 && (64...127).contains(n[1])
+    }
+    static func privateIPv4(_ host: String) -> Bool {
         let parts = host.split(separator: ".").map(String.init)
         let n = parts.compactMap(Int.init)
         guard n.count == 4, zip(parts,n).allSatisfy({ $0.0 == String($0.1) && (0...255).contains($0.1) }) else { return false }
@@ -43,5 +52,5 @@ enum GatewayURL {
         let identifier = desktop ? thread.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._"))! : thread
         return URL(string: origin + "/#" + identifier + "~" + (host.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "local"))!
     }
-    struct InvalidURL: LocalizedError { var errorDescription: String? { "请填写完整的 HTTPS 网关地址，或局域网 HTTP 地址，不含路径、账号和参数。" } }
+    struct InvalidURL: LocalizedError { var errorDescription: String? { "请填写完整的 HTTPS 网关地址，或局域网或 Tailnet 私有 HTTP 地址，不含路径、账号和参数。" } }
 }

@@ -137,6 +137,30 @@ class TailscaleTests(unittest.TestCase):
         live = 'https://actual-network.example.ts.net:8443'
         self.assertEqual(entry_urls(preferences, [], '',
                                     {'ts': {'state': 'connected', 'url': live}}), [live])
+        private = 'http://100.64.0.23:8787'
+        self.assertEqual(entry_urls(preferences, [], '',
+                                    {'ts': {'state': 'connected', 'url': live,
+                                            'urls': [live, private]}}), [live, private])
+
+    def test_desktop_snapshot_shows_both_verified_serve_endpoints(self):
+        live = 'https://embedded-bridge.example.ts.net'
+        private = 'http://100.64.0.23:8787'
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            desktop = Desktop(folder)
+            entry = {**EMBEDDED, 'tailscaleMode': 'serve', 'tailscaleRuntime': 'embedded'}
+            preferences = desktop.preferences()
+            preferences.update(lan=False, localAccess=True, tunnel=False, connections=[entry])
+            desktop.preferences = lambda: preferences
+            desktop.status = lambda: {'running': True, 'pid': 41}
+            from bridge.features.notifications.channels import write_json
+            write_json(tailscale.status_path(Path(folder), entry), {
+                'pid': 41, 'state': 'connected', 'mode': 'serve', 'url': live,
+                'urls': [live, private], 'tailnetUrl': private,
+                'nodeId': 'n123', 'instanceId': 'gateway-instance',
+            })
+            urls = desktop.snapshot()['urls']
+        self.assertIn(live + '/', urls)
+        self.assertIn(private + '/', urls)
 
     def test_embedded_status_requires_the_current_gateway_runtime(self):
         with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
@@ -165,6 +189,38 @@ class TailscaleTests(unittest.TestCase):
             self.assertEqual(other_instance['state'], 'stopped')
             self.assertEqual(stopped['state'], 'stopped')
 
+    def test_embedded_serve_status_requires_private_http_endpoint(self):
+        live = 'https://embedded-bridge.example.ts.net'
+        private = 'http://100.64.0.23:8787'
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            directory = Path(folder)
+            helper = directory/'codex-tsnet'
+            helper.write_text('fixture')
+            entry = {**EMBEDDED, 'tailscaleMode': 'serve'}
+            from bridge.features.notifications.channels import write_json
+            status_path = tailscale.status_path(directory, entry)
+            write_json(status_path, {
+                'pid': 41, 'state': 'connected', 'mode': 'serve', 'url': live,
+                'urls': [live], 'nodeId': 'n123', 'instanceId': 'gateway-instance',
+            })
+            with patch.object(tailscale, 'embedded_executable', return_value=str(helper)):
+                stale = tailscale.inspect_embedded(entry, directory, 41, 'gateway-instance')
+                with self.assertRaisesRegex(ValueError, '私有 HTTP'):
+                    tailscale.check_entry_embedded(entry, directory, 41, 'gateway-instance')
+                write_json(status_path, {
+                    'pid': 41, 'state': 'connected', 'mode': 'serve', 'url': live,
+                    'urls': [live, private], 'tailnetUrl': private,
+                    'tailnetIps': ['100.64.0.23'], 'nodeId': 'n123',
+                    'instanceId': 'gateway-instance',
+                })
+                current = tailscale.inspect_embedded(entry, directory, 41, 'gateway-instance')
+                checked = tailscale.check_entry_embedded(
+                    entry, directory, 41, 'gateway-instance')
+            self.assertEqual(stale['state'], 'starting')
+            self.assertEqual(current['state'], 'ready')
+            self.assertEqual(current['urls'], [live, private])
+            self.assertEqual(checked['tailnetUrl'], private)
+
     def test_saved_embedded_address_is_not_a_persistent_trusted_origin(self):
         with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
             desktop = Desktop(folder)
@@ -191,7 +247,7 @@ class TailscaleTests(unittest.TestCase):
             tunnel = tailscale.TailscaleTunnel(
                 entry, 8787, folder, {'authKey': secret},
                 allow_origin=lambda entry_id, origin, node_id:
-                    origins.append((entry_id, origin, node_id)),
+                    origins.append((entry_id, tuple(origin), node_id)),
                 instance_id='0123456789abcdef0123456789abcdef')
             class Output:
                 def __iter__(self):
@@ -231,8 +287,56 @@ class TailscaleTests(unittest.TestCase):
             persisted = (Path(folder)/'ssh-status-ts.json').read_text(encoding='utf-8')
             self.assertNotIn(secret, persisted)
             self.assertIn('"funnelRegistered": true', persisted)
-            self.assertIn(('ts', live, 'n123'), origins)
+            self.assertIn(('ts', (live,), 'n123'), origins)
             self.assertEqual(tunnel.last_status['state'], 'connected')
+
+    def test_embedded_serve_reports_https_and_private_http_without_funnel_wording(self):
+        live = 'https://embedded-bridge.example.ts.net'
+        private = 'http://100.64.0.23:8787'
+        origins = []
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            process = MagicMock()
+            process.pid = 123
+            process.poll.return_value = 0
+            entry = {**EMBEDDED, 'tailscaleMode': 'serve', 'tailscaleAuthMode': 'authKey'}
+            tunnel = tailscale.TailscaleTunnel(
+                entry, 18787, folder, {'authKey': 'fixture'},
+                allow_origin=lambda entry_id, values, node_id:
+                    origins.append((entry_id, tuple(values), node_id)),
+                instance_id='0123456789abcdef0123456789abcdef')
+
+            class Output:
+                def __iter__(self):
+                    payload = {
+                        'url': live, 'urls': [live, private],
+                        'tailnetUrl': private, 'tailnetIps': ['100.64.0.23'],
+                        'mode': 'serve', 'nodeId': 'n123',
+                        'instanceId': '0123456789abcdef0123456789abcdef',
+                    }
+                    yield json.dumps({'state': 'resolved', **payload}) + '\n'
+                    yield json.dumps({
+                        'state': 'connected', **payload,
+                        'message': 'Tailnet HTTPS、私有 HTTP 入口和当前网关身份均已验证。',
+                    }) + '\n'
+                    tunnel.stopped.set()
+
+                def close(self):
+                    pass
+
+            process.stdout = Output()
+            with patch.object(tailscale, 'embedded_executable', return_value='/fixture/codex-tsnet'), \
+                 patch.object(tailscale.subprocess, 'Popen', return_value=process) as spawn:
+                tunnel.start()
+                tunnel.thread.join(3)
+            self.assertFalse(tunnel.thread.is_alive())
+            argv = spawn.call_args.args[0]
+            self.assertEqual(argv[argv.index('--http-port') + 1], '8787')
+            self.assertIn(('ts', (live, private), 'n123'), origins)
+            self.assertEqual(tunnel.last_status['mode'], 'serve')
+            self.assertEqual(tunnel.last_status['urls'], [live, private])
+            self.assertEqual(tunnel.last_status['tailnetUrl'], private)
+            self.assertEqual(tunnel.last_status['tailnetIps'], ['100.64.0.23'])
+            self.assertNotIn('Funnel', tunnel.last_status['message'])
 
     def test_embedded_tailnet_listener_is_not_reported_as_publicly_connected(self):
         live = 'https://embedded-bridge.example.ts.net'
@@ -284,7 +388,7 @@ class TailscaleTests(unittest.TestCase):
             tunnel = tailscale.TailscaleTunnel(
                 EMBEDDED, 8787, folder, {},
                 allow_origin=lambda entry_id, origin, node_id:
-                    origins.append((entry_id, origin, node_id)),
+                    origins.append((entry_id, tuple(origin), node_id)),
                 instance_id='0123456789abcdef0123456789abcdef')
 
             class Output:
@@ -302,7 +406,7 @@ class TailscaleTests(unittest.TestCase):
                         'instanceId': '0123456789abcdef0123456789abcdef',
                         'message': '公网入口在运行中失效，正在重新登记。',
                     }) + '\n'
-                    self.cleared_on_retry = origins[-1] == ('ts', '', '')
+                    self.cleared_on_retry = origins[-1] == ('ts', (), '')
                     tunnel.stopped.set()
 
                 def close(self):
@@ -328,7 +432,7 @@ class TailscaleTests(unittest.TestCase):
             tunnel = tailscale.TailscaleTunnel(
                 EMBEDDED, 8787, folder, {},
                 allow_origin=lambda entry_id, origin, node_id:
-                    origins.append((entry_id, origin, node_id)),
+                    origins.append((entry_id, tuple(origin), node_id)),
                 instance_id='0123456789abcdef0123456789abcdef')
 
             class Output:
@@ -337,7 +441,7 @@ class TailscaleTests(unittest.TestCase):
                         'state': 'resolved', 'url': live, 'nodeId': 'n123',
                         'instanceId': '0123456789abcdef0123456789abcdef',
                     }) + '\n'
-                    self.published_before_listening = ('ts', live, 'n123') in origins
+                    self.published_before_listening = ('ts', (live,), 'n123') in origins
                     yield json.dumps({
                         'state': 'failed', 'code': 'verification_failed',
                     }) + '\n'
@@ -354,7 +458,7 @@ class TailscaleTests(unittest.TestCase):
                 tunnel.thread.join(3)
             self.assertTrue(output.published_before_listening)
             self.assertEqual(tunnel.last_status['state'], 'failed')
-            self.assertEqual(origins[-1], ('ts', '', ''))
+            self.assertEqual(origins[-1], ('ts', (), ''))
 
     def test_embedded_helper_reports_network_timeout_without_staying_in_starting_state(self):
         with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
@@ -422,7 +526,7 @@ class TailscaleTests(unittest.TestCase):
             tunnel = tailscale.TailscaleTunnel(
                 EMBEDDED, 8787, folder, {},
                 allow_origin=lambda entry_id, origin, node_id:
-                    origins.append((entry_id, origin, node_id)),
+                    origins.append((entry_id, tuple(origin), node_id)),
                 instance_id='0123456789abcdef0123456789abcdef')
             class Output:
                 def __iter__(self):
@@ -439,7 +543,7 @@ class TailscaleTests(unittest.TestCase):
                 tunnel.start()
                 tunnel.thread.join(3)
             self.assertFalse(tunnel.thread.is_alive())
-            self.assertNotIn(('ts', live, 'n123'), origins)
+            self.assertNotIn(('ts', (live,), 'n123'), origins)
             self.assertNotEqual((tunnel.last_status or {}).get('state'), 'connected')
 
     def test_embedded_origin_is_published_only_after_exact_live_identity(self):
@@ -467,18 +571,63 @@ class TailscaleTests(unittest.TestCase):
             self.assertEqual(runtime_config['publicUrl'], '')
             allow = tunnel.call_args.kwargs['allow_origin']
             live = 'https://actual-network.example.ts.net'
-            allow('ts', live, 'n123')
+            allow('ts', [live], 'n123')
             self.assertIn(live, main.origins)
             self.assertIn('actual-network.example.ts.net', main.hosts)
             self.assertIn('actual-network.example.ts.net', main.secure_hosts)
             self.assertEqual(runtime_config['publicUrl'], live)
-            allow('ts', 'https://actual-network.example.ts.net.evil.test', 'n123')
+            allow('ts', ['https://actual-network.example.ts.net.evil.test'], 'n123')
             self.assertNotIn(live, main.origins)
             self.assertNotIn('actual-network.example.ts.net', main.hosts)
             self.assertEqual(runtime_config['publicUrl'], '')
-            allow('ts', live, 'n123')
-            allow('ts', '', '')
+            allow('ts', [live], 'n123')
+            allow('ts', [], '')
             self.assertNotIn(live, main.origins)
+
+    def test_serve_origin_requires_exact_https_and_private_http_pair(self):
+        import run
+        live = 'https://actual-network.example.ts.net'
+        private = 'http://100.64.0.23:8787'
+        entry = {**ENTRY, 'publicUrl': '', 'tailscaleNodeId': '',
+                 'tailscaleRuntime': 'embedded', 'tailscaleMode': 'serve'}
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            config_path = Path(folder)/'config.json'
+            config_path.write_text(json.dumps({
+                'auth': {'mode': 'password'}, 'origins': [],
+            }))
+            main, private_listener = MagicMock(), MagicMock()
+            main.origins, main.hosts, main.secure_hosts = set(), set(), set()
+            private_listener.server_address = ('127.0.0.1', 45678)
+            with patch.object(run.sys, 'argv', ['run.py', '--config', str(config_path)]), \
+                 patch.object(run.sys, 'stdout', MagicMock()), patch.object(run, 'Bridge'), \
+                 patch.object(run, 'Notifications'), patch.object(run, 'AddressNotifications'), \
+                 patch.object(run, 'GatewayControl'), patch.object(run.signal, 'signal'), \
+                 patch.object(run, 'GatewayServer', side_effect=[main, private_listener]) as listeners, \
+                 patch('bridge.features.network.discovery.ConnectionDiscovery'), \
+                 patch('bridge.features.network.shared_relay.start', return_value=None), \
+                 patch.object(tailscale, 'TailscaleTunnel') as tunnel:
+                run.main(connections=[entry])
+            runtime_config = next(row.args[2] for row in listeners.call_args_list)
+            allow = tunnel.call_args.kwargs['allow_origin']
+            allow('ts', [live, private], 'n123')
+            self.assertIn(live, main.origins)
+            self.assertIn(private, main.origins)
+            self.assertIn('actual-network.example.ts.net', main.secure_hosts)
+            self.assertNotIn('100.64.0.23:8787', main.secure_hosts)
+            self.assertEqual(runtime_config['publicUrl'], live)
+            for invalid in (
+                [live, 'http://100.64.0.23:8788'],
+                [live, 'http://100.63.255.255:8787'],
+                [live, 'http://100.128.0.0:8787'],
+                ['https://actual-network.example.ts.net.evil.test', private],
+                [live],
+                [live, private, 'http://100.127.255.255:8787'],
+            ):
+                allow('ts', [live, private], 'n123')
+                allow('ts', invalid, 'n123')
+                self.assertFalse(set(invalid) & main.origins)
+                self.assertNotIn(private, main.origins)
+                self.assertEqual(runtime_config['publicUrl'], '')
 
     def test_fixed_entry_uses_verified_owner_when_loopback_port_is_shadowed(self):
         preferences = {**ENTRY, 'port': 8787}

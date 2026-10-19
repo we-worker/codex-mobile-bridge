@@ -2,8 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/netip"
 	"net/url"
 	"strings"
@@ -37,34 +41,152 @@ func TestReadLaunch(t *testing.T) {
 
 func TestValidateFlags(t *testing.T) {
 	const instance = "0123456789abcdef0123456789abcdef"
-	if err := validateFlags(`C:\private\tsnet`, "codex-mobile-bridge", "serve", 443,
+	if err := validateFlags(`C:\private\tsnet`, "codex-mobile-bridge", "serve", 443, 8787,
 		"http://127.0.0.1:18787", instance); err != nil {
 		t.Fatal(err)
 	}
 
 	for name, test := range map[string]struct {
 		stateDir, hostname, mode string
-		port                     int
+		port, httpPort           int
 		upstream, instance       string
 	}{
-		"empty state":  {"", "bridge", "serve", 443, "http://127.0.0.1:18787", instance},
-		"bad hostname": {"/state", "-bridge", "serve", 443, "http://127.0.0.1:18787", instance},
-		"bad mode":     {"/state", "bridge", "proxy", 443, "http://127.0.0.1:18787", instance},
-		"bad port":     {"/state", "bridge", "serve", 8444, "http://127.0.0.1:18787", instance},
-		"remote upstream": {"/state", "bridge", "serve", 443,
+		"empty state":       {"", "bridge", "serve", 443, 8787, "http://127.0.0.1:18787", instance},
+		"bad hostname":      {"/state", "-bridge", "serve", 443, 8787, "http://127.0.0.1:18787", instance},
+		"bad mode":          {"/state", "bridge", "proxy", 443, 8787, "http://127.0.0.1:18787", instance},
+		"bad port":          {"/state", "bridge", "serve", 8444, 8787, "http://127.0.0.1:18787", instance},
+		"private HTTP port": {"/state", "bridge", "serve", 443, 8788, "http://127.0.0.1:18787", instance},
+		"remote upstream": {"/state", "bridge", "serve", 443, 8787,
 			"http://example.test:18787", instance},
-		"upstream path": {"/state", "bridge", "serve", 443,
+		"upstream path": {"/state", "bridge", "serve", 443, 8787,
 			"http://127.0.0.1:18787/path", instance},
-		"missing instance": {"/state", "bridge", "serve", 443,
+		"missing instance": {"/state", "bridge", "serve", 443, 8787,
 			"http://127.0.0.1:18787", ""},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := validateFlags(test.stateDir, test.hostname, test.mode, test.port,
+			if err := validateFlags(test.stateDir, test.hostname, test.mode, test.port, test.httpPort,
 				test.upstream, test.instance); err == nil {
 				t.Fatal("expected invalid flags to fail")
 			}
 		})
 	}
+}
+
+func TestResolveEndpointsSeparatesServeAndFunnel(t *testing.T) {
+	addresses := []netip.Addr{
+		netip.MustParseAddr("100.63.255.255"),
+		netip.MustParseAddr("100.64.0.10"),
+		netip.MustParseAddr("100.127.255.255"),
+	}
+	deviceURL, tailnetURL, tailnetIP, urls, err := resolveEndpoints(
+		"bridge.example.ts.net.", 443, 8787, addresses, "serve")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deviceURL != "https://bridge.example.ts.net" ||
+		tailnetURL != "http://100.64.0.10:8787" ||
+		tailnetIP != "100.64.0.10" ||
+		strings.Join(urls, ",") != "https://bridge.example.ts.net,http://100.64.0.10:8787" {
+		t.Fatalf("unexpected serve endpoints: %q %q %q %v", deviceURL, tailnetURL, tailnetIP, urls)
+	}
+
+	deviceURL, tailnetURL, tailnetIP, urls, err = resolveEndpoints(
+		"bridge.example.ts.net.", 8443, 8787, addresses, "funnel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deviceURL != "https://bridge.example.ts.net:8443" || tailnetURL != "" ||
+		tailnetIP != "" || strings.Join(urls, ",") != deviceURL {
+		t.Fatalf("unexpected funnel endpoints: %q %q %q %v", deviceURL, tailnetURL, tailnetIP, urls)
+	}
+}
+
+func TestFirstTailnetIPv4UsesOnlyCarrierGradeNATRange(t *testing.T) {
+	if got := firstTailnetIPv4([]netip.Addr{
+		netip.MustParseAddr("100.63.255.255"),
+		netip.MustParseAddr("100.64.0.0"),
+		netip.MustParseAddr("100.127.255.255"),
+		netip.MustParseAddr("100.128.0.0"),
+	}); got != "100.64.0.0" {
+		t.Fatalf("firstTailnetIPv4 = %q", got)
+	}
+	for _, value := range []string{"100.63.255.255", "100.128.0.0", "8.8.8.8", "fd7a:115c:a1e0::1"} {
+		if got := firstTailnetIPv4([]netip.Addr{netip.MustParseAddr(value)}); got != "" {
+			t.Fatalf("accepted non-tailnet address %q as %q", value, got)
+		}
+	}
+}
+
+func TestStatusRecordSerializesServeEndpoints(t *testing.T) {
+	raw, err := json.Marshal(statusRecord{
+		State:      "connected",
+		Mode:       "serve",
+		URL:        "https://bridge.example.ts.net",
+		URLs:       []string{"https://bridge.example.ts.net", "http://100.64.0.10:8787"},
+		TailnetURL: "http://100.64.0.10:8787",
+		TailnetIPs: []string{"100.64.0.10"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var value map[string]any
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatal(err)
+	}
+	if value["mode"] != "serve" || value["tailnetUrl"] != "http://100.64.0.10:8787" {
+		t.Fatalf("unexpected status record: %s", raw)
+	}
+}
+
+func TestReverseProxyPreservesAuthorityAndForwardedScheme(t *testing.T) {
+	for _, test := range []struct {
+		origin, scheme, port string
+	}{
+		{"https://bridge.example.ts.net", "https", "443"},
+		{"https://bridge.example.ts.net:8443", "https", "8443"},
+		{"http://100.64.0.10:8787", "http", "8787"},
+	} {
+		t.Run(test.scheme+test.port, func(t *testing.T) {
+			type observed struct {
+				host, proto, forwardedHost, forwardedPort, body string
+			}
+			seen := make(chan observed, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				body, _ := io.ReadAll(request.Body)
+				seen <- observed{
+					host: request.Host, proto: request.Header.Get("X-Forwarded-Proto"),
+					forwardedHost: request.Header.Get("X-Forwarded-Host"),
+					forwardedPort: request.Header.Get("X-Forwarded-Port"), body: string(body),
+				}
+				response.WriteHeader(http.StatusNoContent)
+			}))
+			defer upstream.Close()
+			target, _ := url.Parse(upstream.URL)
+			proxy := newProxy(target, test.scheme)
+			request := httptest.NewRequest(http.MethodGet, test.origin+"/api/auth", nil)
+			request.Host = urlPort(test.origin)
+			response := httptest.NewRecorder()
+			proxy.ServeHTTP(response, request)
+			if response.Code != http.StatusNoContent {
+				t.Fatalf("proxy status = %d", response.Code)
+			}
+			select {
+			case got := <-seen:
+				wantHost := urlPort(test.origin)
+				if got.host != wantHost || got.proto != test.scheme ||
+					got.forwardedHost != wantHost || got.forwardedPort != test.port {
+					t.Fatalf("unexpected forwarded request: %+v", got)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("upstream request was not received")
+			}
+		})
+	}
+}
+
+func urlPort(value string) string {
+	parsed, _ := url.Parse(value)
+	return parsed.Host
 }
 
 func TestSafeAuthorizationURL(t *testing.T) {

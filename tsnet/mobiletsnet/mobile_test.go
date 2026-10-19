@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -102,6 +104,111 @@ func TestConnectProxyAllowsTailnetAndRejectsOtherHosts(t *testing.T) {
 	}
 	if spoofedResponse.StatusCode != http.StatusForbidden {
 		t.Fatalf("spoofed CONNECT status = %d", spoofedResponse.StatusCode)
+	}
+}
+
+func TestValidatePrivateHTTPTargetBoundaries(t *testing.T) {
+	cases := []struct {
+		input   string
+		want    string
+		wantErr bool
+	}{
+		{"http://100.64.0.0:8787/api/auth", "100.64.0.0:8787", false},
+		{"http://100.127.255.255:8787/api/auth?x=1", "100.127.255.255:8787", false},
+		{"http://100.63.255.255:8787/", "", true},
+		{"http://100.128.0.0:8787/", "", true},
+		{"http://8.8.8.8:8787/", "", true},
+		{"http://100.64.0.1:8788/", "", true},
+		{"https://100.64.0.1:8787/", "", true},
+		{"http://user@100.64.0.1:8787/", "", true},
+		{"http://100.64.0.1:8787/#fragment", "", true},
+		{"http://bridge.example.ts.net:8787/", "", true},
+	}
+	for _, test := range cases {
+		parsed, parseErr := url.Parse(test.input)
+		if parseErr != nil {
+			t.Fatalf("parse %q: %v", test.input, parseErr)
+		}
+		got, err := validatePrivateHTTPTarget(parsed)
+		if (err != nil) != test.wantErr || got != test.want {
+			t.Errorf("validatePrivateHTTPTarget(%q) = %q, %v; want %q, error=%v",
+				test.input, got, err, test.want, test.wantErr)
+		}
+	}
+}
+
+func TestHTTPProxyAllowsOnlyPrivateTailnetPort(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	type observed struct {
+		host, uri, proxyAuthorization string
+	}
+	seen := make(chan observed, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		seen <- observed{
+			host: request.Host, uri: request.URL.RequestURI(),
+			proxyAuthorization: request.Header.Get("Proxy-Authorization"),
+		}
+		response.Header().Set("Content-Type", "text/plain")
+		_, _ = io.WriteString(response, "private gateway")
+	}))
+	defer upstream.Close()
+	dialed := make(chan string, 4)
+	proxy, err := startConnectProxy(ctx, func(ctx context.Context, network, target string) (net.Conn, error) {
+		dialed <- target
+		return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.close()
+	proxyURL, _ := url.Parse("http://" + proxy.address())
+	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
+
+	request, _ := http.NewRequestWithContext(ctx, http.MethodGet,
+		"http://100.64.0.10:8787/api/auth?x=1", nil)
+	request.Header.Set("Proxy-Authorization", "Basic secret")
+	response, err := client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	body, _ := io.ReadAll(response.Body)
+	if response.StatusCode != http.StatusOK || string(body) != "private gateway" {
+		t.Fatalf("HTTP proxy response = %d %q", response.StatusCode, body)
+	}
+	select {
+	case target := <-dialed:
+		if target != "100.64.0.10:8787" {
+			t.Fatalf("HTTP proxy dial target = %q", target)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("private HTTP upstream was not dialed")
+	}
+	select {
+	case got := <-seen:
+		if got.host != "100.64.0.10:8787" || got.uri != "/api/auth?x=1" ||
+			got.proxyAuthorization != "" {
+			t.Fatalf("unexpected upstream request: %+v", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("private HTTP request was not forwarded")
+	}
+
+	for _, target := range []string{
+		"http://8.8.8.8:8787/",
+		"http://100.64.0.10:80/",
+	} {
+		request, _ := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatalf("rejected target %q returned transport error: %v", target, err)
+		}
+		_, _ = io.Copy(io.Discard, response.Body)
+		response.Body.Close()
+		if response.StatusCode != http.StatusForbidden {
+			t.Fatalf("rejected target %q status = %d", target, response.StatusCode)
+		}
 	}
 }
 

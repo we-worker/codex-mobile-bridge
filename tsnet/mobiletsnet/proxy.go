@@ -1,13 +1,14 @@
 package mobiletsnet
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -18,10 +19,15 @@ import (
 type dialFunc func(context.Context, string, string) (net.Conn, error)
 
 var tailnetHostPattern = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.ts\.net$`)
+var tailnetAddressRange = netip.MustParsePrefix("100.64.0.0/10")
+
+const privateHTTPPort = "8787"
 
 type connectProxy struct {
-	listener net.Listener
-	dial     dialFunc
+	listener  net.Listener
+	dial      dialFunc
+	server    *http.Server
+	transport *http.Transport
 
 	mu       sync.Mutex
 	closed   bool
@@ -42,6 +48,21 @@ func startConnectProxy(parent context.Context, dial dialFunc) (*connectProxy, er
 		dial:     dial,
 		conns:    make(map[net.Conn]struct{}),
 	}
+	proxy.transport = &http.Transport{
+		Proxy:                 nil,
+		DialContext:           dial,
+		MaxIdleConns:          32,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       90 * time.Second,
+		ResponseHeaderTimeout: 30 * time.Second,
+	}
+	proxy.server = &http.Server{
+		Handler:           proxy,
+		ReadHeaderTimeout: 15 * time.Second,
+		IdleTimeout:       2 * time.Minute,
+		MaxHeaderBytes:    1 << 20,
+		ConnState:         proxy.connectionState,
+	}
 	go proxy.serve(parent)
 	return proxy, nil
 }
@@ -57,6 +78,10 @@ func (p *connectProxy) port() int {
 func (p *connectProxy) close() {
 	p.stopOnce.Do(func() {
 		_ = p.listener.Close()
+		if p.server != nil {
+			_ = p.server.Close()
+		}
+		p.transport.CloseIdleConnections()
 		p.mu.Lock()
 		p.closed = true
 		for connection := range p.conns {
@@ -72,24 +97,59 @@ func (p *connectProxy) serve(ctx context.Context) {
 		<-ctx.Done()
 		p.close()
 	}()
-	for {
-		connection, err := p.listener.Accept()
-		if err != nil {
-			return
-		}
+	_ = p.server.Serve(p.listener)
+}
+
+func (p *connectProxy) connectionState(connection net.Conn, state http.ConnState) {
+	switch state {
+	case http.StateNew:
 		p.mu.Lock()
-		if p.closed {
-			p.mu.Unlock()
-			_ = connection.Close()
-			return
+		if !p.closed {
+			p.conns[connection] = struct{}{}
 		}
-		p.conns[connection] = struct{}{}
 		p.mu.Unlock()
-		go p.handle(ctx, connection)
+	case http.StateClosed, http.StateHijacked:
+		p.mu.Lock()
+		delete(p.conns, connection)
+		p.mu.Unlock()
 	}
 }
 
-func (p *connectProxy) handle(ctx context.Context, client net.Conn) {
+func (p *connectProxy) ServeHTTP(response http.ResponseWriter, request *http.Request) {
+	if request.Method == http.MethodConnect {
+		p.handleConnect(response, request)
+		return
+	}
+	p.handleHTTP(response, request)
+}
+
+func (p *connectProxy) handleConnect(response http.ResponseWriter, request *http.Request) {
+	authority := request.Host
+	if request.URL != nil && request.URL.Host != "" {
+		authority = request.URL.Host
+	}
+	target, err := validateTailnetTarget(authority)
+	if err != nil {
+		http.Error(response, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	}
+	hijacker, ok := response.(http.Hijacker)
+	if !ok {
+		http.Error(response, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+		return
+	}
+	client, buffered, err := hijacker.Hijack()
+	if err != nil {
+		return
+	}
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		_ = client.Close()
+		return
+	}
+	p.conns[client] = struct{}{}
+	p.mu.Unlock()
 	defer func() {
 		_ = client.Close()
 		p.mu.Lock()
@@ -97,31 +157,7 @@ func (p *connectProxy) handle(ctx context.Context, client net.Conn) {
 		p.mu.Unlock()
 	}()
 
-	_ = client.SetDeadline(time.Now().Add(15 * time.Second))
-	reader := bufio.NewReaderSize(client, 32<<10)
-	request, err := http.ReadRequest(reader)
-	if err != nil {
-		writeProxyError(client, http.StatusBadRequest)
-		return
-	}
-	if request.Body != nil {
-		_ = request.Body.Close()
-	}
-	if request.Method != http.MethodConnect {
-		writeProxyError(client, http.StatusMethodNotAllowed)
-		return
-	}
-	authority := request.Host
-	if request.URL != nil && request.URL.Host != "" {
-		authority = request.URL.Host
-	}
-	target, err := validateTailnetTarget(authority)
-	if err != nil {
-		writeProxyError(client, http.StatusForbidden)
-		return
-	}
-
-	dialCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	dialCtx, cancel := context.WithTimeout(request.Context(), 20*time.Second)
 	upstream, err := p.dial(dialCtx, "tcp", target)
 	cancel()
 	if err != nil {
@@ -134,7 +170,34 @@ func (p *connectProxy) handle(ctx context.Context, client net.Conn) {
 	if _, err := io.WriteString(client, "HTTP/1.1 200 Connection Established\r\nProxy-Agent: Codex-Mobile-Bridge\r\n\r\n"); err != nil {
 		return
 	}
-	copyTunnel(client, reader, upstream)
+	copyTunnel(client, buffered.Reader, upstream)
+}
+
+func (p *connectProxy) handleHTTP(response http.ResponseWriter, request *http.Request) {
+	target, err := validatePrivateHTTPTarget(request.URL)
+	if err != nil {
+		http.Error(response, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	}
+	out := request.Clone(request.Context())
+	out.RequestURI = ""
+	out.URL.Scheme = "http"
+	out.URL.Host = target
+	out.Host = target
+	removeHopHeaders(out.Header)
+	out.Header.Del("Proxy-Authorization")
+	out.Header.Del("Proxy-Connection")
+
+	upstream, err := p.transport.RoundTrip(out)
+	if err != nil {
+		http.Error(response, http.StatusText(http.StatusBadGateway), http.StatusBadGateway)
+		return
+	}
+	defer upstream.Body.Close()
+	removeHopHeaders(upstream.Header)
+	copyHeaders(response.Header(), upstream.Header)
+	response.WriteHeader(upstream.StatusCode)
+	_, _ = io.Copy(flushWriter{writer: response}, upstream.Body)
 }
 
 func writeProxyError(connection net.Conn, status int) {
@@ -165,6 +228,42 @@ func copyTunnel(client net.Conn, clientReader io.Reader, upstream net.Conn) {
 	<-done
 }
 
+type flushWriter struct {
+	writer http.ResponseWriter
+}
+
+func (w flushWriter) Write(data []byte) (int, error) {
+	written, err := w.writer.Write(data)
+	if flusher, ok := w.writer.(http.Flusher); ok {
+		flusher.Flush()
+	}
+	return written, err
+}
+
+func removeHopHeaders(header http.Header) {
+	for _, value := range header.Values("Connection") {
+		for _, name := range strings.Split(value, ",") {
+			if name = strings.TrimSpace(name); name != "" {
+				header.Del(name)
+			}
+		}
+	}
+	for _, name := range []string{
+		"Connection", "Keep-Alive", "Proxy-Connection", "Proxy-Authenticate",
+		"Proxy-Authorization", "TE", "Trailer", "Transfer-Encoding", "Upgrade",
+	} {
+		header.Del(name)
+	}
+}
+
+func copyHeaders(destination, source http.Header) {
+	for name, values := range source {
+		for _, value := range values {
+			destination.Add(name, value)
+		}
+	}
+}
+
 func validateTailnetTarget(authority string) (string, error) {
 	if authority == "" || strings.ContainsAny(authority, "\x00\r\n\t /\\@") {
 		return "", errors.New("invalid proxy authority")
@@ -182,4 +281,21 @@ func validateTailnetTarget(authority string) (string, error) {
 		return "", errors.New("proxy target port is not allowed")
 	}
 	return net.JoinHostPort(host, strconv.Itoa(number)), nil
+}
+
+func validatePrivateHTTPTarget(target *url.URL) (string, error) {
+	if target == nil || target.Scheme != "http" || !target.IsAbs() ||
+		target.Opaque != "" || target.User != nil || target.Hostname() == "" ||
+		target.Port() != privateHTTPPort || target.Fragment != "" {
+		return "", errors.New("private HTTP target is not allowed")
+	}
+	address, err := netip.ParseAddr(target.Hostname())
+	if err != nil {
+		return "", errors.New("private HTTP target must be an IPv4 address")
+	}
+	address = address.Unmap()
+	if !address.Is4() || !tailnetAddressRange.Contains(address) {
+		return "", errors.New("private HTTP target is outside the tailnet range")
+	}
+	return net.JoinHostPort(address.String(), privateHTTPPort), nil
 }

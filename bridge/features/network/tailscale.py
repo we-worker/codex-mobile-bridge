@@ -28,12 +28,13 @@ EMBEDDED_ERRORS = {
     'invalid_configuration': '内嵌 Tailscale 配置无效，请检查设备名称、端口和运行方式。',
     'invalid_launch': '无法把登录凭据安全交给内嵌 Tailscale。',
     'verification_failed': '内嵌 Tailscale 已启动，但尚未验证它确实连到当前网关；'
-                           '正在等待 Tailscale 域名或 Funnel 生效后重试。',
+                           '正在等待 Tailnet 入口生效后重试。',
     'funnel_publishing': 'Tailscale 已登记本机入口，但公网 Funnel 尚未发布；'
                          'App 正在自动重新登记，请检查 Tailscale Funnel 与 HTTPS 设置。',
     'tailscale_failed': '内嵌 Tailscale 未能连接，请检查网络和管理员策略。',
     'stopped': '内嵌 Tailscale 已停止。',
 }
+TAILNET_HTTP_PORT = 8787
 
 EMBEDDED_TERMINAL_ERRORS = frozenset({
     'auth_key_rejected',
@@ -157,8 +158,22 @@ def inspect_embedded(entry, data_dir=None, runtime_pid=None, instance_id=None):
     status = embedded_status(entry, data_dir, runtime_pid, instance_id)
     state = status.get('state')
     if state == 'connected' and status.get('url') and status.get('nodeId'):
+        urls = status.get('urls') if isinstance(status.get('urls'), list) else []
+        urls = [value for value in urls if isinstance(value, str) and value] or [status['url']]
+        mode = status.get('mode') or entry.get('tailscaleMode', 'funnel')
+        if mode == 'serve' and (status.get('mode') != 'serve'
+                                or not status.get('tailnetUrl')
+                                or status.get('tailnetUrl') not in urls):
+            return {
+                'state': 'starting', 'available': True, 'runtime': 'embedded',
+                'message': '当前运行实例还没有 Tailnet 私有 HTTP 入口；请重启网关以启动新入口。',
+            }
         return {'state': 'ready', 'available': True, 'runtime': 'embedded',
-                'url': status['url'], 'nodeId': status['nodeId'],
+                'mode': mode,
+                'url': status['url'], 'urls': urls,
+                'tailnetUrl': status.get('tailnetUrl', ''),
+                'tailnetIps': status.get('tailnetIps') if isinstance(status.get('tailnetIps'), list) else [],
+                'nodeId': status['nodeId'],
                 'message': '已读取内嵌 Tailscale 的固定地址。地址只对当前已登记设备身份生效。'}
     if state == 'authorization':
         return {'state': 'authorization', 'available': True, 'runtime': 'embedded',
@@ -233,14 +248,26 @@ def check_entry_embedded(entry, data_dir, runtime_pid, instance_id):
         raise ValueError('内嵌 Tailscale 设备地址或身份已变化，请重新检测并确认')
     if not instance_id or status.get('instanceId') != instance_id:
         raise ValueError('内嵌 Tailscale 入口没有连到当前网关；请重启网关后再检测')
+    urls = status.get('urls') if isinstance(status.get('urls'), list) else []
+    urls = [value for value in urls if isinstance(value, str) and value] or [url]
+    mode = status.get('mode') or entry.get('tailscaleMode', 'funnel')
+    if mode == 'serve' and (status.get('mode') != 'serve'
+                            or not status.get('tailnetUrl')
+                            or status.get('tailnetUrl') not in urls):
+        raise ValueError('当前 Tailscale 运行实例还没有私有 HTTP 入口；请重启网关后再检测')
     return {'message': '内嵌 Tailscale 已通过自身网络访问当前网关。'
                        '请再用手机验证登录与聊天。',
-            'url': url}
+            'mode': mode, 'url': url, 'urls': urls,
+            'tailnetUrl': status.get('tailnetUrl', ''),
+            'tailnetIps': status.get('tailnetIps')
+            if isinstance(status.get('tailnetIps'), list) else []}
 
 
 class TailscaleTunnel:
-    def __init__(self, entry, port, data_dir, secrets=None, allow_origin=None, instance_id=''):
+    def __init__(self, entry, port, data_dir, secrets=None, allow_origin=None, instance_id='',
+                 http_port=TAILNET_HTTP_PORT):
         self.entry, self.port, self.data_dir = entry, port, Path(data_dir)
+        self.http_port = http_port
         self.secrets = secrets or {}
         self.allow_origin = allow_origin
         self.instance_id = instance_id
@@ -251,12 +278,26 @@ class TailscaleTunnel:
         self.last_status = None
 
     def status(self, state, message, auth_url='', url=None, node_id=None, instance_id='',
-               diagnostic=None):
+               diagnostic=None, urls=None, tailnet_url=None, tailnet_ips=None):
         instance_id = instance_id or self.instance_id
         record = {'pid': os.getpid(), 'state': state, 'message': message,
                   'runtime': self.entry.get('tailscaleRuntime', 'system'),
+                  'mode': self.entry.get('tailscaleMode', 'funnel'),
                   'url': self.entry['publicUrl'] if url is None else url,
                   'authUrl': authorization_url(auth_url)}
+        if isinstance(urls, list):
+            endpoints = list(dict.fromkeys(value for value in urls
+                                           if isinstance(value, str) and value))
+            if endpoints:
+                record['urls'] = endpoints
+                record['url'] = endpoints[0]
+        if isinstance(tailnet_url, str) and tailnet_url:
+            record['tailnetUrl'] = tailnet_url
+        if isinstance(tailnet_ips, list):
+            addresses = list(dict.fromkeys(value for value in tailnet_ips
+                                           if isinstance(value, str) and value))
+            if addresses:
+                record['tailnetIps'] = addresses
         if node_id is not None:
             record['nodeId'] = node_id
         if instance_id:
@@ -279,9 +320,10 @@ class TailscaleTunnel:
         else:
             self._run_system()
 
-    def _publish_origin(self, origin='', node_id=''):
+    def _publish_origin(self, origins=(), node_id=''):
         if self.allow_origin:
-            self.allow_origin(self.entry['id'], origin or '', node_id or '')
+            values = [value for value in origins if isinstance(value, str) and value]
+            self.allow_origin(self.entry['id'], values, node_id or '')
 
     def _run_system(self):
         delay = 3
@@ -356,6 +398,7 @@ class TailscaleTunnel:
                     '--hostname', self.entry.get('tailscaleHostname') or 'codex-mobile-bridge',
                     '--mode', self.entry['tailscaleMode'],
                     '--port', str(self.entry['tailscalePort']),
+                    '--http-port', str(self.http_port),
                     '--upstream', 'http://127.0.0.1:' + str(self.port),
                 ]
                 if self.instance_id:
@@ -401,62 +444,77 @@ class TailscaleTunnel:
                                     event.get('authUrl', ''))
                     elif state == 'resolved':
                         url = str(event.get('url') or '')
+                        urls = event.get('urls') if isinstance(event.get('urls'), list) else [url]
+                        urls = [value for value in urls if isinstance(value, str) and value]
+                        tailnet_url = str(event.get('tailnetUrl') or '')
+                        tailnet_ips = event.get('tailnetIps') if isinstance(event.get('tailnetIps'), list) else []
                         node_id = str(event.get('nodeId') or '')
                         event_instance = str(event.get('instanceId') or '')
                         diagnostic = event.get('diagnostic')
-                        if (not url or not node_id
+                        if (not url or not urls or not node_id
                                 or not self.instance_id
                                 or event_instance != self.instance_id):
                             continue
-                        # The Go helper reaches the gateway through the exact
-                        # public .ts.net URL. Publish that provisional origin
-                        # before its pre-listening identity probe so the gateway
-                        # can accept the request. A failed probe clears it in
-                        # the finally block below.
-                        self._publish_origin(url, node_id)
-                        self.status('connecting', 'App 内嵌 Tailscale 已取得固定地址，正在校验当前网关身份…',
-                                    url=url, node_id=node_id, diagnostic=diagnostic)
+                        # Publish only the exact live origins before the helper
+                        # probes both listeners. A failed verification clears
+                        # every provisional origin in the finally block.
+                        self._publish_origin(urls, node_id)
+                        self.status('connecting', 'App 内嵌 Tailscale 已取得 Tailnet 地址，正在校验当前网关身份…',
+                                    url=url, node_id=node_id, diagnostic=diagnostic,
+                                    urls=urls, tailnet_url=tailnet_url, tailnet_ips=tailnet_ips)
                     elif state in ('listening', 'publishing'):
                         url = str(event.get('url') or '')
+                        urls = event.get('urls') if isinstance(event.get('urls'), list) else [url]
+                        urls = [value for value in urls if isinstance(value, str) and value]
+                        tailnet_url = str(event.get('tailnetUrl') or '')
+                        tailnet_ips = event.get('tailnetIps') if isinstance(event.get('tailnetIps'), list) else []
                         node_id = str(event.get('nodeId') or '')
                         event_instance = str(event.get('instanceId') or '')
                         diagnostic = event.get('diagnostic')
-                        if (not url or not node_id
+                        if (not url or not urls or not node_id
                                 or not self.instance_id
                                 or event_instance != self.instance_id):
                             continue
-                        self._publish_origin(url, node_id)
+                        self._publish_origin(urls, node_id)
                         message = str(event.get('message') or
                                       'Tailscale 已在 Tailnet 内就绪，正在验证公网 Funnel…')
                         self.status('connecting', message, url=url, node_id=node_id,
-                                    diagnostic=diagnostic)
+                                    diagnostic=diagnostic, urls=urls,
+                                    tailnet_url=tailnet_url, tailnet_ips=tailnet_ips)
                     elif state == 'connected':
                         url = str(event.get('url') or '')
+                        urls = event.get('urls') if isinstance(event.get('urls'), list) else [url]
+                        urls = [value for value in urls if isinstance(value, str) and value]
+                        tailnet_url = str(event.get('tailnetUrl') or '')
+                        tailnet_ips = event.get('tailnetIps') if isinstance(event.get('tailnetIps'), list) else []
                         node_id = str(event.get('nodeId') or '')
                         event_instance = str(event.get('instanceId') or '')
                         diagnostic = event.get('diagnostic')
-                        if (not url or not node_id
+                        if (not url or not urls or not node_id
                                 or not self.instance_id
                                 or event_instance != self.instance_id):
                             continue
                         if watchdog:
                             watchdog.cancel()
-                        self._publish_origin(url, node_id)
+                        self._publish_origin(urls, node_id)
                         delay = 3
-                        self.status('connected', '公网 Funnel、TLS 和当前网关身份均已验证；'
-                                                '请用手机完成登录与聊天验证。',
+                        message = ('Tailnet HTTPS、100.x 私有 HTTP 入口和当前网关身份均已验证；'
+                                   '请用手机完成登录与聊天验证。'
+                                   if self.entry.get('tailscaleMode') == 'serve'
+                                   else '公网 Funnel、TLS 和当前网关身份均已验证；'
+                                        '请用手机完成登录与聊天验证。')
+                        self.status('connected', message,
                                     url=url, node_id=node_id,
-                                    instance_id=event_instance, diagnostic=diagnostic)
+                                    instance_id=event_instance, diagnostic=diagnostic,
+                                    urls=urls, tailnet_url=tailnet_url, tailnet_ips=tailnet_ips)
                     elif state == 'retrying':
                         diagnostic = event.get('diagnostic')
                         url = str(event.get('url') or '')
                         node_id = str(event.get('nodeId') or '')
                         event_instance = str(event.get('instanceId') or '')
                         # A retry can follow either the first publish attempt or
-                        # a previously healthy public endpoint. Do not leave an
-                        # old origin trusted while the helper is re-registering.
-                        # The next "resolved" event publishes it again before
-                        # the identity-safe probe.
+                        # a previously healthy endpoint. Do not leave old exact
+                        # origins trusted while the helper is re-registering.
                         self._publish_origin()
                         self.status('retrying',
                                     str(event.get('message') or

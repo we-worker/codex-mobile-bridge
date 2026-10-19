@@ -7,7 +7,7 @@ import java.net.InetSocketAddress;
 import java.net.Proxy;
 import java.net.URL;
 
-/** Applies the embedded Tailscale CONNECT proxy only to HTTPS .ts.net URLs. */
+/** Applies the embedded Tailscale HTTP proxy only to supported private URLs. */
 final class TailnetHttp {
  private static volatile Proxy proxy;
 

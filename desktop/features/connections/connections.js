@@ -120,7 +120,7 @@ function renderConnections(){
         select.onchange=()=>{row[key]=key==='tailscalePort'?Number(select.value):select.value;if(key==='tailscalePort'){row.publicUrl='';row.tailscaleNodeId='';}connectionSetupState.delete(row.id);renderConnections();updateDirty();};
         wrap.append(text,select);card.append(wrap);
       }
-      note(row.tailscaleMode==='serve'?'只有已接入同一 Tailscale 网络的手机或浏览器可以访问；手机端需使用 Tailscale 客户端或其他 Tailnet 接入方式。':'手机和普通浏览器无需安装 Tailscale；需开启网关登录验证。首次使用可能需要授权 HTTPS 和 Funnel。');
+      note(row.tailscaleMode==='serve'?(row.tailscaleRuntime==='embedded'?'私有组网会提供 Tailnet HTTPS 和 http://100.x:8787 入口，均只对同一 Tailnet 可见，不会发布 Funnel。手机可使用 App 内嵌 Tailscale 自动接入。手机直连时请使用本次检测到的 100.x:8787 地址。':'系统 Tailscale 只登记当前设备的 Tailnet HTTPS 入口。若还需要 100.x 私有 HTTP 入口，请将官方 Serve 的上游指到本机网关，或改用 App 内嵌 Tailscale。'):'手机和普通浏览器无需安装 Tailscale；需开启网关登录验证。首次使用可能需要授权 HTTPS 和 Funnel。');
       if(row.tailscaleRuntime==='embedded')note('内嵌节点在 App 退出网关时停止。首次交互登录会生成一次性 Tailscale 官方登录地址；无桌面主机建议使用认证密钥。');
       const address=field('publicUrl','固定访问地址','text','检测后自动读取');address.readOnly=true;address.onfocus=null;address.onblur=null;
       note('保留 Tailscale 设备与名称时，重启后地址不变。国内访问速度取决于实际线路，请用蜂窝网络验证。');

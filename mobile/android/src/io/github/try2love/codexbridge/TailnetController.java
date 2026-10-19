@@ -139,8 +139,11 @@ final class TailnetController {
   String unsupported=unsupportedWebProxy();
   if(unsupported!=null)throw new Exception(unsupported);
   ProxyConfig config=new ProxyConfig.Builder()
+   .removeImplicitRules()
+   .addProxyRule("http://127.0.0.1:"+port,ProxyConfig.MATCH_HTTP)
    .addProxyRule("http://127.0.0.1:"+port,ProxyConfig.MATCH_HTTPS)
    .addBypassRule("*.ts.net")
+   .addBypassRule("100.64.0.0/10")
    .setReverseBypassEnabled(true)
    .build();
   ProxyController.getInstance().setProxyOverride(config,main::post,completed);
@@ -156,7 +159,7 @@ final class TailnetController {
  private static String unsupportedWebProxy(){
   if(Build.VERSION.SDK_INT<29)return "内置 Tailscale 需要 Android 10 或更高版本；当前系统无法给 WebView 设置进程内代理。";
   if(!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE))return "当前 Android WebView 不支持进程内代理，请更新 Android System WebView。";
-  if(!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE_REVERSE_BYPASS))return "当前 Android WebView 不支持限定 .ts.net 的进程内代理，请更新 Android System WebView。";
+  if(!WebViewFeature.isFeatureSupported(WebViewFeature.PROXY_OVERRIDE_REVERSE_BYPASS))return "当前 Android WebView 不支持限定 Tailnet 地址的进程内代理，请更新 Android System WebView。";
   return null;
  }
 
