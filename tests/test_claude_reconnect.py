@@ -77,7 +77,12 @@ class ClaudeConnectionProbe(unittest.TestCase):
         def respond():
             deadline = time.monotonic() + 2
             while time.monotonic() < deadline:
-                packet = json.loads((self.adapter.directory/'request.json').read_text())
+                try:
+                    packet = json.loads((self.adapter.directory/'request.json').read_text())
+                except PermissionError:
+                    # Windows can deny a read during the mailbox's atomic replace.
+                    time.sleep(.01)
+                    continue
                 request = json.loads(packet['payload'])
                 if request['type'] == 'request' and request['seq'] > 1:
                     requests.append(request)
@@ -252,16 +257,29 @@ class ClaudeConnectionProbe(unittest.TestCase):
         self.assertEqual((self.adapter.directory/'request.json').read_bytes(), request)
         native.assert_not_called()
 
-    def test_macos_explicit_initialization_cannot_bypass_unconfirmed_mutation_gate(self):
+    def test_explicit_initialization_cannot_bypass_unconfirmed_mutation_gate(self):
         self.desktop.unconfirmed_mutations.add(1)
         request = (self.adapter.directory/'request.json').read_bytes()
-        with patch('bridge.clients.claude.adapter.sys.platform', 'darwin'), \
-             patch('bridge.clients.claude.adapter.native_action') as native, \
-             patch.object(self.adapter, 'prepare') as prepare:
-            with self.assertRaisesRegex(ValueError, '未确认的请求'):
-                self.adapter.connect()
+        for platform in ('darwin', 'win32'):
+            with self.subTest(platform=platform), \
+                 patch('bridge.clients.claude.adapter.sys.platform', platform), \
+                 patch('bridge.clients.claude.adapter.native_action') as native, \
+                 patch.object(self.adapter, 'prepare') as prepare:
+                with self.assertRaisesRegex(ValueError, '未确认的请求'):
+                    self.adapter.connect()
+                self.assertEqual((self.adapter.directory/'request.json').read_bytes(), request)
+                native.assert_not_called(); prepare.assert_not_called()
+
+    def test_mailbox_reset_preserves_unconfirmed_request_and_generation(self):
+        self.desktop.unconfirmed_mutations.add(1)
+        request = (self.adapter.directory/'request.json').read_bytes()
+        generation = self.desktop.generation
+        with self.assertRaisesRegex(ValueError, '未确认的请求'):
+            self.adapter.prepare(reset=True)
+        self.assertIs(self.adapter.desktop, self.desktop)
+        self.assertEqual(self.desktop.generation, generation)
+        self.assertFalse(self.desktop.stopped)
         self.assertEqual((self.adapter.directory/'request.json').read_bytes(), request)
-        native.assert_not_called(); prepare.assert_not_called()
 
     def test_recovery_read_probe_does_not_bypass_normal_calls_or_accept_cancelled_owner(self):
         self.adapter.reconnecting = True
@@ -455,3 +473,66 @@ class ClaudeConnectionProbe(unittest.TestCase):
                 self.assertIn('connect', actions, 'Resume must not accept a cached heartbeat and skip actual connection')
                 self.assertFalse(self.adapter.reconnecting)
                 self.assertTrue(self.adapter.status()['connected'])
+
+    def test_signed_list_is_usable_while_native_console_cleanup_is_pending(self):
+        for platform, existing_only in (('win32', False), ('darwin', True)):
+            with self.subTest(platform=platform):
+                self.adapter.discovery = {'installed': True, 'executable': '/fixture/Claude',
+                                          'dataHome': '/fixture/profile'}
+                self.reply({'connected': False})
+                cleanup_started, release_cleanup = threading.Event(), threading.Event()
+                failures = []
+
+                def native(name, **kwargs):
+                    if name == 'connect':
+                        self.desktop = self.adapter.desktop
+                        self.reply({'seq': 0, 'done': True, 'result': None})
+                        return {'setupState': 'submitted'}
+                    if name == 'close-devtools':
+                        cleanup_started.set()
+                        release_cleanup.wait(2)
+                        return {'setupState': 'connected'}
+                    return {'setupState': 'ready'}
+
+                def connect():
+                    try:
+                        self.adapter._connect_native(False, self.adapter.directory/'cancel', existing_only=existing_only)
+                    except Exception as exc:
+                        failures.append(exc)
+
+                def answer_list():
+                    deadline = time.monotonic() + 2
+                    while time.monotonic() < deadline:
+                        request = self.desktop._request_packet()
+                        if request.get('type') == 'request':
+                            self.reply({'seq': request['seq'], 'done': True,
+                                        'result': {'code': []}})
+                            return
+                        time.sleep(.01)
+
+                with patch('bridge.clients.claude.adapter.sys.platform', platform), \
+                     patch('bridge.clients.claude.adapter.native_action', side_effect=native), \
+                     patch('bridge.clients.claude.adapter.running_app', return_value=42), \
+                     patch('bridge.clients.claude.adapter.claude_data_home', return_value='/fixture/profile'), \
+                     patch('bridge.clients.claude.adapter.developer_mode_enabled', return_value=True), \
+                     patch.object(self.adapter.cli, 'status', return_value={'cliAvailable': False}), \
+                     patch.object(self.adapter.setup_cancel, 'wait', return_value=False):
+                    worker = threading.Thread(target=connect)
+                    worker.start()
+                    try:
+                        self.assertTrue(cleanup_started.wait(2))
+                        self.assertTrue(self.adapter.status()['connected'])
+                        self.assertTrue(self.adapter.status()['consoleCleanupPending'])
+                        self.assertFalse(self.adapter.reconnecting)
+                        responder = threading.Thread(target=answer_list)
+                        responder.start()
+                        try:
+                            self.assertEqual(self.adapter.desktop_listing()['sessions'], [])
+                        finally:
+                            responder.join(2)
+                    finally:
+                        release_cleanup.set()
+                        worker.join(2)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(failures, [])
+                self.assertFalse(self.adapter.status()['consoleCleanupPending'])

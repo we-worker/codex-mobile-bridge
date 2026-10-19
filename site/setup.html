@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<meta name="description" content="Codex Mobile Bridge 连接配置指南：局域网、Cloudflare 临时与固定隧道、Tailscale、自有服务器 SSH、NAS 反向代理的图解步骤与排查。">
+<meta name="description" content="Codex Mobile Bridge 连接配置指南：局域网、已有穿透或反向代理、Cloudflare、Tailscale、自有服务器 SSH、NAS 的图解步骤与排查。">
 <title>连接配置指南 · Codex Mobile Bridge</title>
 <link rel="icon" href="./assets/icon.png">
 <link rel="stylesheet" href="./site.css?v=20261006-setup">
@@ -31,7 +31,7 @@
 <p data-en="SETUP / CONNECTIONS" class="eyebrow">SETUP / 连接配置</p>
 <h1 data-en="Connect every step." >把每一步，连起来。</h1>
 <p data-en="Choose how to connect, then follow the diagrams and steps. Each step explains where to work, the permissions needed and how to check success." class="lead">选好访问方式，照着图示和步骤配置。每一步都说明在哪操作、需要什么权限，以及看到什么才算成功。</p>
-<p class="example-note" data-en="For v2.0.3 (stable): update the gateway and mobile Apps together. Install and sign in to your desktop clients, start the gateway and confirm local sign-in before setting up remote access.">本页对应 v2.0.3 正式版：建议网关与手机 App 配套更新。先安装并登录所需桌面客户端，启动网关并确认本机或局域网可以登录，再配置外网入口。</p>
+<p class="example-note" data-en="Public downloads are v2.1.1 (stable) and include the Existing tunnel / reverse proxy option below. Install and sign in to your desktop clients before setting up remote access.">当前公开下载为 v2.1.1 正式版，包含下方“已有穿透 / 反向代理”连接方式。配置外网前先安装并登录所需桌面客户端。</p>
 </div>
 <nav class="method-picker" aria-label="连接方式 / Connection methods">
 <a href="#lan" data-method="lan">
@@ -41,6 +41,10 @@
 <a href="#quick" data-method="quick">
 <strong data-en="Temporary HTTPS · Recommended" >临时 HTTPS · 推荐</strong>
 <span data-en="No server or domain" >没有服务器，也没有域名</span>
+</a>
+<a href="#external" data-method="external">
+<strong data-en="Existing tunnel / reverse proxy" >已有穿透 / 反向代理</strong>
+<span data-en="Already have a trusted HTTPS URL" >已有受信任的 HTTPS 地址</span>
 </a>
 <a href="#tailscale" data-method="tailscale"><strong data-en="Tailscale · Fixed HTTPS">Tailscale · 固定 HTTPS</strong><span data-en="Fixed HTTPS, no server">固定 HTTPS，无需服务器</span></a>
 <a href="#cloudflare" data-method="cloudflare">
@@ -167,7 +171,7 @@
 <h2 data-en="Tailscale: keep one HTTPS address" id="tailscale-title">Tailscale：保留一个固定 HTTPS 地址</h2><p class="example-note" data-en="Tailscale public forwarding or relay traffic may pass through overseas nodes. Direct access from mainland China can be slow or time out; private peer-to-peer routes differ from public Funnel access.">Tailscale 公网转发或中继链路可能经过境外节点，中国大陆直连可能较慢或超时；私有组网直连与公网 Funnel 的访问路径不同。</p>
 <p class="panel-intro" data-en="No server, domain purchase or invitation required. Install the official client on the work computer and connect it to the gateway.">无需自建服务器、购买域名或邀请码。在工作电脑安装官方客户端，再从网关接入。</p>
 <p class="example-note" data-en="Available in v2.0.0. Install and sign in to official Tailscale on the gateway computer, then grant the initial Serve / Funnel authorization.">v2.0.0 已支持。在网关电脑安装并登录官方 Tailscale，首次使用按提示完成 Serve / Funnel 授权。</p>
-<p class="actions"><a class="button" data-en="View stable source" href="https://github.com/try2love/codex-mobile-bridge/tree/v2.0.3">查看正式版源码</a></p>
+<p class="actions"><a class="button" data-en="View stable source" href="https://github.com/try2love/codex-mobile-bridge/tree/v2.1.1">查看正式版源码</a></p>
 <figure class="network-map"><div class="map-flow">
 <div class="map-node"><span class="map-index">1</span><strong data-en="Phone / browser">手机／浏览器</strong><small data-en="https://device.tailnet.ts.net">https://设备名.网络名.ts.net</small></div>
 <span class="map-arrow" aria-hidden="true">→</span>
@@ -909,6 +913,31 @@ sudo systemctl reload nginx</code>
 <p data-en="Check: All three layers pass. Daily operation needs no sudo. Keep the computer awake and online; the gateway maintains and retries the SSH connection." class="checkpoint">确认结果：三层都通过。之后无需日常 sudo 操作，电脑保持开机、联网且不休眠，网关会维持并重试 SSH 连接。</p>
 </div>
 </article>
+</section>
+<section class="setup-panel" id="external" data-setup-panel="external" aria-labelledby="external-title">
+<h2 data-en="Existing tunnel / reverse proxy: keep your HTTPS entry" id="external-title">已有穿透 / 反向代理：沿用你的 HTTPS 入口</h2>
+<p class="panel-intro" data-en="Available in v2.1.0. Use an existing trusted HTTPS tunnel or reverse proxy to reach this gateway.">v2.1.0 正式版已支持。复用已有受信任的 HTTPS 穿透或反向代理访问网关。</p>
+<figure class="network-map"><div class="map-flow">
+<div class="map-node"><span class="map-index">1</span><strong data-en="Phone" >手机</strong><small data-en="Trusted HTTPS root URL" >受信任的 HTTPS 根地址</small></div>
+<span class="map-arrow" aria-hidden="true">→</span>
+<div class="map-node"><span class="map-index">2</span><strong data-en="Your tunnel / proxy" >你的穿透／代理</strong><small data-en="Preserve public Host" >保留公开 Host</small></div>
+<span class="map-arrow" aria-hidden="true">→</span>
+<div class="map-node"><span class="map-index">3</span><strong data-en="This computer" >这台电脑</strong><small data-en="127.0.0.1:actual gateway port" >127.0.0.1:网关实际端口</small></div>
+</div><figcaption data-en="Bridge saves the public URL; you manage the tunnel and HTTPS certificate.">Bridge 只保存公开地址；穿透和 HTTPS 证书由你管理。</figcaption></figure>
+<article class="guide-step"><div class="step-head"><span class="step-number">01</span><div><span class="actor" data-en="Your tunnel or proxy">你的穿透或代理</span><h3 data-en="Forward to this computer's actual loopback port">上游指向本机实际回环端口</h3></div></div><div class="step-body">
+<p data-en="Set the HTTP upstream to http://127.0.0.1:8787 only if the gateway really uses port 8787; otherwise replace it with the port shown in the desktop App. If the proxy runs in a container, its own 127.0.0.1 may be a different network namespace.">仅当网关实际使用 8787 时，上游才填 http://127.0.0.1:8787；否则使用电脑 App 显示的实际端口。代理若在容器内运行，容器的 127.0.0.1 可能指向另一网络空间。</p>
+<p class="checkpoint" data-en="Check: the tunnel can reach this computer's gateway without exposing its HTTP port directly to the public Internet.">确认结果：穿透能连到这台电脑的网关，网关 HTTP 端口未直接暴露到公网。</p>
+</div></article>
+<article class="guide-step"><div class="step-head"><span class="step-number">02</span><div><span class="actor" data-en="Desktop App">电脑 App</span><h3 data-en="Save the phone's HTTPS URL">保存手机 HTTPS 地址</h3></div></div><div class="step-body">
+<p data-en="Under Network access → Add connection, choose Existing tunnel / reverse proxy and enter a complete trusted HTTPS root URL, such as https://bridge.example.com or https://bridge.example.com:8443. Public HTTP, paths such as /codex/, query parameters and redirects are unsupported. Do not disable certificate verification.">在“网络访问 → 添加连接”选择“已有穿透 / 反向代理”，填写完整且证书受信任的 HTTPS 根地址，例如 https://bridge.example.com 或 https://bridge.example.com:8443。不能填公网 HTTP、/codex/ 子路径、查询参数或重定向地址；不要关闭证书校验。</p>
+<p data-en="Save and start the gateway. LAN and local browser access can remain off for a same-computer tunnel; the loopback upstream stays available only through the configured public Host.">保存并启动网关。同机穿透可关闭局域网和本机网页访问；回环上游只接受已配置的公开 Host。</p>
+</div></article>
+<article class="guide-step"><div class="step-head"><span class="step-number">03</span><div><span class="actor" data-en="Proxy → App → phone">代理 → App → 手机</span><h3 data-en="Preserve headers and verify each layer">保留请求头并逐层验收</h3></div></div><div class="step-body">
+<p data-en="Preserve the original public Host (including a custom port), Origin, Cookie and X-CSRF-Token. In Nginx, $http_host preserves :8443; $host may drop it. Disable caching and response buffering; allow streaming, long requests and the upload/download sizes you need. Bridge uses HTTP long polling or SSE; WebSocket upgrade support alone is not enough.">保留原始公开 Host（含自定义端口）、Origin、Cookie 和 X-CSRF-Token。Nginx 用 $http_host 保留 :8443；$host 可能丢失端口。关闭缓存和响应缓冲，允许流式响应、长请求及所需上传／下载大小。Bridge 使用 HTTP 长轮询或 SSE；仅支持 WebSocket 升级仍不够。</p>
+<p data-en="Select Check fixed entry in the App. It makes a credential-free HTTPS probe, validates the certificate and current gateway instance, and never follows redirects. Then test sign-in, chat and files over phone mobile data; QR sign-in is issued only when the address reaches the current gateway.">在 App 点击“检测固定入口”：它用无凭据 HTTPS 请求核验证书与当前网关实例，不跟随重定向。再用手机蜂窝网络测试登录、聊天和文件；只有地址指向当前网关时才签发扫码登录。</p>
+<p data-en="A proxy on another NAS or server should use advanced NAS setup with a reachable computer LAN address, not this computer's loopback.">若代理位于另一台 NAS 或服务器，请使用进阶 NAS 配置及它可达的电脑局域网地址，不能填写那台设备自己的回环地址。</p>
+<a data-en="Read the complete existing-tunnel guide ↗" href="https://github.com/try2love/codex-mobile-bridge/blob/main/docs/external-tunnel.md">阅读完整的已有穿透说明 ↗</a>
+</div></article>
 </section>
 <section class="setup-panel" id="nas" data-setup-panel="nas" aria-labelledby="nas-title">
 <h2 data-en="NAS / existing proxy: reuse a reachable network" id="nas-title">NAS / 已有反代：复用已连通的网络</h2>

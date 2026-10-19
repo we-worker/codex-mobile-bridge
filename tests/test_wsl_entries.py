@@ -127,7 +127,7 @@ class CliStoreTests(unittest.TestCase):
             self.assertEqual(store.get('old')['display_title'], 'Latest input')
             self.assertEqual(store.get('old')['title'], 'Original question')
             self.assertTrue(history.read_text(encoding='utf8').startswith(original))
-            desktop = SessionStore(home)
+            desktop = SessionStore(home, source='desktop')
             self.assertFalse(desktop.list(query='ROS2'))
 
     def test_cli_source_is_explicit_and_subagents_remain_excluded(self):
@@ -147,7 +147,7 @@ class CliStoreTests(unittest.TestCase):
                     ('child', 'codex-tui', 'cli', 'subagent', 0, 14, '/fixture', 'Child'),
                     ('exec', 'codex_exec', 'exec', None, 0, 15, '/fixture', 'Exec')])
                 db.commit()
-            cli, desktop = SessionStore(home, source='cli'), SessionStore(home)
+            cli, desktop = SessionStore(home, source='cli'), SessionStore(home, source='desktop')
             self.assertEqual({r['id'] for r in cli.list()}, {'cli', 'shared', 'old', 'mobile', 'legacy-mobile'})
             self.assertEqual({r['id'] for r in desktop.list()}, {'desktop', 'vscode', 'legacy-mobile'})
             self.assertEqual(cli.get('legacy-mobile')['title'], 'Legacy mobile')

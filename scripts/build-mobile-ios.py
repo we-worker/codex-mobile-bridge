@@ -43,12 +43,13 @@ def source_archive(root, destination):
 
 
 def verify_app(app, version, build):
+    short_version = version.split('-', 1)[0]
     targets = [(app, 'io.github.try2love.codexbridge.preview'),
                (app/'PlugIns/BridgeActivity.appex', 'io.github.try2love.codexbridge.preview.activity'),
                (app/'PlugIns/BridgeNotifications.appex', 'io.github.try2love.codexbridge.preview.notifications')]
     for bundle, identifier in targets:
         info = plistlib.loads((bundle/'Info.plist').read_bytes())
-        if (info['CFBundleIdentifier'] != identifier or info['CFBundleShortVersionString'] != version
+        if (info['CFBundleIdentifier'] != identifier or info['CFBundleShortVersionString'] != short_version
                 or info['CFBundleVersion'] != build):
             raise RuntimeError('iOS bundle identity/version mismatch: '+str(bundle))
         executable = bundle/info['CFBundleExecutable']

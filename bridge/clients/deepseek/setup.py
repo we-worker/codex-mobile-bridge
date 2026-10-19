@@ -130,11 +130,15 @@ def verified_directory(entry, home):
         if not isinstance(credentials.get('token'), str) or not credentials['token'] or credentials.get('endpoint') != str(directory/'endpoint.json'):
             return None
         digest = hashlib.sha256(source.read_bytes()).hexdigest()
-        current = hashlib.sha256(Path(__file__).with_name('host.mjs').read_bytes()).hexdigest()
-        if digest not in (current, LEGACY_SOURCE, PREVIOUS_SOURCE, PREVIOUS_CLEANUP_SOURCE, PREVIOUS_CATALOG_SOURCE,
-                          *PREVIOUS_QUIT_SOURCES, *PREVIOUS_CONTEXT_SOURCES):
+        current_source = Path(__file__).with_name('host.mjs').read_bytes()
+        current_lf = current_source.replace(b'\r\n', b'\n')
+        current_sources = {hashlib.sha256(content).hexdigest() for content in
+                           (current_lf, current_lf.replace(b'\n', b'\r\n'))}
+        if digest not in current_sources and digest not in (
+                LEGACY_SOURCE, PREVIOUS_SOURCE, PREVIOUS_CLEANUP_SOURCE, PREVIOUS_CATALOG_SOURCE,
+                *PREVIOUS_QUIT_SOURCES, *PREVIOUS_CONTEXT_SOURCES):
             return None
-        return directory, digest != current
+        return directory, digest not in current_sources
     except (OSError, ValueError, KeyError, TypeError, IndexError):
         return None
 

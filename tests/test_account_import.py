@@ -101,11 +101,12 @@ class ImportTests(unittest.TestCase):
 
 class ModelHTTPTests(unittest.TestCase):
     def setUp(self):
-        self.requests=[];self.status=200;self.body={'data':[{'id':'z'},{'id':'a'},{'id':'a'},{'id':'bad\nmodel'}]}
+        self.requests=[];self.extra_headers=[];self.status=200;self.body={'data':[{'id':'z'},{'id':'a'},{'id':'a'},{'id':'bad\nmodel'}]}
         owner=self
         class Handler(BaseHTTPRequestHandler):
             def do_GET(self):
                 owner.requests.append((self.path,self.headers.get('Authorization')))
+                owner.extra_headers.append((self.headers.get('x-api-key'),self.headers.get('anthropic-version')))
                 self.send_response(owner.status)
                 if owner.status==302:self.send_header('Location','/credential-leak')
                 body=json.dumps(owner.body).encode()
@@ -132,6 +133,12 @@ class ModelHTTPTests(unittest.TestCase):
     def test_real_http_uses_bearer_and_returns_sorted_unique_ids(self):
         self.assertEqual(model_ids(self.url,'fixture-key'),['a','z'])
         self.assertEqual(self.requests,[('/v1/models','Bearer fixture-key')])
+
+    def test_custom_auth_headers_are_used_without_default_bearer(self):
+        self.assertEqual(model_ids(self.url,'fixture-key',headers={
+            'x-api-key':'fixture-key','anthropic-version':'2023-06-01'}),['a','z'])
+        self.assertEqual(self.requests,[('/v1/models',None)])
+        self.assertEqual(self.extra_headers,[('fixture-key','2023-06-01')])
 
     def test_redirect_is_not_followed_and_error_body_is_not_exposed(self):
         self.status=302;self.body={'error':'fixture-key'}

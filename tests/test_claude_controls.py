@@ -130,11 +130,25 @@ class ClaudeControls(unittest.TestCase):
     def test_busy_tasks_still_block_explicit_quit_even_with_confirmation(self):
         preview = self.preview()
         self.claude.status.return_value = {'connected': True}
-        self.claude.call.side_effect = lambda *_: {'complete': False, 'sessions': [
+        self.claude.desktop_listing.return_value = {'complete': False, 'sessions': [
             {'id': 'running', 'status': 'active', 'runtimeKnown': True}]}
         with self.assertRaisesRegex(ValueError, '任务运行或等待'):
             self.confirm(preview, acknowledgeUnknown=True)
         self.fixture.stop.assert_not_called(); self.claude.cancel.assert_not_called()
+
+    def test_connected_quit_ignores_unrelated_cli_list_incompleteness(self):
+        self.claude.status.return_value = {'connected': True}
+        self.claude.call.side_effect = lambda action, *args: {'complete': False, 'sessions': [
+            {'id': 'remote-cli-history', 'backend': 'cli', 'status': 'idle', 'runtimeKnown': False}]}
+        self.claude.desktop_listing.reset_mock()
+        preview = self.preview()
+        self.assertTrue(preview['canQuit'])
+        self.assertFalse(preview['requiresUnknownConfirmation'])
+        with patch.object(self.manager, 'clients', return_value={'clients': []}):
+            self.confirm(preview)
+        self.assertEqual(self.claude.desktop_listing.call_count, 2)
+        self.assertFalse(any(call.args[0] == 'list' for call in self.claude.call.call_args_list))
+        self.fixture.stop.assert_called_once()
 
     def test_process_identity_change_or_expiry_cannot_use_old_quit_confirmation(self):
         preview = self.preview()

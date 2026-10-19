@@ -4,6 +4,7 @@ import collections
 import ctypes as C
 from ctypes import wintypes as W
 import hashlib
+import ntpath
 import os
 from pathlib import Path
 
@@ -59,8 +60,7 @@ def api():
     kernel = C.WinDLL('kernel32', use_last_error=True)
     signatures = {
         'CreatePipe': (W.BOOL, [C.POINTER(W.HANDLE), C.POINTER(W.HANDLE), C.c_void_p, W.DWORD]),
-        'CreateFileW': (W.HANDLE, [W.LPCWSTR, W.DWORD, W.DWORD, C.c_void_p, W.DWORD, W.DWORD, W.HANDLE]),
-        'SetStdHandle': (W.BOOL, [W.DWORD, W.HANDLE]),
+        'SetConsoleCtrlHandler': (W.BOOL, [C.c_void_p, W.BOOL]),
         'CreatePseudoConsole': (C.c_long, [COORD, W.HANDLE, W.HANDLE, W.DWORD, C.POINTER(W.HANDLE)]),
         'ResizePseudoConsole': (C.c_long, [W.HANDLE, COORD]), 'ClosePseudoConsole': (None, [W.HANDLE]),
         'InitializeProcThreadAttributeList': (W.BOOL, [C.c_void_p, W.DWORD, W.DWORD, C.POINTER(C.c_size_t)]),
@@ -90,18 +90,25 @@ def checked(result):
 
 
 def child_main(shell):
-    # A stdio gateway's redirected handles can survive the ConPTY attachment.
-    # Reopen them in this child only; never replace the gateway's RPC streams.
-    kernel = api(); handles = []
-    try:
-        for number, name in ((-10, 'CONIN$'), (-11, 'CONOUT$'), (-12, 'CONOUT$')):
-            handle = kernel.CreateFileW(name, 0xc0000000, 3, None, 3, 0, None)
-            if handle == W.HANDLE(-1).value: raise C.WinError(C.get_last_error())
-            handles.append(handle); checked(kernel.SetStdHandle(number, handle))
-        code = subprocess.call([shell])
-    finally:
-        for handle in handles: kernel.CloseHandle(handle)
-    raise SystemExit(code)
+    # The Python bootstrap may retain redirected CRT descriptors after ConPTY
+    # attaches. Pass fresh console handles to cmd and its external children.
+    # The launcher may also inherit Ctrl+C ignore from its process group.
+    checked(api().SetConsoleCtrlHandler(None, False))
+    with open('CONIN$', 'rb', buffering=0) as source, open('CONOUT$', 'wb', buffering=0) as sink:
+        raise SystemExit(subprocess.call([shell], stdin=source, stdout=sink, stderr=sink))
+
+
+def cmd_working_directory(root):
+    # CMD treats an extended local path as UNC and falls back to C:\Windows.
+    # Use its drive spelling only when both names resolve to the same directory.
+    if (len(root) >= 7 and root.startswith('\\\\?\\')
+            and root[4] in 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz' and root[5:7] == ':\\'):
+        ordinary = root[4:]
+        try:
+            if os.path.samefile(root, ordinary): return ordinary
+        except OSError:
+            pass
+    return root
 
 
 class WindowsTerminalSession(TerminalSession):
@@ -139,7 +146,8 @@ class WindowsTerminalSession(TerminalSession):
             if not getattr(sys, 'frozen', False): launcher.append(str(project_root() / 'desktop.py'))
             launcher.extend(['--terminal-child', self.shell])
             command = C.create_unicode_buffer(subprocess.list2cmdline(launcher))
-            checked(k.CreateProcessW(sys.executable, command, None, None, False, 0x00080004, None, self.root, C.byref(startup), C.byref(process)))
+            directory = cmd_working_directory(self.root) if ntpath.basename(self.shell).casefold() == 'cmd.exe' else self.root
+            checked(k.CreateProcessW(sys.executable, command, None, None, False, 0x00080004, None, directory, C.byref(startup), C.byref(process)))
             self.process_handle = process.hProcess
             checked(k.AssignProcessToJobObject(self.job, self.process_handle))
             checked(k.ResumeThread(process.hThread) != 0xffffffff)

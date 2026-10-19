@@ -123,6 +123,9 @@ class LocalAccessTests(unittest.TestCase):
                 data = Path(folder)
                 config = data/'config.json'
                 config.write_text(json.dumps({'auth': {'mode': 'none'}, 'origins': [], 'lanAddresses': selected, 'localAccess': False}), encoding='utf8')
+                clients = data/'desktop-sessions'
+                clients.mkdir()
+                (clients/'settings.json').write_text(json.dumps({'enabled': {'codex': False, 'claude': False, 'deepseek': False}}), encoding='utf8')
                 with socket.socket() as probe:
                     probe.bind(('0.0.0.0', 0));port = probe.getsockname()[1]
                 (data/'desktop.json').write_text(json.dumps({'port': port}), encoding='utf8')

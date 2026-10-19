@@ -157,7 +157,11 @@ class ServerUnreadTests(unittest.TestCase):
             self.assertEqual(server.notifications.mobile_snapshot()['unread']['codex'], 0)
             from unittest.mock import Mock
             server.bridge = Mock(host_errors=[])
-            server.bridge.list.side_effect = lambda **kw: (feed.append(['during-list'], {'id': THREAD, 'host': 'local'}, 'Late', 'Body', False), [])[1]
+            def list_sessions(**kwargs):
+                feed.append(['during-list'], {'id': THREAD, 'host': 'local'}, 'Late', 'Body', False)
+                rows = []
+                return (rows, []) if kwargs.get('include_sources') else rows
+            server.bridge.list.side_effect = list_sessions
             c = http.client.HTTPConnection('127.0.0.1', server.server_port, timeout=3)
             c.request('GET', '/api/sessions', headers={'Host': 'gateway.example', 'Cookie': 'codex_mobile_session='+token})
             response = c.getresponse(); self.assertEqual(response.status, 200); listing = json.loads(response.read()); c.close()

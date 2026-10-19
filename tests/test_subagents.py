@@ -15,7 +15,6 @@ from bridge.clients.codex.remote import RemoteStore
 class SubagentTests(unittest.TestCase):
     def setUp(self):
         self.case=support.IntegrationTests();self.case.setUp();self.root=self.case.root;self.bridge=self.case.bridge
-        (self.root/'sessions').mkdir()
     def tearDown(self):self.case.tearDown()
     def child(self,parent,title='Child',source=None,path=None):
         identifier=str(uuid.uuid4());log=path or self.root/'sessions'/(identifier+'.jsonl')

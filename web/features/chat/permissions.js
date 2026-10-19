@@ -42,8 +42,8 @@ class ContextUsageControl {
   dispose(){this.dialog?.remove();this.button.remove();}
 }
 
-// Local Linux capability picker; other platforms keep their existing flow.
-async function permissionPicker(dialog,{load,save,isCurrent,onSaved}){
+// Linux Desktop and native CLI capability picker; other sessions keep their existing flow.
+async function permissionPicker(dialog,{load,save,isCurrent,onSaved,nativeCli=false}){
   const t=BridgeI18n.t,options=document.createElement('div'),status=document.createElement('p'),refresh=document.createElement('button');
   status.className='muted';status.setAttribute('role','status');refresh.type='button';refresh.textContent=t('刷新');
   dialog.append(options,status,refresh);
@@ -51,6 +51,7 @@ async function permissionPicker(dialog,{load,save,isCurrent,onSaved}){
   const valid=()=>dialog.open&&isCurrent();
   const setBusy=value=>{busy=value;refresh.disabled=value;for(const [button,available] of buttons)button.disabled=value||!available;};
   const labels={ask:['请求批准','需要额外权限时询问你。'],'auto-review':['帮我批准','由 Codex 审核需要额外权限的操作。'],'full-access':['完全访问权限','允许访问工作区外的文件和网络，无需逐次批准。']};
+  const unknown=nativeCli?'无法确认当前 CLI 的权限能力，请检查 CLI 运行时与策略后刷新。':'无法确认当前权限能力，请在桌面检查设置后重新打开此面板。';
   const reload=async()=>{
     if(busy||!valid())return;
     const version=++revision;options.replaceChildren();buttons=[];setBusy(true);status.textContent=t('正在读取权限选项…');
@@ -60,7 +61,7 @@ async function permissionPicker(dialog,{load,save,isCurrent,onSaved}){
       for(const option of result.options||[]){
         const preset=option.preset;if(!Object.hasOwn(labels,preset))continue;
         const [label,help]=labels[preset],available=option.available===true;
-        const button=permissionOption(document.createElement('button'),preset,label,available?help:option.reason||'无法确认当前权限能力，请在桌面检查设置后重新打开此面板。',result.current===preset);
+        const button=permissionOption(document.createElement('button'),preset,label,available?help:option.reason||unknown,result.current===preset);
         buttons.push([button,available]);button.disabled=!available;
         button.onclick=async()=>{
           if(busy||!available||!valid())return;
@@ -69,12 +70,12 @@ async function permissionPicker(dialog,{load,save,isCurrent,onSaved}){
           try{
             const response=await save(preset);if(!valid())return;
             if(response.confirmed===true){onSaved(response);dialog.close();}
-            else status.textContent=t('已提交权限设置，等待桌面确认。');
+            else status.textContent=t(nativeCli?'已提交权限设置，等待 CLI 运行时确认。':'已提交权限设置，等待桌面确认。');
           }catch(e){if(valid())status.textContent=t(e.message);}
           finally{setBusy(false);}
         };options.append(button);
       }
-      status.textContent=buttons.length?'':t('无法确认当前权限能力，请在桌面检查设置后重新打开此面板。');
+      status.textContent=buttons.length?'':t(unknown);
     }catch(e){if(valid())status.textContent=t(e.message);}
     finally{setBusy(false);}
   };

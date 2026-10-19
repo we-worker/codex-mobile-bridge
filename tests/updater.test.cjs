@@ -120,6 +120,20 @@ test('checking never installs and installation only receives verified bytes',asy
   const f=await fixture(t);assert.equal((await f.updater.check()).state,'available');assert.equal(f.installed(),0);
   assert.equal((await f.updater.install()).state,'restarting');assert.equal(f.installed(),1);assert.deepEqual(await fs.readdir(f.directory),[]);
 });
+test('skipping an exact signed release survives restart while manual checks and newer releases remain available',async t=>{
+  const f=await fixture(t),skipFile=path.join(f.directory,'skipped-update.json');f.updater.skipFile=skipFile;
+  assert.equal((await f.updater.check()).state,'available');assert.equal((await f.updater.skip()).state,'skipped');
+  assert.deepEqual(JSON.parse(await fs.readFile(skipFile,'utf8')),{[f.updater.skipIdentity]:next});
+  const again=new Updater({current,platform,arch,key:keys.publicKey,fetch:f.updater.fetch,directory:f.directory,skipFile,install:async()=>{}});
+  assert.equal((await again.check()).state,'skipped');assert.equal(again.candidate.version,next);
+  assert.equal((await again.check({manual:true})).state,'available');assert.equal(again.status().skipped,true);
+  const newer='0.2.0-beta.7',release=info();release.version=newer;release.assets['darwin-arm64'].name=assetName(newer,platform,arch);
+  again.fetch=async url=>new Response(url===RELEASES?JSON.stringify([{tag_name:'v'+newer,assets:[{name:'bridge-update.json'}]}]):signed(release));
+  assert.equal((await again.check()).state,'available');assert.equal(again.status().skipped,undefined);
+  assert.equal(f.installed(),0);
+  const otherChannel=new Updater({current:'1.0.0',platform,arch,key:keys.publicKey,fetch:again.fetch,directory:f.directory,skipFile,install:async()=>{}});
+  assert.equal(await otherChannel.skippedVersion(),'');
+});
 test('corrupt and truncated downloads cannot stop the gateway or invoke installation',async t=>{
   for(const packageBytes of [Buffer.from('fixture bad'),Buffer.from('short'),Buffer.alloc(100)]){
     const f=await fixture(t,{packageBytes});await f.updater.check();assert.equal((await f.updater.install()).state,'error');assert.equal(f.installed(),0);assert.deepEqual(await fs.readdir(f.directory),[]);

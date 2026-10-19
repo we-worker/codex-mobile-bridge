@@ -1,9 +1,11 @@
 """A running gateway must resolve updated binaries before starting new helpers."""
 import io
 import json
+import sqlite3
 import tempfile
 import unittest
 import uuid
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -115,6 +117,9 @@ class RuntimeConsumerTests(unittest.TestCase):
 
     def test_fork_start_failure_allows_same_request_retry(self):
         source, child = str(uuid.uuid4()), str(uuid.uuid4())
+        with closing(sqlite3.connect(self.root / 'state_fixture.sqlite')) as database, database:
+            database.execute('CREATE TABLE threads (id TEXT PRIMARY KEY, originator TEXT, archived INTEGER, updated_at INTEGER)')
+            database.execute('INSERT INTO threads VALUES (?, ?, 0, 0)', (source, 'Codex Desktop'))
         session = LiveSession(source)
         session.state = {'id': source, 'title': 'Original', 'cwd': str(self.root),
                          'modelProvider': 'custom', 'latestModel': 'fixture',

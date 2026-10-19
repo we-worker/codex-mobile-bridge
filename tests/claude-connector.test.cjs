@@ -21,8 +21,8 @@ const api = {
   async sendMessage(...args) { calls.push(args); },
   async getTranscript() {return [
     {type:'user',isSynthetic:true,uuid:'retry',message:{role:'user',content:[{type:'text',text:'internal retry'}]}},
-    {type:'assistant',uuid:'answer',message:{role:'assistant',content:[{type:'thinking',thinking:'PRIVATE_THINKING'},{type:'text',text:'visible'}]}},
-    {type:'result',uuid:'native-result',subtype:'success',is_error:false,num_turns:2,parent_tool_use_id:null,result:'PRIVATE_RESULT',usage:{secret:'PRIVATE_USAGE'},apiKey:'SECRET'},
+    {type:'assistant',uuid:'answer',message:{role:'assistant',model:'fixture-model',usage:{input_tokens:10,cache_creation_input_tokens:20,cache_read_input_tokens:30,output_tokens:999,secret:'PRIVATE_USAGE'},content:[{type:'thinking',thinking:'PRIVATE_THINKING'},{type:'text',text:'visible'}]}},
+    {type:'result',uuid:'native-result',subtype:'success',is_error:false,num_turns:2,parent_tool_use_id:null,result:'PRIVATE_RESULT',usage:{secret:'PRIVATE_USAGE'},apiKey:'SECRET',modelUsage:{'fixture-model':{inputTokens:9999,contextWindow:200000,secret:'PRIVATE_MODEL_USAGE'},'other-model':{contextWindow:1000000},'bad-model':{contextWindow:-1}}},
     {type:'result',uuid:'nested-result',subtype:'success',is_error:false,parent_tool_use_id:'tool-id',isSidechain:true},
     {type:'result',uuid:'synthetic-result',subtype:'success',is_error:false,isSyntheticResult:true},
     {type:'result',uuid:'failure',subtype:'error_during_execution',is_error:true,num_turns:0},
@@ -68,13 +68,14 @@ const waitFor = async predicate => {
   assert.equal(response.result[0].isSynthetic,true);
   assert.ok(!JSON.stringify(response).includes('PRIVATE_THINKING'));
   assert.equal(response.result[1].message.content[0].text,'visible');
+  assert.deepEqual(response.result[1].message.usage,{input_tokens:10,cache_creation_input_tokens:20,cache_read_input_tokens:30});
   assert.deepEqual(response.result.slice(2),[
-    {type:'result',uuid:'native-result',subtype:'success',is_error:false,num_turns:2,parent_tool_use_id:null},
+    {type:'result',uuid:'native-result',subtype:'success',is_error:false,num_turns:2,parent_tool_use_id:null,modelUsage:{'fixture-model':{contextWindow:200000},'other-model':{contextWindow:1000000}}},
     {type:'result',uuid:'nested-result',subtype:'success',is_error:false,parent_tool_use_id:'tool-id',isSidechain:true},
     {type:'result',uuid:'synthetic-result',subtype:'success',is_error:false,isSyntheticResult:true},
     {type:'result',uuid:'failure',subtype:'error_during_execution',is_error:true,num_turns:0},
   ]);
-  assert.ok(!JSON.stringify(response).includes('PRIVATE_RESULT')&&!JSON.stringify(response).includes('PRIVATE_USAGE')&&!JSON.stringify(response).includes('SECRET'));
+  assert.ok(!JSON.stringify(response).includes('PRIVATE_RESULT')&&!JSON.stringify(response).includes('PRIVATE_USAGE')&&!JSON.stringify(response).includes('PRIVATE_MODEL_USAGE')&&!JSON.stringify(response).includes('SECRET'));
   failWrites=1;catalogHung=true;
   request=pack({type:'request',seq:6,surface:'code',method:'mobileCatalog',args:['local_test'],expires:Date.now()/1000+10});
   await waitFor(()=>response.seq===6 && response.done);

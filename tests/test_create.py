@@ -191,6 +191,41 @@ class CreationTests(unittest.TestCase):
                 with self.assertRaises(ValueError):self.bridge.create_chat(project,title,request)
             create.assert_not_called()
 
+    def test_cli_creation_uses_known_cli_directory_and_never_opens_desktop(self):
+        cwd = str(self.root)
+        self.bridge.store.list = lambda **kwargs: [{'origin': 'cli', 'cwd': cwd}]
+        project = next(p for p in self.bridge.projects() if p['type'] == 'cli')
+        with patch.object(self.bridge.cli_sessions, 'create', return_value={'id': self.tid, 'cwd': cwd,
+                'modelProvider': 'openai', 'turns': [], 'requests': []}) as created, \
+             patch('bridge.app.service.open_in_desktop') as opened:
+            request = str(uuid.uuid4())
+            first = self.bridge.create_chat(project['key'], 'CLI chat', request, kind='cli')
+            second = self.bridge.create_chat(project['key'], 'CLI chat', request, kind='cli')
+            self.assertEqual(first['id'], self.tid)
+            self.assertEqual(second['id'], self.tid)
+            self.assertFalse(first['opened'])
+            self.assertEqual(created.call_args.args, (cwd, 'CLI chat'))
+            self.assertIn('on_start', created.call_args.kwargs)
+            self.assertIn('on_created', created.call_args.kwargs)
+            opened.assert_not_called()
+        with self.assertRaises(ValueError):
+            self.bridge.create_chat(project['key'], 'CLI chat', request, kind='desktop')
+
+    def test_cli_creation_does_not_replay_unknown_started_request(self):
+        from bridge.clients.codex.app_server import AppServerUnavailable
+        self.bridge.store.list = lambda **kwargs: [{'origin': 'cli', 'cwd': str(self.root)}]
+        project = next(p for p in self.bridge.projects() if p['type'] == 'cli')
+        request = str(uuid.uuid4())
+        def uncertain(cwd, title, on_start, on_created):
+            on_start()
+            raise AppServerUnavailable('timeout after thread/start')
+        with patch.object(self.bridge.cli_sessions, 'create', side_effect=uncertain) as create:
+            with self.assertRaises(AppServerUnavailable):
+                self.bridge.create_chat(project['key'], 'CLI chat', request, kind='cli')
+            with self.assertRaises(CreationError):
+                self.bridge.create_chat(project['key'], 'CLI chat', request, kind='cli')
+            self.assertEqual(create.call_count, 1)
+
     def test_remote_creation_keeps_host_and_literal_payload(self):
         host='remote-ssh-discovered:test'
         self.bridge.hosts.state=lambda:{'remote-projects':[{'id':'r','hostId':host,'remotePath':'/remote/project'}],

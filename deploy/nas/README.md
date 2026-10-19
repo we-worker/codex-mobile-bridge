@@ -2,6 +2,8 @@
 
 适合已经用 NAS 反向代理 Docker 应用、已有域名和 HTTPS 证书的用户。无需 Cloudflare。
 
+如果穿透客户端或 HTTPS 反代运行在**网关所在电脑**，上游直接指向该电脑的回环端口，请使用 已提供的[已有穿透 / 反向代理简易配置](../../docs/external-tunnel.md)。本页用于 NAS 等**其他设备**反代到电脑局域网地址的进阶方案。
+
 ```text
 手机 → https://codex.example.com
      → NAS 的 HTTPS 反向代理

@@ -23,7 +23,7 @@ HTTP、中继、IPC、mailbox 等测试使用本机隔离监听和合成数据�
 | 客户端发现/启停 | `test_client_*`、`test_desktop_discovery*`、`test_desktop_idle*` |
 | Claude/DSH | `test_claude_*`、`test_deepseek_*`、`test_desktop_sessions*` |
 | 认证/配对/网络 | `test_auth*`、`test_pairing*`、`test_login_security*`、`test_shared_relay*`、`test_network*` |
-| 会话与发送/授权 | `test_bridge*`、`test_desktop_*`、`test_goal_*`、`test_permissions*`、`test_timeline*` |
+| 会话与发送/授权 | `test_bridge*`、`test_cli_bridge_integration.py`、`test_codex_app_server.py`、`test_codex_cli_session.py`、`test_desktop_*`、`test_goal_*`、`test_permissions*`、`test_timeline*` |
 | 文件/终端 | `test_workspace*`、`test_download_ranges*`、`test_*terminal*` |
 | 目录与资源边界 | `test_platform_architecture.py`、`test_resource_layout.py`、`test_web_assets.py` |
 

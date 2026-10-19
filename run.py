@@ -261,7 +261,7 @@ def main(connections=None, connection_secrets=None):
         notifications.start()
         address_notifications.start()
         bridge.accounts.monitor.start()
-        control.start(server.shutdown, server.pairing.control, server.instance_id, server.auth, bridge.account.control, server.notifications.control, bridge.accounts.control, server.harness.control, server.desktop_sessions.control)
+        control.start(server.shutdown, server.pairing.control, server.instance_id, server.auth, bridge.account.control, server.notifications.control, bridge.accounts.control, server.harness.control, server.desktop_sessions.control, bridge.cli_access.control)
         for listener in servers[1:]:
             thread = threading.Thread(target=listener.serve_forever, kwargs={'poll_interval': 0.5}, daemon=True)
             thread.start()

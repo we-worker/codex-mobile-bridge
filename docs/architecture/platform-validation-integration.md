@@ -1,4 +1,6 @@
-# Windows / Linux 验证分支整合
+# Windows / Linux 验证分支整合（2026-10-10 归档）
+
+本页保留目录重组阶段的来源与当时验证范围。v2.1.0 后续的真实 Windows、Linux SSH 和 Test 安装包验收已完成列明项目，当前状态见[平台验收总览](../../VERIFICATION.md#v210-platform-status)；不要将本页末尾的阶段限制作为当前状态。
 
 ## 来源与本地回退点
 

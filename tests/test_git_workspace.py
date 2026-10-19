@@ -98,7 +98,10 @@ class GitWorkspaceTests(unittest.TestCase):
         self.assertTrue(self.status()['entries'][0]['conflict'])
         self.assertIn('<<<<<<<', self.diff('hello.txt', 'conflict')['text'])
         with self.assertRaises(ValueError): self.diff('hello.txt', 'staged')
-        (self.root / 'external').symlink_to(self.root.parent / 'private.txt')
+        try:
+            (self.root / 'external').symlink_to(self.root.parent / 'private.txt')
+        except OSError as exc:
+            self.skipTest('File symlink unavailable: ' + str(exc))
         (self.root.parent / 'private.txt').write_text('secret')
         with self.assertRaises((ValueError, OSError)): self.diff('external', 'untracked')
 

@@ -2,11 +2,15 @@
 function runI18nTests(){
   const checks=[];const check=(value,label)=>{if(!value)throw Error(label);checks.push(label);};
   const previous=BridgeI18n.language(),originalState=state,originalDraft=$('message').value;
+  const originalWorkbench=workbench.current,originalCatalogStarted=catalogStarted;
   const messageContent=()=>[...$('messages').querySelectorAll('.message-body')].map(n=>n.innerHTML).join('');
   const content=messageContent(),originalFetch=window.fetch;let requests=0;
   const fixture={host:'local',connected:true,status:'idle',historyComplete:true,title:'中文聊天内容',cwd:'/test',requests:[{id:'i18n-question',supported:true,method:'item/tool/requestUserInput',params:{questions:[{id:'choice',question:'原问题保持',options:[{label:'原选项保持'}]},{id:'text',question:'原自由输入问题'}]}}]};
   const change=language=>{$('phone-language').value=language;$('phone-language').dispatchEvent(new Event('change'));};
+  let fixtureWorkbench;
   try{
+    // Match an opened chat without loading real model/Skill catalogs.
+    workbench.open('i18n-fixture','local');fixtureWorkbench=workbench.current;catalogStarted=true;
     window.fetch=()=>{requests++;throw Error('Language change must not send a request');};
     renderState(fixture);
     const select=$('approvals').querySelector('select');select.value='__custom__';select.dispatchEvent(new Event('change'));
@@ -25,7 +29,11 @@ function runI18nTests(){
     check($('approvals').querySelector('button').disabled,'Submitted approval stays disabled after language change');
     check(requests===0,'Switching languages sends no requests');
   }finally{
-    window.fetch=originalFetch;submittedRequestIds.delete('i18n-question');change(previous);$('message').value=originalDraft;if(originalState){approvalStamp='';renderState(originalState);}
+    window.fetch=originalFetch;submittedRequestIds.delete('i18n-question');change(previous);$('message').value=originalDraft;
+    state=originalState;catalogStarted=originalCatalogStarted;
+    if(fixtureWorkbench)workbench.sessions.delete(fixtureWorkbench.key);
+    workbench.current=originalWorkbench;workbench.paint();approvalStamp='';
+    if(originalState)renderState(originalState);else $('approvals').replaceChildren();
   }
   return {passed:checks.length,checks};
 }

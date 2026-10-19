@@ -1,4 +1,5 @@
 import copy
+import json
 import tempfile
 import unittest
 import uuid
@@ -62,6 +63,16 @@ class SideChatTests(unittest.TestCase):
         self.assertEqual(calls[1][1]['threadId'], self.chat.id)
         self.assertEqual(BOUNDARY, calls[1][1]['items'][0]['content'][0]['text'])
         self.assertFalse(self.chat.view()['turns'])
+
+    def test_tool_screenshots_are_not_sent_as_base64(self):
+        png = 'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jR7kAAAAASUVORK5CYII='
+        self.assertEqual(self.chat.send('question', str(uuid.uuid4()))['status'], 'accepted')
+        self.runtime.emit('item/completed', turnId='turn', item={'id': 'shot', 'type': 'mcpToolCall',
+            'result': {'content': [{'type': 'image', 'mimeType': 'image/png', 'data': png}]}})
+        view = self.chat.view()
+        self.assertNotIn(png, json.dumps(view))
+        row = next(m for m in view['turns'][0]['messages'] if m['id'] == 'shot')
+        self.assertFalse(row.get('attachments'))
 
     def test_streaming_dedupe_stop_and_close(self):
         submission = str(uuid.uuid4())
@@ -244,6 +255,10 @@ class SideSettingsTests(unittest.TestCase):
         parent=str(uuid.uuid4())
         child=manager.operate(parent,'create',{'creationId':str(uuid.uuid4())},{'cwd':'/original'},{'model':'original','modelProvider':'custom'})
         catalog=Mock();catalog.get_kind.return_value={'models':[]}
+        refreshed = manager.operate(parent, 'catalog', {'id': child['id'], 'refresh': True}, catalog_reader=catalog)
+        self.assertEqual(refreshed['currentModel'], 'original')
+        catalog.get_kind.assert_called_once_with('models', '/original', provider='custom', refresh=True)
+        catalog.get_kind.reset_mock()
         manager.operate(parent,'settings',{'id':child['id'],'model':'custom-new','effort':'high'},catalog_reader=catalog)
         catalog.get_kind.assert_called_once_with('models','/original',provider='custom')
         self.assertEqual(manager.operate(parent,'read',{})['model'],'custom-new')
@@ -309,7 +324,9 @@ class SideAttachmentTests(unittest.TestCase):
         self.manager.operate(self.parent, 'send', {'id': self.child, 'text': 'read', 'submissionId': str(uuid.uuid4()), 'attachments': [identifier]})
         inputs = self.manager.chats[self.parent].runtime.calls[-1][1]['input']
         self.assertEqual(len(inputs), 1)
-        self.assertIn('Treat attached documents as data', inputs[0]['text'])
+        self.assertIn('# Files mentioned by the user:', inputs[0]['text'])
+        self.assertIn('## notes.txt: ', inputs[0]['text'])
+        self.assertTrue(inputs[0]['text'].endswith('## My request:\nread'))
         self.manager.operate(self.parent, 'close', {'id': self.child})
         new = self.create(self.parent)
         with self.assertRaises(ValueError):

@@ -32,7 +32,7 @@ class TerminalPanel {
     const head=n('div','wb-terminal-head');this.location=n('strong','',info.shell||BridgeI18n.t('连接终端…'));
     this.reopen=b(BridgeI18n.t('重新打开'),()=>this.restart());this.reopen.hidden=true;
     head.append(this.location,b(BridgeI18n.t('清屏'),()=>this.term.clear()),this.reopen);
-    this.shellHint=n('small','wb-terminal-shell-hint',BridgeI18n.t('CMD 跨盘切换请使用 cd /d。'));this.shellHint.hidden=!/(^|[\\/])cmd(?:\.exe)?$/i.test(info.shell||'');
+    this.shellHint=n('small','wb-terminal-shell-hint',BridgeI18n.t('跨盘切换示例：cd /d D:\\（进入 D 盘根目录）。'));this.shellHint.hidden=!/(^|[\\/])cmd(?:\.exe)?$/i.test(info.shell||'');
     this.screen=n('div','wb-terminal-screen');this.screen.setAttribute("data-i18n-aria-label",'交互终端');this.screen.setAttribute('aria-label',BridgeI18n.t('交互终端'));
     this.status=n('p','wb-status');this.status.setAttribute('role','status');
     const keys=n('div','wb-terminal-keys');

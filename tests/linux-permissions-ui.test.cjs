@@ -9,11 +9,11 @@ class Element {
   close(){this.open=false;for(const fn of this.listeners.close||[])fn();}
 }
 const catalog={current:'ask',options:[{preset:'ask',available:true},{preset:'auto-review',available:false,reason:'Desktop setting required'},{preset:'full-access',available:true}]};
-function fixture(){
+function fixture(nativeCli=false){
   const dialog=new Element(),calls=[],saved=[],context=vm.createContext({document:{createElement:()=>new Element(),createElementNS:()=>new Element()},BridgeI18n:{t:s=>s},confirm:()=>true});
   vm.runInContext(fs.readFileSync(path.join(__dirname,'../web/features/chat/permissions.js'),'utf8'),context);
   let current=true,load=async()=>catalog,save=async preset=>{calls.push(preset);return {confirmed:true};};
-  return {dialog,calls,saved,open:()=>context.permissionPicker(dialog,{load:()=>load(),save:p=>save(p),isCurrent:()=>current,onSaved:r=>saved.push(r)}),
+  return {dialog,calls,saved,open:()=>context.permissionPicker(dialog,{nativeCli,load:()=>load(),save:p=>save(p),isCurrent:()=>current,onSaved:r=>saved.push(r)}),
     buttons:()=>dialog.children[0].children,status:()=>dialog.children[1],refresh:()=>dialog.children[2],
     setCurrent:v=>current=v,setLoad:v=>load=v,setSave:v=>save=v};
 }
@@ -26,6 +26,13 @@ test('unavailable options explain why and stay disabled after a failed or unconf
   assert.equal(ui.status().textContent,'Rejected');assert.equal(auto.disabled,true);assert.equal(ask.disabled,false);
   ui.setSave(async()=>({confirmed:false}));await ask.onclick();
   assert.equal(ui.saved.length,0);assert.equal(ui.dialog.open,true);assert.equal(auto.disabled,true);
+});
+test('native CLI picker uses runtime wording while Desktop wording remains unchanged',async()=>{
+  const cli=fixture(true);cli.setLoad(async()=>({current:'ask',options:[{preset:'ask',available:true}]}));
+  await cli.open();cli.setSave(async()=>({confirmed:false}));await cli.buttons()[0].onclick();
+  assert.match(cli.status().textContent,/CLI 运行时/);assert.doesNotMatch(cli.status().textContent,/桌面/);
+  const desktop=fixture();await desktop.open();desktop.setSave(async()=>({confirmed:false}));await desktop.buttons()[0].onclick();
+  assert.match(desktop.status().textContent,/桌面确认/);
 });
 test('a fresh catalog may enable a previously hidden option',async()=>{
   const ui=fixture();await ui.open();ui.setLoad(async()=>({current:'auto-review',options:[{preset:'auto-review',available:true}]}));

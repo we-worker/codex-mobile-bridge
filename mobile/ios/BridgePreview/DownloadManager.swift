@@ -57,7 +57,16 @@ final class DownloadManager: NSObject, URLSessionDataDelegate, @unchecked Sendab
     static func allows(_ url: URL, origin: String) -> Bool {
         guard GatewayURL.same(url, origin), url.fragment == nil else { return false }
         return GatewayURL.apiPath(url, origin).range(of: "^/api/sessions/[0-9a-f-]{36}/(?:files/[a-f0-9]{64}|workspace/download)$", options: .regularExpression) != nil ||
-            GatewayURL.apiPath(url, origin).range(of: "^/api/desktop-sessions/(?:claude|deepseek)/workspace/download$", options: .regularExpression) != nil
+            GatewayURL.apiPath(url, origin).range(of: "^/api/desktop-sessions/(?:claude|deepseek)/workspace/download$", options: .regularExpression) != nil ||
+            diagnosticReport(url, origin: origin)
+    }
+
+    static func diagnosticReport(_ url: URL, origin: String) -> Bool {
+        guard GatewayURL.same(url, origin), url.fragment == nil,
+              GatewayURL.apiPath(url, origin) == "/api/sessions/diagnostics",
+              let components = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return false }
+        guard let query = components.percentEncodedQuery else { return true }
+        return query.range(of: "^thread=[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$", options: .regularExpression) != nil
     }
 
     func start(_ url: URL, origin: String) {
@@ -73,7 +82,7 @@ final class DownloadManager: NSObject, URLSessionDataDelegate, @unchecked Sendab
         queue.async {
             guard [.connecting, .downloading].contains(self.value.phase) else { return }
             self.stopTask(); self.value.phase = .paused; self.value.speed = 0
-            self.value.canResume = self.value.received == 0 || self.etag != nil && self.canContinue
+            self.value.canResume = self.value.received == 0 || self.etag != nil && self.canContinue && !(self.url.map { Self.diagnosticReport($0, origin: self.value.origin) } ?? false)
             self.value.message = self.value.canResume ? "" : "当前服务器不支持续传，请重新下载"
             self.publish()
         }
@@ -132,7 +141,7 @@ final class DownloadManager: NSObject, URLSessionDataDelegate, @unchecked Sendab
     }
     private func fail(_ message: String, restart: Bool = false) {
         stopTask(); value.phase = .failed; value.message = message; value.speed = 0
-        value.canResume = !restart && (value.received == 0 || etag != nil && canContinue)
+        value.canResume = !restart && (value.received == 0 || etag != nil && canContinue && !(url.map { Self.diagnosticReport($0, origin: value.origin) } ?? false))
         publish()
     }
     private func fetch() {
@@ -230,7 +239,7 @@ final class DownloadManager: NSObject, URLSessionDataDelegate, @unchecked Sendab
                 guard tag != nil else { throw TransferError(message: "网关不支持安全续传，请更新网关后重试", restart: true) }
             } else if response.statusCode == 200 && value.received == 0 {
                 wholeResponse = true; expectedBytes = response.expectedContentLength >= 0 ? response.expectedContentLength : nil
-                value.total = expectedBytes; canContinue = tag != nil
+                value.total = expectedBytes; canContinue = tag != nil && !Self.diagnosticReport(responseURL, origin: value.origin)
                 if let total = value.total, total > Self.limit { throw TransferError(message: "下载响应格式不正确，请重新下载", restart: true) }
             } else { throw TransferError(message: value.received > 0 ? "文件已变化或服务器不支持续传，请重新下载" : "下载失败，请检查网络后重试", restart: value.received > 0) }
             etag = tag

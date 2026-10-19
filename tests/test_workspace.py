@@ -46,8 +46,11 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_traversal_and_symlinks_never_escape(self):
         outside = Path(self.temp.name) / 'private'; outside.mkdir(); (outside / 'secret').write_text('private')
-        (self.root / 'link').symlink_to(outside, target_is_directory=True)
-        (self.root / 'secret-link').symlink_to(outside / 'secret')
+        try:
+            (self.root / 'link').symlink_to(outside, target_is_directory=True)
+            (self.root / 'secret-link').symlink_to(outside / 'secret')
+        except OSError as exc:
+            self.skipTest('Directory symlink unavailable: ' + str(exc))
         for path in ('../private/secret', '/etc/passwd', 'folder/../../private', 'C:\\private', 'file:stream', 'folder//file'):
             with self.assertRaises((ValueError, PermissionError)): operate(str(self.root), 'preview', {'path': path})
         for path in ('link/secret', 'secret-link'):

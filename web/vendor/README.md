@@ -25,3 +25,15 @@
 - `texmath.js` SHA-256：`926e075a1745e1019813b8418b90183feea0c7b3782c85dceb4f246da999edc6`
 
 KaTeX 脚本、样式和字体原样保存到 `katex/`；texmath 原样保存为 `texmath.js`。所有资源由本机网关提供，运行时不访问 CDN。公式升级后运行 `tests/browser/math.browser.js`，检查代码隔离、危险 TeX、流式输入和窄屏公式滚动。
+
+## PrismJS
+
+- 固定版本：1.30.0（MIT，见 `prism/LICENSE`）。
+- 文件：`prism/source-view.min.js`，包含 core、markup、CSS、C-like、JavaScript、Python、TypeScript、JSX、TSX、JSON、YAML、TOML、Bash、PowerShell、Batch。
+- 仅由源码阅读器调用词元接口，不启用全页自动高亮；未知语言或超出高亮预算时显示原文。详见[源码约定](../../.agents/notes/implemented/feature/2026-10-13-source-code-view.md)。
+
+## PDF.js
+
+- 固定版本：5.6.205（Apache-2.0，见 `pdfjs/LICENSE`）。
+- 文件：legacy `pdfjs/pdf.min.mjs`、同版本 `pdfjs/pdf.worker.min.mjs`、`pdfjs/cmaps/` 和 `pdfjs/standard_fonts/`。
+- CMap 与标准字体分别保留目录内的许可证；所有资源随网关分发，不使用 CDN。模块与 worker 必须同步更新，并检查中文、扫描页、混合页尺寸、文字选择与手机 WebView 兼容性。详见[PDF/HTML 约定](../../.agents/notes/implemented/feature/2026-10-13-pdf-html-preview-and-source-mode.md)。

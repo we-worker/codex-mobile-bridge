@@ -2,6 +2,7 @@
 import tempfile
 import json
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -49,6 +50,8 @@ class ClientLifecycleTests(unittest.TestCase):
         self.root = Path(self.temp.name)
         self.claude, self.dsh = Mock(), Mock()
         self.claude.status.return_value = {'connected': True}
+        self.claude.desktop_listing.return_value = {'connected': True, 'complete': True, 'coverage': {'code': True, 'cowork': True}, 'sessions': [
+            {'id': 'one', 'status': 'idle', 'runtimeKnown': True, 'requests': []}]}
         self.claude.call.side_effect = lambda action, *args: ({'connected': True, 'complete': True,
             'sessions': [{'id': 'one', 'status': 'idle', 'runtimeKnown': True, 'requests': []}]} if action == 'list' else {'models': [{'id': 'model'}]})
         self.dsh.reused = False
@@ -69,6 +72,8 @@ class ClientLifecycleTests(unittest.TestCase):
             patcher.start(); self.addCleanup(patcher.stop)
         self.manager = DesktopSessions(self.root, self.bridge, gateway_running=True)
         self.addCleanup(self.manager.close)
+        # Lifecycle store mocks do not model credential files or their locks.
+        self.manager._account_model_identity = Mock(return_value='fixture-account')
         discovered = {}
         for provider in ('codex', 'claude', 'deepseek'):
             executable = self.root/provider; executable.write_bytes(b'fixture'); executable.chmod(0o700)
@@ -97,6 +102,96 @@ class ClientLifecycleTests(unittest.TestCase):
 
     def finish(self, descriptor, **kwargs):
         self.running = False
+
+    def test_client_status_returns_pending_without_waiting_for_startup_lock(self):
+        manager = self.manager
+        previous = manager.client_snapshot
+        manager.client_cache = None
+        entered, release = threading.Event(), threading.Event()
+        def hold_startup():
+            with manager.client_lock:
+                entered.set()
+                release.wait(3)
+        holder = threading.Thread(target=hold_startup)
+        holder.start(); self.assertTrue(entered.wait(1))
+        with patch.object(manager, 'clients', wraps=manager.clients) as refresh:
+            try:
+                started = time.monotonic()
+                first = manager.clients_status()
+                self.assertLess(time.monotonic() - started, 0.2)
+                self.assertTrue(first['pending'])
+                self.assertEqual(first['clients'], previous['clients'])
+                self.assertTrue(manager.client_refreshing)
+                manager.client_snapshot = None
+                cold = manager.clients_status()
+                self.assertEqual(cold, {'clients': [], 'pending': True})
+                self.assertTrue(manager.client_refreshing)
+            finally:
+                release.set(); holder.join(2)
+            deadline = time.monotonic() + 3
+            while manager.client_refreshing and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(refresh.call_count, 1)
+            self.assertTrue(refresh.call_args.kwargs['refresh'])
+        ready = manager.clients_status()
+        self.assertFalse(ready['pending'])
+        self.assertEqual(len(ready['clients']), 3)
+
+    def test_client_status_failed_refresh_is_visible_and_can_retry(self):
+        manager = self.manager
+        manager.client_cache = None
+        manager.client_snapshot = None
+        original = manager.clients
+        with patch.object(manager, 'clients', side_effect=RuntimeError('fixture failure')):
+            self.assertTrue(manager.clients_status()['pending'])
+            deadline = time.monotonic() + 2
+            while manager.client_refreshing and time.monotonic() < deadline:
+                time.sleep(0.01)
+            failed = manager.clients_status()
+            self.assertFalse(failed['pending'])
+            self.assertIn('refreshError', failed)
+        manager.client_refresh_retry_at = 0
+        with patch.object(manager, 'clients', wraps=original) as refresh:
+            self.assertTrue(manager.clients_status()['pending'])
+            deadline = time.monotonic() + 3
+            while manager.client_refreshing and time.monotonic() < deadline:
+                time.sleep(0.01)
+            self.assertEqual(refresh.call_count, 1)
+        self.assertFalse(manager.clients_status()['pending'])
+        manager.closed.set()
+        with self.assertRaises(BridgeUnavailable):
+            manager.clients_status()
+
+    def test_client_status_does_not_publish_a_refresh_after_close(self):
+        manager = self.manager
+        manager.client_cache = None
+        manager.client_snapshot = None
+        entered, release = threading.Event(), threading.Event()
+        original = manager.clients
+        def delayed_refresh(refresh=False):
+            entered.set()
+            release.wait(2)
+            return original(refresh=refresh)
+        with patch.object(manager, 'clients', side_effect=delayed_refresh):
+            self.assertTrue(manager.clients_status()['pending'])
+            self.assertTrue(entered.wait(1))
+            manager.closed.set()
+            release.set()
+            deadline = time.monotonic() + 3
+            while manager.client_refreshing and time.monotonic() < deadline:
+                time.sleep(0.01)
+        self.assertIsNone(manager.client_snapshot)
+        with self.assertRaises(BridgeUnavailable):
+            manager.clients_status()
+
+    def test_client_status_cache_never_decides_enable_write(self):
+        manager = self.manager
+        manager.gateway_running = False
+        manager.client_cache = (time.monotonic(), {'clients': [{'id': 'claude', 'selectable': False}]})
+        with patch.object(manager, 'clients', wraps=manager.clients) as read:
+            value = manager.toggle_client({'provider': 'claude', 'enabled': True})
+        self.assertTrue(any(call.kwargs.get('refresh') is True for call in read.call_args_list))
+        self.assertTrue(next(row for row in value['clients'] if row['id'] == 'claude')['enabled'])
 
     def test_codex_cached_runtime_reuses_scanned_gui_for_readiness_and_launch(self):
         self.accounts.index['desktopExecutable'] = ''
@@ -133,6 +228,13 @@ class ClientLifecycleTests(unittest.TestCase):
         self.assertFalse(codex['configured'])
         self.assertFalse(codex['connected'])
 
+    def test_unconfigured_codex_switch_matches_default_enabled_preference(self):
+        self.manager.config['enabled'].pop('codex')
+        self.accounts.info.current = lambda: {'status': 'signedOut'}
+        codex = next(row for row in self.manager.clients(refresh=True)['clients'] if row['id'] == 'codex')
+        self.assertFalse(codex['configured'])
+        self.assertEqual(codex['enabled'], self.manager.enabled('codex'))
+
     def toggle(self, provider, enabled):
         return self.manager.toggle_client({'provider': provider, 'enabled': enabled})
 
@@ -164,8 +266,22 @@ class ClientLifecycleTests(unittest.TestCase):
         saved = json.loads(self.manager.config_path.read_text())
         self.assertEqual(saved['enabled'], dict.fromkeys(('codex', 'claude', 'deepseek'), False))
 
+    def test_all_disabled_preferences_survive_restart_without_launching_a_client(self):
+        for provider in ('codex', 'claude', 'deepseek'):
+            self.manager.toggle_client({'provider': provider, 'enabled': False, 'quitDesktop': False})
+        reopened = DesktopSessions(self.root, self.bridge, gateway_running=True)
+        try:
+            with patch.object(reopened, 'scan') as scan, patch.object(reopened, 'toggle_client') as toggle:
+                reopened.start_enabled()
+            scan.assert_called_once_with()
+            toggle.assert_not_called()
+            self.assertEqual([row['enabled'] for row in reopened.clients(refresh=True)['clients']], [False] * 3)
+            self.assertTrue(self.running)
+        finally:
+            reopened.close()
+
     def test_explicit_quit_keeps_busy_guard_and_enabled_preference(self):
-        self.claude.call.side_effect = lambda *args: {'complete': True, 'sessions': [
+        self.claude.desktop_listing.return_value = {'complete': True, 'sessions': [
             {'id': 'one', 'status': 'running', 'runtimeKnown': True, 'requests': []}]}
         with self.assertRaisesRegex(ValueError, '任务运行或等待'):
             self.manager.toggle_client({'provider': 'claude', 'enabled': False, 'quitDesktop': True})
@@ -464,7 +580,7 @@ class ClientLifecycleTests(unittest.TestCase):
     def test_account_switch_checks_idle_before_touching_credentials(self):
         store = Mock()
         self.manager._account_store = Mock(return_value=store)
-        self.claude.call.side_effect = lambda action, *args: {'complete': True, 'sessions': [
+        self.claude.desktop_listing.return_value = {'complete': True, 'sessions': [
             {'id': 'busy', 'status': 'active', 'runtimeKnown': True}]}
         with self.assertRaisesRegex(ValueError, '运行或等待'):
             self.manager.client_accounts('claude', {'operation': 'switch', 'id': 'other'})
@@ -483,7 +599,43 @@ class ClientLifecycleTests(unittest.TestCase):
         result = self.manager.client_accounts('claude', {'operation': 'switch', 'id': 'other'})
         self.assertEqual(calls, ['stop', 'restore', 'launch'])
         self.assertTrue(result['canSwitch'])
+        self.assertEqual(result['modelCatalogIdentity'], 'fixture-account')
         store.commit.assert_called_once_with('transaction')
+
+    def test_optional_claude_cli_sync_reports_partial_failure_after_desktop_verified(self):
+        store = Mock()
+        store.restore.return_value = 'transaction'
+        store.public.return_value = {'accounts': [{'id': 'other', 'kind': 'api', 'saved': True}],
+                                     'activeId': 'other'}
+        self.manager._account_store = Mock(return_value=store)
+        self.bridge.cli_access = Mock()
+        self.bridge.cli_access.change.side_effect = ValueError('CLI profile rejected')
+        with patch('bridge.features.accounts.cli_sync.LocalCliSync.preflight',
+                   return_value={'sharedWithDesktop': False}):
+            result = self.manager.client_accounts('claude', {'operation': 'switch', 'id': 'other',
+                                                              'syncLocalCli': True})
+        self.assertEqual(result['activeId'], 'other')
+        self.assertEqual(result['cliSync']['status'], 'failed')
+        self.assertEqual(result['cliSync']['desktopStatus'], 'verified')
+        store.rollback.assert_not_called()
+        store.commit.assert_called_once_with('transaction')
+
+    def test_optional_claude_cli_sync_reports_both_targets_verified(self):
+        store = Mock()
+        store.restore.return_value = 'transaction'
+        store.public.return_value = {'accounts': [{'id': 'other', 'kind': 'api', 'saved': True}],
+                                     'activeId': 'other'}
+        self.manager._account_store = Mock(return_value=store)
+        self.bridge.cli_access = Mock()
+        self.bridge.cli_access.change.side_effect = [
+            {'savedId': 'cli-profile'}, {'claude': {'activeId': 'cli-profile'}}]
+        with patch('bridge.features.accounts.cli_sync.LocalCliSync.preflight',
+                   return_value={'sharedWithDesktop': False}):
+            result = self.manager.client_accounts('claude', {'operation': 'switch', 'id': 'other',
+                                                              'syncLocalCli': True})
+        self.assertEqual(result['activeId'], 'other')
+        self.assertEqual(result['cliSync']['status'], 'verified')
+        self.assertEqual(self.bridge.cli_access.change.call_args_list[1].args[0]['id'], 'cli-profile')
 
     def test_failed_account_launch_restores_previous_profile(self):
         store = Mock()
@@ -601,6 +753,59 @@ class ClientLifecycleTests(unittest.TestCase):
         self.claude.connect.assert_not_called()
         self.claude.reconnect.assert_called_once_with()
 
+    def test_cli_only_cold_status_does_not_start_desktop(self):
+        self.claude.status.return_value = {'connected': False, 'cliAvailable': True,
+                                           'cliAuthReady': False}
+        for platform in ('darwin', 'win32'):
+            with self.subTest(platform=platform), patch('bridge.clients.manager.sys.platform', platform):
+                row = next(row for row in self.manager.toggle_client(
+                    {'provider': 'claude', 'enabled': True})['clients'] if row['id'] == 'claude')
+                self.assertTrue(row['selectable'])
+                self.launch.assert_not_called()
+                self.claude.connect.assert_not_called()
+                self.claude.reconnect.assert_not_called()
+
+    def test_claude_desktop_launch_capability_requires_confirmed_stopped_supported_app(self):
+        self.running = False
+        self.claude.status.return_value = {'connected': False, 'installed': True,
+                                           'automaticConnection': 'native-console', 'cliAvailable': True}
+        row = next(row for row in self.manager.clients(refresh=True)['clients'] if row['id'] == 'claude')
+        self.assertTrue(row['canStartDesktop'])
+        self.assertFalse(row['canInitializeDesktop'])
+        self.manager.config['enabled']['claude'] = False
+        row = next(row for row in self.manager.clients(refresh=True)['clients'] if row['id'] == 'claude')
+        self.assertTrue(row['canStartDesktop'])
+        self.manager.config['enabled']['claude'] = True
+        self.manager.gateway_running = False
+        row = next(row for row in self.manager.clients(refresh=True)['clients'] if row['id'] == 'claude')
+        self.assertFalse(row['canStartDesktop'])
+        self.manager.gateway_running = True
+        self.running = True
+        row = next(row for row in self.manager.clients(refresh=True)['clients'] if row['id'] == 'claude')
+        self.assertFalse(row['canStartDesktop'])
+        self.assertTrue(row['canInitializeDesktop'])
+        self.running = False
+        self.inspect.side_effect = lambda _: {'running': False, 'mainPids': [], 'runtimePids': [], 'unknown': True}
+        row = next(row for row in self.manager.clients(refresh=True)['clients'] if row['id'] == 'claude')
+        self.assertFalse(row['canStartDesktop'])
+        self.assertFalse(row['canInitializeDesktop'])
+        self.inspect.side_effect = lambda _: {'running': False, 'mainPids': [], 'runtimePids': [], 'unknown': False}
+        self.claude.status.return_value['automaticConnection'] = 'unavailable'
+        row = next(row for row in self.manager.clients(refresh=True)['clients'] if row['id'] == 'claude')
+        self.assertFalse(row['canStartDesktop'])
+        self.manager.config['discovered']['claude']['installed'] = False
+        row = next(row for row in self.manager.clients(refresh=True)['clients'] if row['id'] == 'claude')
+        self.assertFalse(row['canStartDesktop'])
+
+    def test_missing_native_claude_state_hides_desktop_actions(self):
+        self.claude.status.return_value = {'connected': False, 'installed': True,
+                                           'automaticConnection': 'native-console', 'cliAvailable': True}
+        self.inspect_batch.side_effect = lambda _: {}
+        row = next(row for row in self.manager.clients(refresh=True)['clients'] if row['id'] == 'claude')
+        self.assertFalse(row['canStartDesktop'])
+        self.assertFalse(row['canInitializeDesktop'])
+        self.assertFalse(row['canReconnect'])
+
     def test_macos_account_recovery_only_restores_existing_connection(self):
         self.manager._launch_account_client('claude', self.manager._descriptor('claude'))
         self.launch.assert_called_once()
@@ -672,6 +877,36 @@ class ClientLifecycleTests(unittest.TestCase):
         self.assertEqual(row['connectionState'], 'error')
         self.assertTrue(row['retryable'])
 
+    def test_claude_launch_waits_for_process_and_does_not_cache_false_failure(self):
+        for platform in ('darwin', 'win32'):
+            with self.subTest(platform=platform), patch('bridge.clients.manager.sys.platform', platform):
+                self.running = False
+                self.claude.status.return_value = {'connected': False, 'setupState': 'connecting',
+                                                   'reason': '正在连接 Claude'}
+                with patch('bridge.clients.manager.time.monotonic', return_value=10):
+                    first = self.manager.clients(refresh=True)
+                row = next(r for r in first['clients'] if r['id'] == 'claude')
+                self.assertEqual(row['connectionState'], 'starting')
+                self.assertFalse(row['retryable'])
+                self.assertFalse(row['connected'])
+                self.running = True
+                self.claude.status.return_value = {'connected': True, 'setupState': 'connected'}
+                # A launch must retain the short pending cache instead of the
+                # 15-second idle/error cache hiding its signed connection.
+                with patch('bridge.clients.manager.time.monotonic', return_value=12):
+                    ready = next(r for r in self.manager.clients()['clients'] if r['id'] == 'claude')
+                self.assertEqual(ready['connectionState'], 'connected')
+                self.assertTrue(ready['connected'])
+
+    def test_claude_launch_failure_remains_terminal_without_a_process(self):
+        self.running = False
+        self.claude.status.return_value = {'connected': False, 'setupState': 'failed',
+                                           'reason': 'native launch failed'}
+        row = next(r for r in self.manager.clients(refresh=True)['clients'] if r['id'] == 'claude')
+        self.assertEqual(row['connectionState'], 'error')
+        self.assertEqual(row['reason'], 'native launch failed')
+        self.assertTrue(row['retryable'])
+
     def test_explicit_claude_connect_button_may_launch_and_initialize(self):
         self.running = False
         self.claude.status.return_value = {'connected': False, 'setupState': 'needs-initialization'}
@@ -681,8 +916,8 @@ class ClientLifecycleTests(unittest.TestCase):
         self.claude.reconnect.assert_not_called()
 
     def test_pending_interaction_blocks_stop_and_preserves_preference(self):
-        self.claude.call.side_effect = lambda action, *args: ({'connected': True, 'complete': True,
-            'sessions': [{'id': 'one', 'status': 'idle', 'runtimeKnown': True, 'requests': [{'id': 'question'}]}]} if action == 'list' else {'models': [{'id': 'model'}]})
+        self.claude.desktop_listing.return_value = {'complete': True,
+            'sessions': [{'id': 'one', 'status': 'idle', 'runtimeKnown': True, 'requests': [{'id': 'question'}]}]}
         with self.assertRaisesRegex(ValueError, '任务运行或等待'):
             self.toggle('claude', False)
         self.stop.assert_not_called(); self.claude.cancel.assert_not_called()
@@ -691,10 +926,21 @@ class ClientLifecycleTests(unittest.TestCase):
     def test_missing_surface_or_missing_runtime_state_cannot_prove_idle(self):
         for payload in ({'connected': True, 'complete': False, 'sessions': []},
                         {'connected': True, 'complete': True, 'sessions': [{'id': 'one', 'status': 'idle', 'runtimeKnown': False}]}):
-            self.claude.call.side_effect = lambda *args: payload
+            self.claude.desktop_listing.return_value = payload
             with self.assertRaisesRegex(ValueError, '无法确认'):
                 self.toggle('claude', False)
         self.stop.assert_not_called()
+
+    def test_mac_claude_quit_uses_fresh_desktop_inventory_not_incomplete_cli_history(self):
+        self.claude.call.side_effect = lambda action, *args: ({'complete': False, 'sessions': [
+            {'id': 'unrelated-cli-history', 'backend': 'cli', 'status': 'idle', 'runtimeKnown': False}]} if action == 'list' else {'models': [{'id': 'model'}]})
+        self.claude.desktop_listing.reset_mock()
+        with patch.object(self.manager, 'clients', return_value={'clients': []}):
+            self.manager.toggle_client({'provider': 'claude', 'enabled': False, 'quitDesktop': True})
+        self.claude.desktop_listing.assert_called_once_with()
+        self.assertFalse(any(call.args[0] == 'list' for call in self.claude.call.call_args_list))
+        self.stop.assert_called_once()
+        self.assertFalse(self.manager.enabled('claude'))
 
     def test_unavailable_adapter_never_means_idle(self):
         self.dsh.call.side_effect = BridgeUnavailable('disconnected')
@@ -709,8 +955,8 @@ class ClientLifecycleTests(unittest.TestCase):
         self.assertTrue(self.manager.enabled('deepseek'))
 
     def test_restart_claude_uses_same_busy_guard(self):
-        self.claude.call.side_effect = lambda action, *args: ({'connected': True, 'complete': True,
-            'sessions': [{'id': 'one', 'status': 'active', 'runtimeKnown': True, 'requests': []}]} if action == 'list' else {'models': [{'id': 'model'}]})
+        self.claude.desktop_listing.return_value = {'complete': True,
+            'sessions': [{'id': 'one', 'status': 'active', 'runtimeKnown': True, 'requests': []}]}
         with self.assertRaisesRegex(ValueError, '任务运行或等待'):
             self.manager.control({'action': 'restart-claude'})
         self.stop.assert_not_called(); self.claude.connect.assert_not_called()

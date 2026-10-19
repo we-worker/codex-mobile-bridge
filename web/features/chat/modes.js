@@ -39,8 +39,10 @@ class WorkModes {
   render(view=this.view,sendMode=this.sendMode,sending=this.sending) {
     this.view=view;this.sendMode=sendMode;this.sending=!!sending;
     const busy=this.busy();
-    const t=BridgeI18n.t,goalSupported=!!view&&view.host==='local'&&view.goalRuntimeAvailable!==false;
-    const goalUnavailableReason=!view||view.host!=='local'?'目标模式暂不支持 SSH 主机':'未找到桌面 App 的 Codex 运行时';
+    const t=BridgeI18n.t,goalSupported=!!view&&(view.host==='local'
+      ?view.goalRuntimeAvailable!==false&&view.access?.canUseGoal!==false
+      :view.goalRuntimeAvailable===true&&view.access?.canUseGoal===true);
+    const goalUnavailableReason=view?.host!=='local'&&view?.access?.runtime==='desktop'?'目标模式暂不支持 SSH 主机':view?.access?.source==='cli'?'当前 Codex 会话暂不支持目标模式':view?.host!=='local'?'目标模式暂不支持 SSH 主机':'未找到桌面 App 的 Codex 运行时';
     this.select.value=this.selection||(view?.collaborationMode==='plan'?'plan':'default');
     if(!goalSupported&&this.select.value==='goal')this.select.value='default';
     this.select.disabled=!view||view.loadingHistory||view.activating||busy||sendMode==='steer';

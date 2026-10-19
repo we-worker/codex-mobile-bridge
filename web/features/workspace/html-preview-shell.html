@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HTML preview</title>
+</head>
+<body>
+<script>
+(() => {
+  'use strict';
+  const sourceOrigin = new URL(location.href).origin;
+  const parentWindow = parent;
+  const instance = Array.from(crypto.getRandomValues(new Uint8Array(16)), value => value.toString(16).padStart(2, '0')).join('');
+  const receive = event => {
+    if (event.source !== parent || event.origin !== sourceOrigin ||
+        event.data?.type !== 'bridge-html-preview-content' || event.data.instance !== instance || typeof event.data.text !== 'string' ||
+        new TextEncoder().encode(event.data.text).length > 512 * 1024) return;
+    window.removeEventListener('message', receive);
+    document.open();
+    document.write(event.data.text);
+    document.close();
+    window.addEventListener('keydown', event => {
+      if (event.key === 'Escape') parentWindow.postMessage({type: 'bridge-html-preview-escape', instance}, sourceOrigin);
+    }, true);
+  };
+  window.addEventListener('message', receive);
+  parent.postMessage({type: 'bridge-html-preview-ready', instance}, sourceOrigin);
+})();
+</script>
+</body>
+</html>

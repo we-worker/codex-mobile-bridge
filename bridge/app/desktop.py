@@ -13,7 +13,7 @@ from pathlib import Path
 
 from bridge.resources import project_root
 
-from bridge.features.auth.auth import Auth, password_record, session_hours
+from bridge.features.auth.auth import Auth, password_record, session_hours, session_file_lock
 from bridge.app.lifecycle import read_record, request_stop, request_pairing
 from bridge.features.notifications.channels import Notifications, read_json, write_json, settings, save_settings, publish, publish_bark, publish_pushplus
 from bridge.features.sessions.store import SessionStore, StoreUnavailable
@@ -80,6 +80,8 @@ class Desktop:
         bridge, sessions = self.local_services()
         if action == 'desktop-sessions':
             return sessions.control(value)
+        if action == 'cli-access':
+            return bridge.cli_access.public() if value.get('action') == 'list' else bridge.cli_access.change(value)
         return bridge.accounts.control(value) if action == 'accounts' else bridge.accounts.account(value)
 
     def config(self):
@@ -190,6 +192,10 @@ class Desktop:
                 'runtime': runtime, 'urls': urls, 'externalStatus': external, 'cloudflared': cloudflared, 'quickTunnel': quick}
 
     def save(self, value):
+        with session_file_lock(self.config_path):
+            return self._save(value)
+
+    def _save(self, value):
         old_preferences = self.preferences()
         preferences = {**old_preferences, **{k: v for k, v in value['preferences'].items() if k in old_preferences}}
         preferences['connections'] = access.validate_connections(preferences)
@@ -209,15 +215,23 @@ class Desktop:
         if self.status()['running'] and any(preferences[k] != old_preferences[k] for k in preferences if k != 'autoStart'):
             raise ValueError('请先停止网关再更改网络或运行路径，以免正在使用的地址失效')
         config = self.config()
+        old_auth = dict(config['auth'])
         auth = value['auth']
         if auth.get('mode') not in ('password', 'none') or not isinstance(auth.get('username'), str) or not auth['username'].strip() or len(auth['username']) > 200:
             raise FieldError('请填写有效的登录账号和登录方式', 'username')
         if auth['mode'] == 'none' and any(c['enabled'] and c['accessMode'] == 'tailscale' and c['tailscaleMode'] == 'funnel' for c in preferences['connections']):
             raise FieldError('Funnel 公网入口需要启用网关登录验证；手机仍可扫码配对。', 'auth-mode')
         password = auth.get('password', '')
+        revoke_bound_devices = auth.get('revokeBoundDevices', True)
+        if type(revoke_bound_devices) is not bool:
+            raise FieldError('设备撤销选项格式不正确', 'revoke-bound-devices')
         hours = at_field('session-hours', session_hours, auth.get('sessionHours', config['auth'].get('sessionHours', 12)))
         if not isinstance(password, str) or (password and not 12 <= len(password) <= 1000):
             raise FieldError('新密码至少需要 12 个字符', 'password')
+        preserve_bound_devices = (bool(password) and not revoke_bound_devices and old_auth.get('mode') == 'password'
+                                  and auth['mode'] == 'password' and old_auth.get('username') == auth['username'].strip())
+        if preserve_bound_devices and (self.status()['running'] or self.status()['portOccupied']):
+            raise ValueError('请先停止网关再更改密码并保留手机绑定')
         origins = value.get('origins', [])
         if not isinstance(origins, list):
             raise FieldError('额外 HTTPS 源格式不正确', 'origins')
@@ -243,7 +257,11 @@ class Desktop:
         config['connections'] = preferences['connections']
         config['lanAddresses'] = preferences['lanAddresses']
         config['localAccess'] = preferences['localAccess']
-        write_json(self.config_path, config)
+        if preserve_bound_devices:
+            Auth.preserve_trusted_on_password_change(old_auth, config['auth'], self.data_dir,
+                                                     lambda: write_json(self.config_path, config))
+        else:
+            write_json(self.config_path, config)
         write_json(self.data_dir/'desktop.json', preferences)
         if password:
             (self.data_dir/'首次登录.txt').unlink(missing_ok=True)
@@ -326,6 +344,9 @@ class Desktop:
 
     def accounts(self, value):
         return self.local_control('accounts', 'accountsManagement', value)
+
+    def cli_access(self, value):
+        return self.local_control('cli-access', 'cliAccessManagement', value)
 
     def desktop_sessions(self, value):
         return self.local_control('desktop-sessions', 'desktopSessionsManagement', value)

@@ -18,11 +18,12 @@ class RemoteUnavailable(RuntimeError):
 
 
 def ssh_command(alias):
-    if not alias or alias.startswith('-') or any(c.isspace() for c in alias):
+    if not isinstance(alias, str) or not alias or alias.startswith('-') or any(c.isspace() for c in alias):
         raise RemoteUnavailable('SSH 别名无效')
     return ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ClearAllForwardings=yes',
                '-o', 'ConnectTimeout=8', '-o', 'StrictHostKeyChecking=yes',
-               '-o', 'UpdateHostKeys=no', alias, 'python3 -']
+               '-o', 'UpdateHostKeys=no', alias,
+               'exec "$SHELL" -lc "exec python3 -"']
 
 
 def ssh_read(alias, source, timeout=18):
@@ -75,13 +76,18 @@ class RemoteStore:
         self.alias = alias
         self.home = None  # Never map remote paths onto the local filesystem.
         self.cache = {}
+        self.sources_cache = None
         self.kind_caches = {}
         self.lock = threading.Lock()
 
     def call(self, method, args):
         source = source_text('features/sessions/store.py')
-        return ssh_read(self.alias, source + '\nimport os\ns = SessionStore(Path(os.environ.get("CODEX_HOME", str(Path.home()/".codex"))))\n' +
-                        'print(json.dumps(s.' + method + '(**' + payload(args) + '), ensure_ascii=False))\n', timeout=30)
+        suffix = ('\nimport os\nhome_source = "environment" if os.environ.get("CODEX_HOME") else "default"\n'
+                  's = SessionStore(Path(os.environ.get("CODEX_HOME", str(Path.home()/".codex"))))\n'
+                  'result = s.' + method + '(**' + payload(args) + ')\n')
+        if method == 'discovery_diagnostics':
+            suffix += 'result["homeSource"] = home_source\n'
+        return ssh_read(self.alias, source + suffix + 'print(json.dumps(result, ensure_ascii=False))\n', timeout=30)
 
     def list(self, **kwargs):
         key = json.dumps(kwargs, sort_keys=True)
@@ -92,6 +98,14 @@ class RemoteStore:
             rows = self.call('list', kwargs)
             self.cache[key] = (time.monotonic(), rows)
             return rows
+
+    def available_sources(self):
+        with self.lock:
+            if self.sources_cache and time.monotonic() - self.sources_cache[0] < 15:
+                return list(self.sources_cache[1])
+            sources = self.call('available_sources', {})
+            self.sources_cache = (time.monotonic(), sources)
+            return list(sources)
 
     def notification_changes(self, since=0):
         return self.call('notification_changes', {'since': since})
@@ -114,27 +128,85 @@ class RemoteStore:
     def recencies(self, identifiers):
         return self.call('recencies', {'identifiers': identifiers})
 
+    def discovery_diagnostics(self, thread_id=None):
+        return self.call('discovery_diagnostics', {'thread_id': thread_id})
+
 
 class RemoteCatalog:
     def __init__(self, alias):
         self.alias = alias
         self.kind_caches = {}
         self.lock = threading.RLock()
+        self.model_refreshing = set()
+        self.model_timers = {}
+        self.model_retry_at = {}
+        self.model_closed = False
 
     def invalidate_models(self):
         with self.lock:
             for kind in ('catalog', 'models'):
                 self.kind_caches.pop(kind, None)
+            for timer in self.model_timers.values():
+                timer.cancel()
+            self.model_timers.clear()
+
+    def stop_model_refresh(self):
+        with self.lock:
+            self.model_closed = True
+            for timer in self.model_timers.values():
+                timer.cancel()
+            self.model_timers.clear()
 
     def _source(self):
         source = source_text('features/auth/tls.py') + '\n'
         source += source_text('features/accounts/models.py').replace('from bridge.features.auth.tls import client_context', '') + '\n'
         source += source_text('clients/codex/configuration.py') + '\n'
-        source += source_text('clients/codex/catalog.py').replace('from bridge.features.accounts.models import model_ids', '').replace('from bridge.clients.codex.configuration import magpie_managed', '')
+        source += source_text('clients/codex/catalog.py').replace(
+            'from bridge.features.accounts.models import model_catalog, model_ids', ''
+        ).replace(
+            'from bridge.features.accounts.models import model_ids', ''
+        ).replace(
+            'from bridge.clients.codex.configuration import magpie_managed', ''
+        )
         source += '\nimport shutil\nhome=Path(os.environ.get("CODEX_HOME", str(Path.home()/".codex")))\n'
         source += 'runtime=shutil.which("codex") or str(Path.home()/".local/bin/codex")\n'
         source += 'reader=Catalog(home, runtime, allow_background_refresh=False)\n'
         return source
+
+    def _start_model_refresh(self, key, cwd, provider):
+        if self.model_closed or key in self.model_refreshing or time.time() < self.model_retry_at.get(key, 0):
+            return
+        self.model_refreshing.add(key)
+        def update():
+            try:
+                self.get_kind('models', cwd, refresh=True, provider=provider)
+            except (OSError, ValueError, CatalogError):
+                pass
+            finally:
+                with self.lock:
+                    self.model_retry_at[key] = time.time() + 60
+                    self.model_refreshing.discard(key)
+                    result = self.kind_caches.get('models', {}).get(key)
+                    updated_at = (result[1].get('cache') or {}).get('updatedAt') if result else None
+                    self._schedule_model_refresh(key, cwd, provider, updated_at or time.time(), retry=True)
+        threading.Thread(target=update, daemon=True, name='ssh-model-refresh').start()
+
+    def _schedule_model_refresh(self, key, cwd, provider, updated_at, retry=False, replace=False):
+        if self.model_closed:
+            return
+        if replace and key in self.model_timers:
+            self.model_timers.pop(key).cancel()
+        if key in self.model_timers:
+            return
+        delay = max(60 if retry else 1, updated_at + 12 * 60 * 60 - time.time())
+        def due():
+            with self.lock:
+                self.model_timers.pop(key, None)
+                self._start_model_refresh(key, cwd, provider)
+        timer = threading.Timer(delay, due)
+        timer.daemon = True
+        self.model_timers[key] = timer
+        timer.start()
 
     def get(self, cwd, refresh=False, provider=None):
         with self.lock:
@@ -162,7 +234,7 @@ class RemoteCatalog:
                 key = (kind, cwd, provider)
             cache = self.kind_caches.setdefault(kind, {})
             previous = cache.get(key)
-            if previous and not refresh and time.monotonic() - previous[0] < 300:
+            if kind == 'skills' and previous and not refresh and time.monotonic() - previous[0] < 300:
                 return previous[1]
             source = self._source()
             source += ('print(json.dumps(reader.get_kind(' + payload(kind) + ', ' + payload(cwd) +
@@ -175,6 +247,12 @@ class RemoteCatalog:
             except RemoteUnavailable as exc:
                 raise CatalogError(str(exc)) from exc
             cache[key] = (time.monotonic(), result)
+            if kind == 'models':
+                metadata = result.get('cache') or {}
+                if metadata.get('state') == 'stale' and not refresh:
+                    self._start_model_refresh(key, cwd, provider)
+                elif metadata.get('state') == 'fresh' and metadata.get('updatedAt'):
+                    self._schedule_model_refresh(key, cwd, provider, metadata['updatedAt'], replace=refresh)
             if kind == 'skills' and not refresh and result.get('cache', {}).get('state') in ('stale', 'legacy'):
                 return self.get_kind(kind, cwd, refresh=True, provider=provider, query=query,
                                       offset=offset, limit=limit, ids=list(identifiers))
@@ -191,6 +269,75 @@ class RemoteCatalog:
         return result
 
 
+class RemoteCliModels:
+    """Read a joined CLI's API catalog on its SSH host without returning secrets."""
+
+    def __init__(self, alias):
+        self.alias = alias
+
+    @staticmethod
+    def _source():
+        source = source_text('features/auth/tls.py') + '\n'
+        source += source_text('features/accounts/models.py').replace(
+            'from bridge.features.auth.tls import client_context', '') + '\n'
+        source += source_text('clients/codex/configuration.py') + '\n'
+        source += source_text('clients/codex/catalog.py').replace(
+            'from bridge.features.accounts.models import model_catalog, model_ids', ''
+        ).replace(
+            'from bridge.clients.codex.configuration import magpie_managed', ''
+        ) + '\n'
+        source += source_text('platforms/linux/codex_daemon_env.py') + '\n'
+        source += '_linux_read_process_environment = read_process_environment\n'
+        source += source_text('platforms/macos/force_exit.py') + '\n'
+        source += source_text('platforms/macos/codex_daemon_env.py').replace(
+            'from bridge.platforms.macos.force_exit import Native', '') + '\n'
+        source += '_macos_read_process_environment = read_process_environment\n'
+        dispatcher = source_text('platforms/codex_daemon_env.py')
+        dispatcher = dispatcher.replace(
+            'from bridge.platforms.macos.codex_daemon_env import read_process_environment',
+            'read_process_environment = _macos_read_process_environment').replace(
+            'from bridge.platforms.linux.codex_daemon_env import read_process_environment',
+            'read_process_environment = _linux_read_process_environment').replace(
+            'from bridge.platforms.windows.codex_daemon_env import read_process_environment',
+            "raise DaemonEnvironmentUnavailable('SSH Windows model catalog is unsupported')")
+        source += dispatcher + '\n'
+        source += source_text('clients/codex/remote_models.py') + '\n'
+        return source
+
+    def _call(self, operation, home, cwd, provider, config, account=None, native_models=None):
+        home = str(home) if isinstance(home, Path) else home
+        cwd = str(cwd) if isinstance(cwd, Path) else cwd
+        value = {'operation': operation, 'home': home, 'cwd': cwd, 'provider': provider,
+                 'config': config, 'account': account or {}, 'nativeModels': native_models or []}
+        source = self._source() + '\nprint(json.dumps(remote_model_worker(' + payload(value) + '), ensure_ascii=False))\n'
+        try:
+            result = ssh_read(self.alias, source, timeout=120 if operation == 'models' else 20)
+        except RemoteUnavailable as exc:
+            raise CatalogError(str(exc)) from exc
+        if not isinstance(result, dict):
+            raise CatalogError('SSH 模型目录格式无效')
+        if result.get('error'):
+            raise CatalogError(result['error'])
+        identity = result.get('identity')
+        if not isinstance(identity, str) or len(identity) != 64 or any(char not in '0123456789abcdef' for char in identity):
+            raise CatalogError('SSH 模型目录身份无效')
+        return result
+
+    def identity(self, home, cwd, provider, config, account=None):
+        return self._call('identity', home, cwd, provider, config, account)['identity']
+
+    def read_models(self, home, cwd, provider, config, account=None, native_models=None):
+        return self._call('models', home, cwd, provider, config, account, native_models)
+
+
+def remote_model_identity(alias, home, cwd, provider, config, account=None):
+    return RemoteCliModels(alias).identity(home, cwd, provider, config, account)
+
+
+def remote_model_catalog(alias, home, cwd, provider, config, account=None, native_models=None):
+    return RemoteCliModels(alias).read_models(home, cwd, provider, config, account, native_models)
+
+
 class AppHosts:
     def __init__(self, home):
         self.home = Path(home)
@@ -203,10 +350,17 @@ class AppHosts:
 
     def hosts(self):
         state = self.state()
-        relevant = {p['hostId'] for p in state.get('remote-projects', [])}
-        relevant.update(state.get('thread-project-membership-host-ids', {}).values())
         return {h['hostId']: h for h in state.get('codex-managed-remote-connections', [])
-                if h.get('hostId') in relevant and h.get('alias')}
+                if isinstance(h, dict) and isinstance(h.get('hostId'), str) and h['hostId']
+                and isinstance(h.get('alias'), str) and h['alias']
+                and not h['alias'].startswith('-') and not any(c.isspace() for c in h['alias'])}
+
+    def lifecycle_hosts(self):
+        """Keep shutdown/account checks scoped to App project and membership hosts."""
+        state = self.state()
+        relevant = {p.get('hostId') for p in state.get('remote-projects', []) if isinstance(p, dict)}
+        relevant.update(state.get('thread-project-membership-host-ids', {}).values())
+        return {host_id: host for host_id, host in self.hosts().items() if host_id in relevant}
 
     def projects(self):
         state = self.state()

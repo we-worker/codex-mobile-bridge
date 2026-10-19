@@ -300,6 +300,7 @@ async fn dispatch(app: &tauri::AppHandle, action: &str, payload: Value) -> Resul
         }
         "language"
         | "check-update"
+        | "skip-update"
         | "notification-watches"
         | "transfer-settings"
         | "devices"
@@ -309,6 +310,7 @@ async fn dispatch(app: &tauri::AppHandle, action: &str, payload: Value) -> Resul
         | "connection-credentials"
         | "read-credentials"
         | "accounts"
+        | "cli-access"
         | "desktop-sessions"
         | "harness"
         | "account"
@@ -410,12 +412,18 @@ fn tray_action(app: &tauri::AppHandle, action: &str) {
 }
 
 fn main() {
-    tauri::Builder::default()
-        .plugin(tauri_plugin_single_instance::init(|app, args, _| {
+    let mut builder = tauri::Builder::default();
+    // The native smoke runner needs its isolated fixture to coexist with an
+    // already-running installed control panel. Production launches do not set
+    // CMB_TAURI_DEBUG_PORT and always keep the single-instance guard first.
+    if std::env::var_os("CMB_TAURI_DEBUG_PORT").is_none() {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, args, _| {
             if !args.iter().any(|a| a == "--login-startup") {
                 show(app);
             }
-        }))
+        }));
+    }
+    builder
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
@@ -561,6 +569,16 @@ fn main() {
             .initialization_script(include_str!("../../desktop/tauri-bridge.js"));
             if let Some(directory) = std::env::var_os("CMB_DATA_DIR") {
                 builder = builder.data_directory(PathBuf::from(directory).join("tauri-webview"));
+            }
+            if let Ok(debug_port) = std::env::var("CMB_TAURI_DEBUG_PORT") {
+                let debug_port = debug_port.trim();
+                if debug_port.parse::<u16>().is_ok() {
+                    builder = builder.additional_browser_args(&format!(
+                        "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection \
+                         --remote-debugging-address=127.0.0.1 \
+                         --remote-debugging-port={debug_port}"
+                    ));
+                }
             }
             builder.build()?;
             Ok(())

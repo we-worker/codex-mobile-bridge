@@ -2,6 +2,8 @@ import copy
 import io
 import json
 import os
+import socket
+import ssl
 import tempfile
 import threading
 import unittest
@@ -109,6 +111,69 @@ class AccessTests(unittest.TestCase):
             (invalid['preferences'] if 'lan' in changes else invalid['preferences']['connections'][0]).update(changes)
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.desktop.save(invalid)
+
+    def test_external_https_entry_uses_loopback_without_lan_or_local_browser(self):
+        value = copy.deepcopy(self.value)
+        value['preferences'].update(lan=False, localAccess=False, connections=[{
+            'id': 'external', 'name': 'External', 'enabled': True,
+            'accessMode': 'external', 'publicUrl': 'https://PHONE.example.com:8443/',
+        }])
+        self.desktop.save(value)
+        state = self.desktop.snapshot()
+        self.assertEqual(state['urls'], ['https://phone.example.com:8443/'])
+        self.assertEqual(state['notificationUrls'], [])  # The gateway is stopped.
+        self.assertEqual(self.desktop.config()['origins'], ['https://phone.example.com:8443'])
+        self.assertEqual(self.desktop.config()['publicUrl'], 'https://phone.example.com:8443')
+        self.assertEqual(self.desktop.preferences()['connections'][0]['proxyUpstream'], '')
+        with patch('bridge.app.desktop.socket.socket'), patch('bridge.app.desktop.subprocess.Popen') as spawn:
+            self.assertTrue(self.desktop.start()['started'])
+        self.assertEqual(spawn.return_value.stdin.write.call_args.args[0], b'{}')
+        with self.assertRaisesRegex(ValueError, '自有服务器或 NAS'):
+            self.desktop.deployment({'id': 'external'})
+        self.assertEqual(access.public_urls(self.desktop.preferences()), ['https://phone.example.com:8443'])
+        from bridge.features.notifications.addresses import entry_urls
+        self.assertEqual(entry_urls(self.desktop.preferences(), ['127.0.0.1']), ['https://phone.example.com:8443'])
+
+    def test_external_rejects_non_https_and_subpaths_without_saving(self):
+        value = copy.deepcopy(self.value)
+        value['preferences']['connections'] = [{'id': 'external', 'enabled': True, 'accessMode': 'external', 'publicUrl': ''}]
+        before = self.desktop.config()
+        for url in ('', 'http://phone.example.com', 'https://phone.example.com/path',
+                    'https://phone.example.com:99999', 'https://phone.example.com:',
+                    'https://phone.example.com/?token=x', 'https://phone.example.com?',
+                    'https://phone.example.com#'):
+            value['preferences']['connections'][0]['publicUrl'] = url
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                self.desktop.save(value)
+            self.assertEqual(self.desktop.config(), before)
+
+    def test_external_probe_classifies_tls_network_redirect_and_wrong_target(self):
+        preferences = {'port': 8787, 'connections': [{
+            'id': 'external', 'enabled': True, 'accessMode': 'external',
+            'publicUrl': 'https://phone.example.com:8443'}]}
+        selected = access.select_connection({**preferences, 'lan': False}, {'id': 'external'})
+        cases = [(ssl.SSLError('certificate failed'), 'TLS'),
+                 (socket.gaierror('DNS failed'), '无法连接'),
+                 (ValueError('入口返回 HTTP 302 重定向'), '重定向')]
+        for error, message in cases:
+            with self.subTest(error=error), patch.object(access, 'read_auth', side_effect=error):
+                with self.assertRaisesRegex(ValueError, message):
+                    access.check_entry(selected, instance_id='current')
+        with patch.object(access, 'read_auth', return_value={'instanceId': 'other'}) as probe:
+            with self.assertRaisesRegex(ValueError, '当前网关'):
+                access.check_entry(selected, instance_id='current')
+            probe.assert_called_once_with('https://phone.example.com:8443')
+
+    def test_external_probe_never_sends_credentials_or_follows_redirect(self):
+        response = MagicMock(status=302)
+        connection = MagicMock()
+        connection.getresponse.return_value = response
+        with patch.object(access.http.client, 'HTTPSConnection', return_value=connection) as create:
+            with self.assertRaisesRegex(ValueError, '重定向'):
+                access.read_auth('https://phone.example.com:8443')
+        self.assertEqual(create.call_args.args, ('phone.example.com', 8443))
+        connection.request.assert_called_once_with('GET', '/api/auth', headers={'Cache-Control': 'no-cache'})
+        connection.close.assert_called_once()
 
     def test_running_configuration_cannot_change_external_access(self):
         self.desktop.save(self.value)
@@ -252,7 +317,8 @@ class ConcurrentRuntimeTests(unittest.TestCase):
                  patch.object(run, 'GatewayControl'), patch.object(run.signal, 'signal'), \
                  patch.object(run, 'GatewayServer', return_value=server) as make_server, \
                  patch.object(run, 'SSHTunnel', side_effect=tunnels) as make_ssh, \
-                 patch.object(run, 'QuickTunnel', return_value=quick):
+                 patch.object(run, 'QuickTunnel', return_value=quick), \
+                 patch('bridge.features.network.server_connection.Path.home', return_value=data):
                 run.main(connections=rows)
             self.assertEqual([call.args[-1] for call in make_ssh.call_args_list], ['a', 'b'])
             for tunnel in tunnels:

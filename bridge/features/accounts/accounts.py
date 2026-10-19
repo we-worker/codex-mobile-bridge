@@ -12,6 +12,7 @@ import os
 import queue
 import re
 import shutil
+import sqlite3
 import tempfile
 import threading
 import time
@@ -21,7 +22,8 @@ from urllib.parse import urlsplit
 
 from bridge.features.accounts.account import AccountRPC, AccountError, Account
 from bridge.clients.desktop_app import DesktopApp
-from bridge.features.accounts.models import model_ids
+from bridge.features.accounts.models import model_catalog, model_ids
+from bridge.clients.codex.catalog import Catalog, ModelStore, MODEL_REFRESH_SECONDS
 from bridge.features.accounts.info import AccountInfo
 from bridge.clients.codex.configuration import magpie_managed
 from bridge.clients.codex.transport import connect_stream
@@ -39,7 +41,18 @@ def private_bytes(path, content):
             stream.write(content)
             stream.flush()
             os.fsync(stream.fileno())
-        os.replace(name, path)
+        deadline = time.monotonic() + 2 if os.name == 'nt' else 0
+        while True:
+            try:
+                os.replace(name, path)
+                break
+            except PermissionError as exc:
+                if os.name != 'nt' or getattr(exc, 'winerror', None) not in (5, 32, 33):
+                    raise
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                time.sleep(min(.05, remaining))
     finally:
         Path(name).unlink(missing_ok=True)
 
@@ -129,6 +142,12 @@ class Accounts:
             raise ValueError('账号目录不能是符号链接')
         self.lock = threading.RLock()
         self.gate = threading.RLock()
+        self.api_models_locks = {}
+        self.api_model_store = ModelStore(bridge.data_dir)
+        self.saved_model_catalogs = {}
+        self.api_model_refreshing = set()
+        self.api_model_timers = {}
+        self.api_model_retry_at = {}
         self.index = read_json(self.root/'index.json', {'accounts': [], 'activeId': None, 'desktopExecutable': ''})
         self.state = read_json(self.root/'switch.json', {'phase': 'idle'})
         if self.state.get('phase') in ('preparing', 'stopping', 'applying', 'migrating', 'starting', 'verifying', 'restoring'):
@@ -154,6 +173,15 @@ class Accounts:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.root.chmod(0o700)
         return self.root/identifier
+
+    def saved_model_catalog(self, identifier):
+        with self.lock:
+            home = self.directory(identifier)
+            catalog = self.saved_model_catalogs.get(identifier)
+            if catalog is None:
+                catalog = Catalog(home, self.runtime)
+                self.saved_model_catalogs[identifier] = catalog
+            return catalog
 
     def row(self, identifier):
         self.directory(identifier)
@@ -214,10 +242,12 @@ class Accounts:
                 current = self.info.current()
             verified = bool(current.get('id'))
             return {'accounts': [{**{k: row[k] for k in ('id', 'name', 'kind', 'email', 'planType', 'baseUrl', 'model') if k in row},
-                                  'details': copy.deepcopy(self.info.entries.get(row['id'], {}))}
+                                  'details': copy.deepcopy(self.info.public_details(row['id']))}
                                  for row in self.index['accounts']],
                     'activeId': current.get('id'), 'activeVerified': verified, 'current': current, 'blockers': self.blockers(),
-                    'externalChange': bool(self.index.get('activeId')) and not verified, 'switch': dict(self.state),
+                    'externalChange': bool(self.index.get('activeId')) and not verified,
+                    'sharedWithLocalCli': True, 'switch': dict(self.state),
+                    'loginAccount': copy.deepcopy(self.info.current_login()),
                     'reminders':dict(self.monitor.preferences), 'reminderError':self.monitor.last_error,
                     'desktopUpdate':self.updates.status(), 'management': management,
                     'canSwitch': not management['external']}
@@ -398,14 +428,112 @@ class Accounts:
             self.update_discovery()
             return self.desktop_status()
 
-    def api_models(self, row, refresh=False):
-        cached = self.info.entries.get(row['id'], {}).get('models') or {}
-        if not refresh and cached.get('status') == 'ready' and time.time()-cached.get('checkedAt', 0) < 300:
-            return copy.deepcopy(cached['models'])
-        key = read_json(self.directory(row['id'])/'api.json', {})['key']
-        models = [{'id': identifier, 'name': identifier, 'efforts': []} for identifier in model_ids(row['baseUrl'], key)]
-        self.info.entries.setdefault(row['id'], {})['models'] = {'models':copy.deepcopy(models), 'status':'ready', 'checkedAt':time.time()}
-        return models
+    def api_model_identity(self, row):
+        with self.lock:
+            if self.row(row['id']).get('baseUrl') != row['baseUrl']:
+                raise ValueError('当前接入已变化，请重新读取模型列表')
+            key = read_json(self.directory(row['id'])/'api.json', {})['key']
+            return ModelStore.key('saved-api', str(self.home), row['id'], row['baseUrl'], key)
+
+    def api_models(self, row, refresh=False, with_timestamp=False):
+        with self.lock:
+            self.check_ready()
+            self.row(row['id'])
+            model_lock = self.api_models_locks.setdefault(row['id'], threading.Lock())
+        with model_lock:
+            with self.lock:
+                self.check_ready()
+                stored = dict(self.row(row['id']))
+                if any(stored.get(key) != row.get(key) for key in ('kind', 'baseUrl', 'model')):
+                    raise ValueError('当前接入已变化，请重新读取模型列表')
+                key = read_json(self.directory(row['id'])/'api.json', {})['key']
+                identity = ModelStore.key('saved-api', str(self.home), row['id'], row['baseUrl'], key)
+                def result(models, updated_at, error=None):
+                    with self.lock:
+                        self.check_ready()
+                        if (self.row(row['id']) != stored or
+                                read_json(self.directory(row['id'])/'api.json', {}).get('key') != key):
+                            raise ValueError('当前接入已变化，请重新读取模型列表')
+                    copied = copy.deepcopy(models)
+                    return (copied, updated_at, error) if with_timestamp else copied
+                try:
+                    persisted = self.api_model_store.read(identity)
+                except (OSError, sqlite3.DatabaseError, ValueError):
+                    persisted = None
+                if persisted and not refresh:
+                    if (time.time()-persisted[0] >= MODEL_REFRESH_SECONDS and identity not in self.api_model_refreshing
+                            and time.time() >= self.api_model_retry_at.get(identity, 0)):
+                        self.api_model_refreshing.add(identity)
+                        def update():
+                            try:
+                                self.api_models(row, refresh=True)
+                            except ValueError:
+                                pass
+                            finally:
+                                with self.lock:
+                                    self.api_model_retry_at[identity] = time.time() + 60
+                                    self.api_model_refreshing.discard(identity)
+                        threading.Thread(target=update, daemon=True, name='saved-api-model-refresh').start()
+                    elif time.time()-persisted[0] < MODEL_REFRESH_SECONDS:
+                        self._schedule_api_model_refresh(row, identity, persisted[0])
+                    return result(persisted[1], persisted[0])
+            try:
+                models = model_catalog(row['baseUrl'], key)
+            except ValueError:
+                if persisted:
+                    return result(persisted[1], persisted[0], '模型目录刷新失败，已保留上次结果')
+                raise
+            with self.lock:
+                self.check_ready()
+                if (self.row(row['id']) != stored or
+                        read_json(self.directory(row['id'])/'api.json', {}).get('key') != key):
+                    raise ValueError('当前接入已变化，请重新读取模型列表')
+            try:
+                updated_at = self.api_model_store.write(identity, models)
+                self._schedule_api_model_refresh(row, identity, updated_at, replace=True)
+            except (OSError, sqlite3.DatabaseError):
+                updated_at = time.time()
+            return result(models, updated_at)
+
+    def _schedule_api_model_refresh(self, row, identity, updated_at, replace=False):
+        with self.lock:
+            if getattr(self.bridge, 'closed', None) is not None and self.bridge.closed.is_set():
+                return
+            if replace and identity in self.api_model_timers:
+                self.api_model_timers.pop(identity).cancel()
+            if identity in self.api_model_timers:
+                return
+            delay = max(1, updated_at + MODEL_REFRESH_SECONDS - time.time())
+            def due():
+                with self.lock:
+                    self.api_model_timers.pop(identity, None)
+                    if getattr(self.bridge, 'closed', None) is not None and self.bridge.closed.is_set():
+                        return
+                try:
+                    self.api_models(row, refresh=True)
+                except ValueError:
+                    pass
+                finally:
+                    with self.lock:
+                        try:
+                            record = self.api_model_store.read(identity)
+                        except (OSError, sqlite3.DatabaseError, ValueError):
+                            record = None
+                        if record and any(saved['id'] == row['id'] for saved in self.index['accounts']):
+                            self._schedule_api_model_refresh(row, identity, max(record[0], time.time() - MODEL_REFRESH_SECONDS + 300))
+            timer = threading.Timer(delay, due)
+            timer.daemon = True
+            self.api_model_timers[identity] = timer
+            timer.start()
+
+    def current_model_identity(self):
+        with self.lock:
+            if not self.active_matches():
+                return None
+            row = dict(self.row(self.index['activeId']))
+            if row['kind'] == 'api':
+                return self.api_model_identity(row)
+        return self.bridge.catalog_reader.model_identity(str(self.home), 'openai')
 
     def current_models(self, refresh=False):
         with self.lock:
@@ -415,14 +543,25 @@ class Accounts:
             if not self.active_matches():
                 return None
             row = dict(self.row(self.index['activeId']))
-            if row['kind'] != 'api':
-                result = self.bridge.catalog_reader.get_kind('models', str(self.home), refresh=refresh, provider='openai')
-            else:
-                result = {'models':[], 'modelSource':'api', 'fastMode':{'allowed':False}}
-                try:
-                    result['models'] = self.api_models(row, refresh)
-                except ValueError as error:
-                    result['modelError'] = str(error)
+            stamp = copy.deepcopy(self.index.get('activeStamp'))
+        if row['kind'] != 'api':
+            result = self.bridge.catalog_reader.get_kind('models', str(self.home), refresh=refresh, provider='openai')
+        else:
+            result = {'models':[], 'modelSource':'api', 'fastMode':{'allowed':False}}
+            try:
+                result['models'], updated_at, error = self.api_models(row, refresh, with_timestamp=True)
+                identity = self.api_model_identity(row)
+                result['cache'] = {'state': 'stale' if error else 'fresh', 'updatedAt': updated_at,
+                                   'identity': identity}
+                if error:
+                    result['modelError'] = error
+            except ValueError as error:
+                result['modelError'] = str(error)
+        with self.lock:
+            self.check_ready()
+            if (self.index.get('activeId') != row['id'] or self.index.get('activeStamp') != stamp or
+                    not self.active_matches() or self.row(row['id']) != row):
+                raise ValueError('当前接入已变化，请重新读取模型列表')
             return {**result, 'modelAccessName':row['name'], 'modelAccountId':row['id']}
 
     def models(self, value):
@@ -509,6 +648,9 @@ class Accounts:
                                 self.index['accounts'].remove(replacing)
                             self.save()
                             if replacing:
+                                catalog = self.saved_model_catalogs.pop(replacing['id'], None)
+                                if catalog:
+                                    catalog.stop_model_refresh()
                                 shutil.rmtree(self.directory(replacing['id']), ignore_errors=True)
                             accepted = True
                             self.enrollment = {'phase': 'complete', 'name': name}
@@ -521,37 +663,87 @@ class Accounts:
             threading.Thread(target=run, daemon=True).start()
             return self.desktop_status()
 
+    def current_login_account(self):
+        row = self.info.current_login()
+        if not row or not row.get('transient'):
+            raise ValueError('账号身份已变化，请刷新列表')
+        target = Account(self.home, self.bridge.data_dir, executable=self.runtime)
+        target.usage_cache = self.bridge.account.usage_cache
+        target.subscription_cache = self.bridge.account.subscription_cache
+        expected_owner = self.info.identity['login']['owner']
+        expected_route = self.info.identity['login']['context'].get('_routeCacheKey')
+        def checked_login(rpc):
+            context = Account.login_context(rpc)
+            if (not context or context['accountKey'] != row['accountKey'] or
+                    context.get('_routeCacheKey') != expected_route or
+                    token_owner(read_json(self.home/'auth.json', {})) != expected_owner):
+                raise ValueError('账号身份已变化，请刷新列表')
+            return context
+        target.context = checked_login
+        return target, expected_owner
+
+    def saved_account(self, row):
+        if row['kind'] != 'chatgpt':
+            raise ValueError('仅官方 ChatGPT 账号可使用重置卡')
+        identity = self.info.read_identity()
+        with self.lock:
+            active = self.info.match(identity)
+        login = identity.get('login')
+        native_login = bool(login and login.get('owner') and login['owner'] == row.get('tokenOwner'))
+        home = self.home if native_login or active and active['id'] == row['id'] else self.directory(row['id'])
+        if token_owner(read_json(home/'auth.json', {})) != row.get('tokenOwner'):
+            raise ValueError('账号身份不匹配')
+        if home != self.home:
+            private_bytes(home/'config.toml', b'cli_auth_credentials_store = "file"\nmodel_provider = "openai"\n')
+        target = Account(home, self.bridge.data_dir, executable=self.runtime)
+        target.usage_cache = self.bridge.account.usage_cache
+        target.subscription_cache = self.bridge.account.subscription_cache
+        def checked_context(rpc):
+            context = Account.login_context(rpc) if native_login else Account.context(rpc)
+            if (not context or context.get('loginType') != 'chatgpt' or context.get('email') != row.get('email') or
+                    native_login and (context['accountKey'] != login['context']['accountKey'] or
+                                      context.get('_routeCacheKey') != login['context'].get('_routeCacheKey')) or
+                    token_owner(read_json(home/'auth.json', {})) != row.get('tokenOwner')):
+                raise ValueError('账号身份已变化')
+            return context
+        target.context = checked_context
+        return target
+
+    def read_account(self, value):
+        from bridge.features.accounts.info import CURRENT_LOGIN_ID
+        # Account switching shares this credential lock; chat operations keep their own gate.
+        with self.bridge.account.lock:
+            with self.lock:
+                self.check_ready()
+                row = None if value.get('id') == CURRENT_LOGIN_ID else dict(self.row(value.get('id')))
+                if row is None:
+                    target, owner = self.current_login_account()
+            if row is not None:
+                target, owner = self.saved_account(row), row.get('tokenOwner')
+            result = target.read(refresh=value.get('refresh', True) is not False)
+            with self.lock:
+                self.check_ready()
+                if ((row is not None and self.row(row['id']).get('tokenOwner') != owner) or
+                        token_owner(read_json(target.home/'auth.json', {})) != owner):
+                    raise ValueError('账号身份已变化，请刷新列表')
+            return result
+
     def account(self, value):
-        """Operate one saved login without changing the desktop's active connection."""
-        from bridge.features.accounts.account import Account
+        """Operate one login without changing the desktop's active connection."""
         action = value.get('operation', 'read')
         if action not in ('read', 'consume') or set(value) - {'action', 'id', 'operation', 'refresh', 'confirmed', 'requestId', 'accountKey', 'creditId'}:
             raise ValueError('账号重置请求包含不支持的字段')
+        if action == 'read':
+            return self.read_account(value)
+        from bridge.features.accounts.info import CURRENT_LOGIN_ID
         with self.gate, self.bridge.account.lock, self.lock:
             self.check_ready()
-            row = dict(self.row(value.get('id')))
-            if row['kind'] != 'chatgpt':
-                raise ValueError('仅官方 ChatGPT 账号可使用重置卡')
-            identity = self.info.read_identity()
-            active = self.info.match(identity)
-            home = self.home if active and active['id'] == row['id'] else self.directory(row['id'])
-            if token_owner(read_json(home/'auth.json', {})) != row.get('tokenOwner'):
-                raise ValueError('账号身份不匹配')
-            if home != self.home:
-                private_bytes(home/'config.toml', b'cli_auth_credentials_store = "file"\nmodel_provider = "openai"\n')
-            target = Account(home, self.bridge.data_dir, executable=self.runtime)
-            target.usage_cache = self.bridge.account.usage_cache
-            target.subscription_cache = self.bridge.account.subscription_cache
-            def checked_context(rpc):
-                context = Account.context(rpc)
-                if (context.get('loginType') != 'chatgpt' or context.get('email') != row.get('email') or
-                        token_owner(read_json(home/'auth.json', {})) != row.get('tokenOwner')):
-                    raise ValueError('账号身份已变化')
-                return context
-            target.context = checked_context
+            if value.get('id') == CURRENT_LOGIN_ID:
+                target, _ = self.current_login_account()
+            else:
+                target = self.saved_account(dict(self.row(value.get('id'))))
             result = target.control({**{k:v for k,v in value.items() if k not in ('action','id','operation')}, 'action':action})
-            if action == 'consume':
-                self.info.entries.get(row['id'], {}).pop('usage', None)
+            self.info.entries.get(value['id'], {}).pop('usage', None)
             return result
 
     def control(self, value):
@@ -614,6 +806,10 @@ class Accounts:
                     if row['id'] == self.info.current().get('id'):
                         raise ValueError('请先切换到其他接入，再删除此账号')
                     self.index['accounts'].remove(row)
+                    self.api_models_locks.pop(row['id'], None)
+                    catalog = self.saved_model_catalogs.pop(row['id'], None)
+                    if catalog:
+                        catalog.stop_model_refresh()
                     self.save()
                     shutil.rmtree(self.directory(row['id']), ignore_errors=True)
             else:
@@ -663,11 +859,16 @@ class Accounts:
             raise ValueError('切换请求标识无效')
         with self.gate, self.lock:
             row = dict(self.row(value.get('id')))
+            sync_cli = value.get('syncLocalCli') is True
             ledger = read_json(self.root/'requests.json', {})
             if request_id in ledger:
                 if ledger[request_id] != row['id']:
                     raise ValueError('同一请求不能切换到不同账号')
                 return self.public()
+            # Desktop and local CLI use the same auth/config files even when
+            # the optional CLI effectiveness check is not selected.
+            from bridge.features.accounts.cli_sync import LocalCliSync
+            LocalCliSync(self.bridge).preflight('codex')
             self.assert_editable()
             if self.info.current().get('id') == row['id']:
                 return self.public()
@@ -679,7 +880,8 @@ class Accounts:
             app.validate(self.runtime)
             ledger[request_id] = row['id']
             private_json(self.root/'requests.json', ledger)
-            self.state = {'phase': 'preparing', 'requestId': request_id, 'targetId': row['id'], 'error': None}
+            self.state = {'phase': 'preparing', 'requestId': request_id, 'targetId': row['id'], 'error': None,
+                          'cliSync': {'status': 'pending' if sync_cli else 'shared-config-unverified'}}
             self.phase('preparing')
             self.thread = threading.Thread(target=self._switch, args=(row, app), daemon=True)
             self.thread.start()
@@ -838,6 +1040,8 @@ class Accounts:
             self.wait_stopped()
             if changed:
                 folder = self.prepare(row, before)
+            from bridge.features.accounts.cli_sync import LocalCliSync
+            LocalCliSync(self.bridge)._codex_idle()
             self.phase('applying')
             self.require_managed_writes()
             if self.snapshot_files() != before:
@@ -858,6 +1062,16 @@ class Accounts:
             self.wait_ready(app, row)
             with self.lock:
                 self.mark_active(row['id'])
+                if self.state.get('cliSync', {}).get('status') == 'pending':
+                    try:
+                        from bridge.features.accounts.cli_sync import LocalCliSync
+                        local_cli = LocalCliSync(self.bridge)
+                        local_cli._codex_idle()
+                        local_cli.verify('codex', row)
+                        self.state['cliSync'] = {'status': 'verified'}
+                    except Exception as error:
+                        self.state['cliSync'] = {'status': 'failed', 'error': str(error),
+                                                 'sharedConfigChanged': True}
                 self.phase('complete')
             (self.root/'rollback.json').unlink(missing_ok=True)
         except Exception:
@@ -878,13 +1092,19 @@ class Accounts:
                     self.wait_ready(app)
                     with self.lock:
                         self.mark_active(backup['activeId'])
+                    if self.state.get('cliSync', {}).get('status') == 'pending':
+                        self.state['cliSync'] = {'status': 'not-applied', 'desktopStatus': 'restored'}
                     self.phase('restored', error='切换未完成，已恢复原接入；请检查桌面程序或重新登录')
                     (self.root/'rollback.json').unlink(missing_ok=True)
                 except Exception:
+                    if self.state.get('cliSync', {}).get('status') == 'pending':
+                        self.state['cliSync'] = {'status': 'unknown', 'desktopStatus': 'unknown'}
                     self.phase('interrupted', error='自动恢复未完成，请在桌面端恢复原接入')
             else:
                 message = ('桌面程序未正常退出，请检查系统权限或手动关闭后重试' if self.state.get('phase') == 'stopping'
                            else '切换未执行，请检查账号登录、配置限制和桌面程序路径')
+                if self.state.get('cliSync', {}).get('status') == 'pending':
+                    self.state['cliSync'] = {'status': 'not-applied', 'desktopStatus': 'failed'}
                 self.phase('failed', error=message)
         finally:
             shutil.rmtree(self.root/'prepared', ignore_errors=True)

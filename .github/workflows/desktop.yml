@@ -87,7 +87,7 @@ jobs:
         run: npm run test:update-controller
       - uses: actions/upload-artifact@v4
         with:
-          name: desktop-${{ runner.os }}-${{ matrix.arch }}
+          name: electron-desktop-${{ runner.os }}-${{ matrix.arch }}
           path: |
             dist/desktop/*.dmg
             dist/desktop/*.zip

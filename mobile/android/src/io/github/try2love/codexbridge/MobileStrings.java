@@ -51,6 +51,8 @@ values.put("检查失败，请检查网络后重试。也可以打开版本页�
 values.put("版本页面","Releases");
 values.put("当前已是此通道最新版本。","You are up to date on this channel.");
 values.put("发现新版本","Update available");
+values.put("跳过此版本","Skip this version");
+values.put("已跳过此版本，仍可手动更新","This version is skipped; you can still update manually");
 values.put("下载后按系统提示覆盖安装，不要先卸载。已保存的电脑与登录状态会保留。","After downloading, follow the system prompts to update without uninstalling. Saved computers and sign-ins will be retained.");
 values.put("稍后","Later");
 values.put("更新说明","Release notes");

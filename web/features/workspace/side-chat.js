@@ -3,7 +3,7 @@
 // A shared, gateway-owned ephemeral fork. Disposing a view never ends the chat.
 class SideChatPanel {
   constructor(workbench, session, tab) {
-    Object.assign(this, {workbench, session, tab});this.creationId=uuid();
+    Object.assign(this, {workbench, session, tab});this.creationId=uuid();this.modelCatalogs=new Map();
     const n=(...args)=>workbench.node(...args),b=(...args)=>workbench.button(...args);
     this.selectedSkills=new Map();
     this.head=n('div','wb-side-head');
@@ -128,23 +128,23 @@ class SideChatPanel {
     }dialog.append(error);
   }
   async modelSettings(){
-    const child=this.state.id,n=(...args)=>this.workbench.node(...args),b=(...args)=>this.workbench.button(...args);
-    try{
-      const catalog=await this.request({action:'catalog',id:child});
-      if(this.disposed||this.state.id!==child)return;
-      const dialog=n('dialog','picker'),head=n('div','picker-head'),model=n('select'),custom=n('input'),effort=n('select'),status=n('p','error');
-      head.append(n('h2','',BridgeI18n.t('侧边聊天设置')),b('×',()=>dialog.close(),BridgeI18n.t('关闭')));
-      const modelLabel=n('label','',BridgeI18n.t('模型')),effortLabel=n('label','',BridgeI18n.t('思考程度'));
-      for(const row of catalog.models||[])model.append(new Option(row.name||row.id,row.id));
-      const manual=new Option(BridgeI18n.t('自定义模型…'),'__custom__');manual.dataset.i18n='自定义模型…';model.append(manual);
-      model.value=[...model.options].some(o=>o.value===catalog.currentModel)?catalog.currentModel:'__custom__';custom.value=catalog.currentModel||'';
-      custom.setAttribute("data-i18n-aria-label",'模型 ID');custom.setAttribute('aria-label',BridgeI18n.t('模型 ID'));
-      const fill=()=>{custom.hidden=model.value!=='__custom__';const known=catalog.models?.find(m=>m.id===model.value);const values=known?.efforts?.length?known.efforts:['none','minimal','low','medium','high','xhigh','max','ultra'];effort.replaceChildren(...values.map(value=>new Option(value,value)));effort.value=values.includes(catalog.currentEffort)?catalog.currentEffort:known?.defaultEffort||values[0];};
-      model.onchange=fill;fill();modelLabel.append(model,custom);effortLabel.append(effort);
-      const save=b(BridgeI18n.t('保存'),async()=>{save.disabled=true;try{const state=await this.request({action:'settings',id:child,model:model.value==='__custom__'?custom.value.trim():model.value,effort:effort.value});this.apply(state);dialog.close();}catch(e){status.textContent=BridgeI18n.t(e.message);}finally{save.disabled=false;}});
-      dialog.append(head,n('p','muted',BridgeI18n.t('仅影响此侧边聊天，从下一轮生效。')),modelLabel,effortLabel,status,save);
-      document.body.append(dialog);dialog.addEventListener('close',()=>dialog.remove());dialog.showModal();
-    }catch(e){this.status.textContent=BridgeI18n.t(e.message);}
+    const child=this.state.id,identity=this.state.modelCatalogIdentity||'',key=identity?JSON.stringify([child,identity]):'',cached=key?this.modelCatalogs.get(key):null;
+    const n=(...args)=>this.workbench.node(...args),b=(...args)=>this.workbench.button(...args);
+    const dialog=n('dialog','picker'),head=n('div','picker-head'),model=n('select'),custom=n('input'),effort=n('select'),status=n('p','error'),updated=n('small','muted');
+    const modelLabel=n('label','',BridgeI18n.t('模型')),effortLabel=n('label','',BridgeI18n.t('思考程度'));
+    let catalog=null,loading=false,revision=0;
+    const current=()=>!this.disposed&&dialog.open&&this.state?.id===child&&(this.state.modelCatalogIdentity||'')===identity;
+    const fill=()=>{custom.hidden=model.value!=='__custom__';const known=catalog?.models?.find(row=>row.id===model.value),values=known?.efforts?.length?known.efforts:['none','minimal','low','medium','high','xhigh','max','ultra'];effort.replaceChildren(...values.map(value=>new Option(value,value)));effort.value=values.includes(this.state.effort)?this.state.effort:values.includes(known?.defaultEffort)?known.defaultEffort:values[0];save.disabled=loading||!effort.value;};
+    const showCatalog=value=>{catalog=value;model.replaceChildren(...(value.models||[]).map(row=>new Option(row.name||row.id,row.id)));const manual=new Option(BridgeI18n.t('自定义模型…'),'__custom__');manual.dataset.i18n='自定义模型…';model.append(manual);const selected=this.state.model||value.currentModel;model.value=[...model.options].some(row=>row.value===selected)?selected:'__custom__';custom.value=selected||'';fill();const stamp=value.cache?.updatedAt;updated.textContent=Number.isFinite(stamp)&&stamp>0?BridgeI18n.t('更新于：')+new Date(stamp*1000).toLocaleString(BridgeI18n.locale()):'';};
+    const refresh=b(BridgeI18n.t('刷新'),()=>load(true));refresh.type='button';
+    head.append(n('h2','',BridgeI18n.t('侧边聊天设置')),refresh,b('×',()=>dialog.close(),BridgeI18n.t('关闭')));
+    custom.setAttribute('data-i18n-aria-label','模型 ID');custom.setAttribute('aria-label',BridgeI18n.t('模型 ID'));model.onchange=fill;modelLabel.append(model,custom);effortLabel.append(effort);
+    const save=b(BridgeI18n.t('保存'),async()=>{if(!current()||loading||save.disabled)return;save.disabled=true;try{const state=await this.request({action:'settings',id:child,model:model.value==='__custom__'?custom.value.trim():model.value,effort:effort.value});if(current()){this.apply(state);dialog.close();}}catch(e){if(current())status.textContent=BridgeI18n.t(e.message);}finally{if(current())save.disabled=false;}});
+    dialog.append(head,n('p','muted',BridgeI18n.t('仅影响此侧边聊天，从下一轮生效。')),updated,modelLabel,effortLabel,status,save);
+    document.body.append(dialog);dialog.addEventListener('close',()=>{revision++;dialog.remove();});dialog.showModal();
+    if(cached?.models?.length)showCatalog(cached);else{modelLabel.hidden=true;effortLabel.hidden=true;status.textContent=BridgeI18n.t('正在读取模型…');save.disabled=true;}
+    const load=async force=>{if(!current()||loading)return;const ticket=++revision;loading=true;refresh.disabled=true;save.disabled=true;if(catalog)status.textContent='';try{const value=await this.request({action:'catalog',id:child,...(force?{refresh:true}:{})});if(ticket!==revision||!current()){if(!current())dialog.close();return;}if(identity&&value.cache?.identity!==identity)throw Error(BridgeI18n.t('聊天已切换'));showCatalog(value);modelLabel.hidden=false;effortLabel.hidden=false;status.textContent='';if(key&&value.cache?.identity===identity)this.modelCatalogs.set(key,value);}catch(error){if(ticket===revision&&current())status.textContent=BridgeI18n.t(error.message);}finally{if(ticket===revision&&current()){loading=false;refresh.disabled=false;save.disabled=!catalog||!effort.value;}}};
+    await load(false);
   }
   async load(){try{this.apply(await this.request());}catch(e){if(!this.disposed){this.status.textContent=BridgeI18n.t(e.message);if(this.state)this.state.connected=false;this.controls();}}}
   async create(){
@@ -160,7 +160,7 @@ class SideChatPanel {
     if(state.id&&this.attachments.key!==state.id)this.attachments.open(state.id);
     if(state.id){this.modelButton.textContent=[state.model,state.effort].filter(Boolean).join(' · ')||BridgeI18n.t('模型与思考程度');delete this.modelButton.dataset.i18n;}
     if(!this.modeSelected)this.workMode.value=state.collaborationMode==='plan'?'plan':'default';
-    const permission={'ask':'请求批准','auto-review':'帮我批准','full-access':'完全访问权限'}[state.permissionMode]||'权限';this.permissionsButton.textContent=BridgeI18n.t(permission);this.permissionsButton.dataset.i18n=permission;
+    const permission={'ask':'请求批准','auto-review':'帮我批准','full-access':'完全访问'}[state.permissionMode]||'权限';this.permissionsButton.textContent=BridgeI18n.t(permission);this.permissionsButton.dataset.i18n=permission;
     this.tab.body.classList.toggle('has-side-chat',!!state.id);
     if(this.pending&&state.submissions?.some(s=>s.id===this.pending.submissionId&&['accepted','queued'].includes(s.status))){
       if(this.input.value===this.pending.text)this.input.value='';this.attachments.clear(state.id,this.pending.attachments);this.pending=null;this.selectedSkills.clear();this.skillChips();this.resizeInput();

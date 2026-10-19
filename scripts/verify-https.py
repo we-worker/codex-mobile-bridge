@@ -12,6 +12,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURES = ROOT/'tests/fixtures/tls'
+TLS_ERROR = 'HTTPS 证书或 TLS 握手失败；请检查域名、证书和反代配置'
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -61,13 +62,13 @@ def verify(runtime):
             assert not public['ok'] and 'HTTP 404' in public.get('error', ''), public
             print('PASS: public HTTPS with default OpenSSL certificate paths unavailable')
             untrusted = probe(f'https://localhost:{secure.server_port}')
-            assert not untrusted['ok'] and 'CERTIFICATE_VERIFY_FAILED' in untrusted.get('error', ''), untrusted
+            assert untrusted['ok'] is False and untrusted.get('error') == TLS_ERROR, untrusted
             print('PASS: untrusted certificate rejected')
             custom = {'SSL_CERT_FILE': str(FIXTURES/'ca.pem')}
             trusted = probe(f'https://localhost:{secure.server_port}', custom)
             assert trusted['ok'], trusted
             mismatch = probe(f'https://127.0.0.1:{secure.server_port}', custom)
-            assert not mismatch['ok'] and 'mismatch' in mismatch.get('error', '').lower(), mismatch
+            assert mismatch['ok'] is False and mismatch.get('error') == TLS_ERROR, mismatch
             print('PASS: explicit custom CA works; incorrect hostname rejected')
         finally:
             for server in (local, secure):

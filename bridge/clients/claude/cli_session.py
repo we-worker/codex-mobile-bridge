@@ -1,0 +1,805 @@
+"""Read saved Claude Code CLI chats and control only processes started here."""
+
+import hashlib
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+import uuid
+from pathlib import Path
+
+from bridge.clients.claude import model
+from bridge.clients.claude.context import context_fields
+from bridge.clients.claude.session_registry import assert_session_closed
+from bridge.clients.errors import BridgeUnavailable
+from bridge.clients.uploads import DesktopUploads
+
+
+MODES = {'default', 'acceptEdits', 'plan', 'dontAsk', 'auto', 'bypassPermissions'}
+PERMISSION_OPTIONS = (
+    ('default', '默认权限', '需要时请求确认'),
+    ('acceptEdits', '允许文件编辑', '文件编辑自动允许，其他操作仍按规则确认'),
+    ('plan', '计划模式', '先制定计划'),
+    ('dontAsk', '不询问', '无法自动允许的操作直接拒绝'),
+    ('auto', '自动模式', '由 Claude 判断可自动执行的操作'),
+    ('bypassPermissions', '完全访问', '跳过权限确认'),
+)
+_MANAGED_API_ROUTING = {
+    'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST',
+    'CLAUDE_CODE_USE_ANTHROPIC_AWS',
+    'CLAUDE_CODE_USE_BEDROCK',
+    'CLAUDE_CODE_USE_FOUNDRY',
+    'CLAUDE_CODE_USE_MANTLE',
+    'CLAUDE_CODE_USE_VERTEX',
+}
+
+
+class ClaudeControlRejected(BridgeUnavailable):
+    def __init__(self, reason):
+        super().__init__('Claude Code 控制请求未确认，请检查原会话')
+        self.reason = reason
+
+
+def managed_api_env(source=None):
+    """Keep ambient provider credentials and routing out of a selected API profile."""
+    source = os.environ if source is None else source
+    return {key: value for key, value in source.items()
+            if not key.startswith('ANTHROPIC_') and key not in _MANAGED_API_ROUTING}
+
+
+def _permission_prompt_args(binary, env):
+    """Claude 2.1.168 routes stdio prompts before --permission-prompts existed."""
+    try:
+        version = subprocess.run([binary, '--version'], env=env, capture_output=True,
+                                 text=True, encoding='utf-8', errors='replace', timeout=5)
+        if version.returncode == 0 and re.match(r'\A2\.1\.168(?:\s|\Z)', version.stdout):
+            return []
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return ['--permission-prompts', 'host']
+
+
+def _skill_catalog(catalog):
+    """Use commands loaded by the native CLI with this profile and project."""
+    rows = {}
+    for item in catalog.get('commands') or []:
+        if not isinstance(item, dict) or item.get('builtin'):
+            continue
+        name = item.get('name')
+        if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_:/-]{0,127}', name):
+            continue
+        rows[name] = {'id': name, 'name': name, 'description': item.get('description') or '',
+                      'kind': 'skill', 'selectable': True}
+    return sorted(rows.values(), key=lambda row: row['id'])
+
+
+def _model_catalog(catalog):
+    """Expose the CLI's resolved provider IDs, retaining its follow-default choice."""
+    rows = {}
+    for item in catalog.get('models') or []:
+        if not isinstance(item, dict):
+            continue
+        value = item.get('value') or item.get('id')
+        resolved = item.get('resolvedModel')
+        if not isinstance(value, str) or not value:
+            continue
+        identifier = 'default' if value == 'default' else resolved or value
+        if not isinstance(identifier, str) or not identifier:
+            continue
+        name = item.get('displayName') or item.get('name') or value
+        if resolved and resolved not in name:
+            name += ' · ' + resolved
+        levels = item.get('supportedEffortLevels')
+        efforts = ([level for level in levels if level in ('low', 'medium', 'high', 'xhigh', 'max')]
+                   if isinstance(levels, list) and item.get('supportsEffort') is True else [])
+        rows[identifier] = {'id': identifier, 'name': name,
+                            'efforts': ['auto', *dict.fromkeys(efforts)] if efforts else [],
+                            **({'defaultEffort': 'auto'} if efforts else {})}
+    return list(rows.values())
+
+
+def _applied_settings(owned):
+    settings = owned.control({'subtype': 'get_settings'})
+    applied = settings.get('applied') if isinstance(settings, dict) else None
+    if not isinstance(applied, dict) or not isinstance(applied.get('model'), str):
+        raise BridgeUnavailable('Claude Code 未报告当前模型设置')
+    return settings
+
+
+def _has_resolved_models(catalog):
+    # 2.1.168 reports effort levels but not resolved IDs, and rejects list_models.
+    return any(isinstance(item, dict) and isinstance(item.get('resolvedModel'), str)
+               and item['resolvedModel'] for item in catalog.get('models') or [])
+
+
+def _cli_selection(owned, public):
+    applied = _applied_settings(owned)['applied']
+    return {'currentModel': applied['model'], 'currentEffort': applied.get('effort') or ''}
+
+
+def _cli_catalog(owned, public, refresh=False):
+    if refresh:
+        if getattr(owned, 'model_list_unsupported', False):
+            raise BridgeUnavailable('当前 Claude Code 版本不支持刷新模型目录')
+        try:
+            models = owned.control({'subtype': 'list_models'}).get('models')
+        except ClaudeControlRejected as exc:
+            if exc.reason != 'Unsupported control request subtype: list_models':
+                raise
+            owned.model_list_unsupported = True
+            raise BridgeUnavailable('当前 Claude Code 版本不支持刷新模型目录') from None
+        if not isinstance(models, list):
+            raise BridgeUnavailable('Claude Code 未返回模型列表')
+        owned.catalog['models'] = models
+    rows = _model_catalog(owned.catalog)
+    try:
+        selection = _cli_selection(owned, public)
+        verified = True
+    except BridgeUnavailable:
+        selection = {'currentModel': public['model'], 'currentEffort': ''}
+        verified = False
+    return {'models': rows, **selection,
+            'capabilities': {'models': bool(rows and verified),
+                             'effort': bool(verified and any(row['efforts'] for row in rows)),
+                             'skills': True}, 'skills': _skill_catalog(owned.catalog)}
+
+
+def _set_cli_settings(owned, body):
+    rows = _model_catalog(owned.catalog)
+    selected = next((row for row in rows if row['id'] == body.get('model')), None)
+    if selected is None:
+        raise ValueError('请选择 Claude Code 提供的模型')
+    effort = body.get('effort')
+    if effort is not None and effort not in selected['efforts']:
+        raise ValueError('该模型不支持此思考强度')
+    _applied_settings(owned)
+    target = next((item for item in owned.catalog.get('models') or []
+                   if isinstance(item, dict) and (item.get('value') == 'default' and selected['id'] == 'default'
+                   or item.get('resolvedModel') == selected['id'] or item.get('value') == selected['id'])), None)
+    expected = (target.get('resolvedModel') or target.get('value')) if target else selected['id']
+    owned.control({'subtype': 'set_model', 'model': selected['id']})
+    if effort is not None:
+        owned.control({'subtype': 'apply_flag_settings',
+                       'settings': {'effortLevel': None if effort == 'auto' else effort}})
+    settings = _applied_settings(owned)
+    applied = settings['applied']
+    if (_has_resolved_models(owned.catalog) and applied.get('model') != expected or
+            effort not in (None, 'auto') and applied.get('effort') != effort):
+        raise BridgeUnavailable('Claude Code 未确认模型或思考强度设置，请刷新检查')
+    sources = settings.get('sources')
+    if effort == 'auto' and (not isinstance(sources, list) or
+                            any(source.get('source') == 'flagSettings' and
+                                source.get('settings', {}).get('effortLevel') is not None
+                                for source in sources if isinstance(source, dict))):
+        raise BridgeUnavailable('Claude Code 未确认默认思考强度，请刷新检查')
+    owned.model = applied['model']
+
+IMAGE_URL = re.compile(r'data:(image/(?:png|jpeg|gif|webp));base64,([A-Za-z0-9+/]+={0,2})\Z')
+
+
+class ResumePreflightBlocked(BridgeUnavailable):
+    """The resume process has definitely not been started."""
+
+
+def _profile():
+    binary = shutil.which('claude')
+    if not binary:
+        binary = next((str(path) for path in (Path('/opt/homebrew/bin/claude'),
+                       Path('/usr/local/bin/claude'), Path.home()/'.local/bin/claude')
+                       if path.is_file() and os.access(path, os.X_OK)), None)
+    if not binary:
+        return None
+    explicit = os.environ.get('CLAUDE_CONFIG_DIR')
+    if explicit:
+        directory = Path(explicit).expanduser().resolve()
+        origin = 'environment:' + str(directory)
+    else:
+        directory = Path.home()/'.claude'
+        origin = 'default:' + str(directory)
+        cockpit = Path.home()/'.cockpit_tools'
+        try:
+            selected = json.loads((cockpit/'provider_current_accounts.json').read_text(encoding='utf-8'))['current_accounts']['claude_code_account']
+            accounts = json.loads((cockpit/'claude_accounts.json').read_text(encoding='utf-8'))['accounts']
+            instances = json.loads((cockpit/'claude_instances.json').read_text(encoding='utf-8'))['instances']
+            if any(item.get('id') == selected for item in accounts):
+                instance = next(item for item in instances if item.get('bindAccountId') == selected
+                                and item.get('launchMode') == 'cli')
+                candidate = Path(instance['userDataDir']).expanduser().resolve()
+                if (candidate/'settings.json').is_file():
+                    directory, origin = candidate, 'cockpit:' + selected + ':' + str(candidate)
+        except (OSError, ValueError, KeyError, StopIteration, TypeError):
+            pass
+    try:
+        settings_digest = hashlib.sha256((directory/'settings.json').read_bytes()).hexdigest()
+    except OSError:
+        settings_digest = 'none'
+    return {'binary': binary, 'directory': directory, 'origin': origin + ':' + settings_digest}
+
+
+def _auth_ready(profile):
+    env = managed_api_env() if profile.get('managedApi') else os.environ.copy()
+    env['CLAUDE_CONFIG_DIR'] = str(profile['directory'])
+    try:
+        process = subprocess.run([profile['binary'], 'auth', 'status', '--json'],
+                                 env=env, capture_output=True, text=True, encoding='utf-8',
+                                 errors='replace', timeout=5)
+        return process.returncode == 0 and json.loads(process.stdout).get('loggedIn') is True
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return False
+
+
+def _events(path):
+    if path.stat().st_size > 20_000_000:
+        raise ValueError('Claude 会话记录过大，无法读取')
+    result = []
+    with path.open(encoding='utf-8', errors='replace') as source:
+        for line in source:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(event, dict):
+                result.append(event)
+    return result
+
+
+def _text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return '\n'.join(item.get('text', '') for item in content
+                         if isinstance(item, dict) and item.get('type') == 'text')
+    return ''
+
+
+def _message_content(body):
+    """Build the CLI's native stream-json user content from server-resolved uploads."""
+    images = body.get('resolvedImages') or []
+    files = body.get('resolvedFiles') or []
+    if not images and not files:
+        return body['text']
+    text = body['text']
+    if files:
+        references = []
+        for item in files:
+            if not isinstance(item, dict) or not isinstance(item.get('path'), str) or not Path(item['path']).is_absolute() or not isinstance(item.get('name'), str):
+                raise ValueError('文件附件格式无效')
+            references.append({'name': item['name'], 'path': item['path']})
+        text += ('\n\n' if text.strip() else '') + '请读取并参考这些已上传的本机文件：\n' + json.dumps(references, ensure_ascii=False)
+    # Claude parses slash invocations from a single text block. Keep file
+    # references with that text so adding an attachment preserves the Skill.
+    blocks = [{'type': 'text', 'text': text}] if text.strip() else []
+    for image in images:
+        match = IMAGE_URL.fullmatch(image.get('url', '')) if isinstance(image, dict) else None
+        if not match:
+            raise ValueError('图片附件格式无效')
+        blocks.append({'type': 'image', 'source': {'type': 'base64', 'media_type': match[1], 'data': match[2]}})
+    return blocks
+
+
+def _saved(path, origin):
+    try:
+        native = str(uuid.UUID(path.stem))
+        events = _events(path)
+    except (OSError, ValueError):
+        return None
+    users = [event for event in events if event.get('type') == 'user' and not event.get('isSidechain')]
+    if not users:
+        return None
+    first = users[0]
+    cwd = next((event.get('cwd') for event in reversed(events)
+                if event.get('type') in ('user', 'assistant') and isinstance(event.get('cwd'), str)
+                and event.get('cwd')), '')
+    if not cwd:
+        return None
+    assistants = [event for event in events if event.get('type') == 'assistant'
+                  and isinstance(event.get('message'), dict)]
+    selected_model = next((event['message'].get('model') for event in reversed(assistants)
+                           if isinstance(event['message'].get('model'), str)
+                           and event['message'].get('model') != '<synthetic>'), '')
+    permission = next((event.get('mode') for event in reversed(events)
+                       if event.get('type') == 'mode' and event.get('mode') in MODES), None)
+    if permission is None:
+        permission = next((event.get('permissionMode') for event in reversed(users)
+                           if event.get('permissionMode') in MODES), None)
+    message = first.get('message') if isinstance(first.get('message'), dict) else {}
+    lines = _text(message.get('content')).strip().splitlines()
+    title = lines[0][:120] if lines else 'Claude Code 会话'
+    try:
+        updated = path.stat().st_mtime
+    except OSError:
+        return None
+    return {'id': model.gateway_id('cli:' + origin, native), 'nativeId': native, 'backend': 'cli', 'mode': 'cli',
+            'host': 'local', 'title': title, 'cwd': cwd, 'model': selected_model,
+            'permissionMode': permission or 'default', 'permissionKnown': permission is not None,
+            'updatedAt': updated, 'archived': False, 'origin': origin, 'path': path,
+            'events': events}
+
+
+class _Owned:
+    def __init__(self, process, origin, native, cwd):
+        self.process, self.origin, self.native, self.cwd = process, origin, native, cwd
+        self.condition = threading.Condition()
+        self.responses = {}
+        self.pending = {}
+        self.events = []
+        self.active = False
+        self.model = None
+        self.permission = None
+        self.catalog = {}
+        self.error = None
+        self.preflight = None
+        self.finished = False
+        self.native_process = None
+        threading.Thread(target=self._read, daemon=True, name='claude-cli-reader').start()
+
+    def bind_native_process(self):
+        if sys.platform != 'win32':
+            return
+        from bridge.platforms.windows import claude_process
+        pid = self.catalog.get('pid')
+        try:
+            if self.process.poll() is not None:
+                raise OSError('Claude CLI launcher exited before process binding')
+            start = (claude_process.process_start_filetime(pid) if pid == self.process.pid
+                     else claude_process.owned_child_start_filetime(pid, self.process.pid))
+        except OSError as exc:
+            raise BridgeUnavailable('无法确认 Claude Code 原生进程身份') from exc
+        if start is None:
+            raise BridgeUnavailable('Claude Code 原生进程已关闭')
+        self.native_process = (pid, start)
+
+    def _read(self):
+        try:
+            for line in self.process.stdout:
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                mismatched = False
+                with self.condition:
+                    kind = event.get('type')
+                    if kind == 'bridge_preflight':
+                        if self.preflight is None:
+                            self.preflight = event
+                        if isinstance(event.get('cwd'), str):
+                            self.cwd = event['cwd']
+                        if event.get('status') == 'blocked':
+                            self.error = event.get('message') or 'Claude Code 远端恢复前核验失败'
+                    elif kind == 'control_response':
+                        response = event.get('response') or {}
+                        self.responses[response.get('request_id')] = response
+                    elif kind == 'control_request' and (event.get('request') or {}).get('subtype') == 'can_use_tool':
+                        self.pending[event.get('request_id')] = event
+                    elif kind == 'control_cancel_request':
+                        self.pending.pop(event.get('request_id'), None)
+                    elif kind == 'system' and event.get('subtype') == 'init':
+                        if event.get('session_id') != self.native or event.get('cwd') != self.cwd:
+                            self.error = 'Claude 会话身份或工作目录不一致'
+                            mismatched = True
+                        self.model = event.get('model') or self.model
+                        self.permission = event.get('permissionMode') or self.permission
+                    elif kind == 'system' and event.get('subtype') == 'status':
+                        if event.get('permissionMode') in MODES:
+                            self.permission = event['permissionMode']
+                    elif kind == 'system' and event.get('subtype') == 'compact_boundary':
+                        self.events.append(event)
+                    elif kind == 'result':
+                        self.active = False
+                        self.pending.clear()
+                        self.events.append(event)
+                    elif kind == 'assistant':
+                        self.events.append(event)
+                    self.condition.notify_all()
+                if mismatched and (sys.platform != 'win32' or self.native_process is not None):
+                    self.close()
+        finally:
+            with self.condition:
+                self.finished = True
+                self.condition.notify_all()
+
+    def write(self, frame):
+        with self.condition:
+            if self.process.poll() is not None or self.error:
+                raise BridgeUnavailable(self.error or 'Claude Code 会话已关闭，请重新继续')
+            try:
+                self.process.stdin.write(json.dumps(frame, ensure_ascii=False) + '\n')
+                self.process.stdin.flush()
+            except (BrokenPipeError, OSError):
+                raise BridgeUnavailable('Claude Code 写入结果不明，请检查会话') from None
+
+    def control(self, request, timeout=20):
+        rid = str(uuid.uuid4())
+        self.write({'type': 'control_request', 'request_id': rid, 'request': request})
+        deadline = time.monotonic() + timeout
+        with self.condition:
+            while rid not in self.responses and self.process.poll() is None and time.monotonic() < deadline:
+                self.condition.wait(max(0, deadline-time.monotonic()))
+            response = self.responses.pop(rid, None)
+        if response and response.get('subtype') == 'error':
+            raise ClaudeControlRejected(response.get('error'))
+        if not response or response.get('subtype') != 'success':
+            raise BridgeUnavailable('Claude Code 控制请求未确认，请检查原会话')
+        return response.get('response') or {}
+
+    def close(self):
+        try:
+            if self.native_process is not None:
+                from bridge.platforms.windows import claude_process
+                pid, start = self.native_process
+                claude_process.terminate_matching_process(pid, start)
+                self.native_process = None
+        finally:
+            if self.process.poll() is None:
+                self.process.terminate()
+                try:
+                    self.process.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    self.process.kill()
+                    self.process.wait(timeout=3)
+
+
+class ClaudeCli:
+    def __init__(self, upload_root=None, profile_resolver=None):
+        self.profile_resolver = profile_resolver or (lambda: _profile())
+        self.lock = threading.RLock()
+        self.upload_root = Path(upload_root) if upload_root is not None else None
+        self.owned = {}
+        self.index = {}
+        self.auth_cache = None
+        self.auth_refreshing = False
+        self.closed = False
+
+    def _ready(self, profile, *, fresh=False):
+        if self.closed or not profile:
+            return False
+        now = time.time()
+        with self.lock:
+            cached = self.auth_cache
+            if not fresh and cached and cached[0] == profile['origin'] and cached[1] > now:
+                return cached[2]
+        ready = _auth_ready(profile)
+        with self.lock:
+            self.auth_cache = (profile['origin'], now + 15, ready)
+        return ready
+
+    def status(self):
+        if self.closed:
+            return {'cliAvailable': False, 'cliAuthReady': False}
+        profile = self.profile_resolver()
+        if not profile:
+            return {'cliAvailable': False, 'cliAuthReady': False}
+        with self.lock:
+            cached = self.auth_cache
+            ready = bool(cached and cached[0] == profile['origin'] and cached[1] > time.time() and cached[2])
+            if (not cached or cached[0] != profile['origin'] or cached[1] <= time.time()) and not self.auth_refreshing:
+                self.auth_refreshing = True
+                threading.Thread(target=self._refresh_auth_status, args=(profile,), daemon=True,
+                                 name='claude-cli-auth-status').start()
+        return {'cliAvailable': True, 'cliAuthReady': ready}
+
+    def _refresh_auth_status(self, profile):
+        try:
+            self._ready(profile)
+        finally:
+            with self.lock:
+                self.auth_refreshing = False
+
+    def busy(self):
+        with self.lock:
+            for owned in self.owned.values():
+                if owned.process.poll() is None:
+                    with owned.condition:
+                        if owned.active or owned.pending:
+                            return True
+            return False
+
+    def listing(self):
+        profile = self.profile_resolver()
+        if not profile:
+            return {'connected': False, 'sessions': []}
+        rows = {}
+        root = profile['directory']/'projects'
+        if root.is_dir():
+            for project in root.iterdir():
+                if not project.is_dir() or project.is_symlink():
+                    continue
+                for path in project.glob('*.jsonl'):
+                    if path.is_symlink():
+                        continue
+                    row = _saved(path, profile['origin'])
+                    if row:
+                        rows[row['id']] = row
+        with self.lock:
+            self.index = rows
+            public = [self._public(row) for row in rows.values()]
+        return {'connected': True, 'sessions': public}
+
+    def _public(self, row):
+        value = {key: item for key, item in row.items() if key not in ('events', 'path', 'origin', 'permissionKnown')}
+        value.update(context_fields(row['events']))
+        owned = self.owned.get(row['nativeId'])
+        live = owned and owned.origin == row['origin'] and owned.process.poll() is None and not owned.error
+        if live:
+            with owned.condition:
+                pending = dict(owned.pending)
+                active = owned.active
+        else:
+            pending, active = {}, False
+        awaiting = bool(pending)
+        value.update(status='active' if active else 'idle', runtimeKnown=True,
+                     connectionState='awaiting' if awaiting else 'active' if active else 'ready' if live else 'closed',
+                     requests=[{'id': rid, 'tool': event['request'].get('tool_name', '工具'),
+                                'input': event['request'].get('input', {}),
+                                'needsInput': event['request'].get('tool_name') == 'AskUserQuestion'}
+                               for rid, event in pending.items()])
+        if live:
+            value['model'] = owned.model or value['model']
+            value['permissionMode'] = owned.permission or value['permissionMode']
+        return value
+
+    def _get(self, sid):
+        profile = self.profile_resolver()
+        with self.lock:
+            cached = self.index.get(sid)
+        row = None
+        if cached and profile and cached['origin'] == profile['origin'] and not cached['path'].is_symlink():
+            row = _saved(cached['path'], profile['origin'])
+            if row:
+                with self.lock:
+                    self.index[sid] = row
+        else:
+            self.listing()
+            with self.lock:
+                row = self.index.get(sid)
+        if row is None:
+            raise ValueError('找不到 Claude Code 会话或原账号配置已切换')
+        return row
+
+    def contains(self, sid):
+        profile = self.profile_resolver()
+        with self.lock:
+            row = self.index.get(sid)
+        if row and profile and row['origin'] == profile['origin'] and not row['path'].is_symlink() and row['path'].is_file():
+            return True
+        self.listing()
+        return sid in self.index
+
+    def create(self, cwd, origin, message):
+        profile = self.profile_resolver()
+        if not profile or profile['origin'] != origin or not self._ready(profile, fresh=True):
+            raise BridgeUnavailable('原 Claude Code 账号配置已变化或不可用')
+        project = Path(cwd).resolve(strict=True)
+        if not project.is_dir():
+            raise ValueError('原项目目录不可用')
+        native = str(uuid.uuid4())
+        sid = model.gateway_id('cli:' + origin, native)
+        env = managed_api_env() if profile.get('managedApi') else os.environ.copy()
+        env['CLAUDE_CONFIG_DIR'] = str(profile['directory'])
+        command = [profile['binary'], '-p', '--session-id', native, '--input-format', 'stream-json',
+                   '--output-format', 'stream-json', '--verbose', '--replay-user-messages',
+                   '--setting-sources', 'user,project,local', '--permission-prompt-tool', 'stdio',
+                   *_permission_prompt_args(profile['binary'], env), '--allow-dangerously-skip-permissions']
+        if self.upload_root is not None:
+            upload_dir = self.upload_root/DesktopUploads.scope('claude', sid)
+            upload_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+            if self.upload_root.is_symlink() or upload_dir.is_symlink():
+                raise ValueError('Claude Code 附件目录无效')
+            command.extend(('--add-dir', str(upload_dir.resolve())))
+        fresh = self.profile_resolver()
+        if not fresh or fresh['origin'] != origin:
+            raise BridgeUnavailable('原 Claude Code 账号配置已变化或不可用')
+        process = subprocess.Popen(command, cwd=str(project), env=env, stdin=subprocess.PIPE,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                   encoding='utf-8', errors='replace', bufsize=1)
+        owned = _Owned(process, origin, native, str(project))
+        try:
+            owned.catalog = owned.control({'subtype': 'initialize', 'hooks': None}, timeout=30)
+            owned.bind_native_process()
+            if owned.error:
+                raise BridgeUnavailable(owned.error)
+            owned.permission = owned.catalog.get('current_permission_mode')
+            with self.lock:
+                self.owned[native] = owned
+            message_id = str(uuid.uuid4())
+            with owned.condition:
+                owned.active = True
+                owned.write({'type': 'user', 'uuid': message_id,
+                             'message': {'role': 'user', 'content': message}})
+            deadline = time.monotonic() + 20
+            while time.monotonic() < deadline:
+                self.listing()
+                with self.lock:
+                    row = self.index.get(sid)
+                    if row and any(event.get('type') == 'user' and event.get('uuid') == message_id
+                                   for event in row['events']):
+                        return {'status': 'ready', 'result': {'id': sid}}
+                with owned.condition:
+                    if owned.error or owned.finished:
+                        break
+                time.sleep(.1)
+            raise BridgeUnavailable('Claude Code 新建消息结果不明，请检查会话列表')
+        except Exception:
+            if native not in self.owned:
+                owned.close()
+            raise
+
+    def call(self, action, sid, body):
+        try:
+            row = self._get(sid)
+        except (ValueError, BridgeUnavailable) as exc:
+            if action == 'resume':
+                raise ResumePreflightBlocked(str(exc)) from exc
+            raise
+        native = row['nativeId']
+        with self.lock:
+            owned = self.owned.get(native)
+            if owned and owned.error and owned.process.poll() is None:
+                raise (ResumePreflightBlocked if action == 'resume' else BridgeUnavailable)(owned.error)
+            if owned and owned.origin != row['origin'] and owned.process.poll() is None:
+                raise (ResumePreflightBlocked if action == 'resume' else BridgeUnavailable)(
+                    '此会话已由另一 Claude Code 配置继续，请先结束该连接')
+            if owned and (owned.origin != row['origin'] or owned.process.poll() is not None):
+                owned = None
+            public = self._public(row)
+            live = owned is not None
+            if action == 'detail':
+                if live:
+                    with owned.condition:
+                        events = row['events'] + list(owned.events)
+                else:
+                    events = row['events']
+                public.update(context_fields(events))
+                messages = model.transcript(events)
+                unique = {item['id']: item for item in messages}
+                can_resume = (not live and row['permissionKnown'] and self._ready(self.profile_resolver())
+                              and Path(row['cwd']).is_dir())
+                return {'connected': True, 'session': public, 'messages': list(unique.values()),
+                        'turns': model.turns(events),
+                        'notice': '无法确认原会话权限模式，请在电脑端继续' if not live and not row['permissionKnown'] else '',
+                        'capabilities': {
+                            'resume': can_resume,
+                            'send': live and public['connectionState'] == 'ready',
+                            'models': live, 'permissions': live, 'stop': live,
+                            'attachments': True, 'queue': False, 'steer': False, 'skills': live}}
+            if action == 'catalog':
+                if not live:
+                    return {'models': [], 'capabilities': {'models': False}, 'notice': '请先继续这条 Claude Code 会话'}
+                return _cli_catalog(owned, public, body.get('refresh') is True)
+            if action == 'access' and 'mode' not in body:
+                options = [{'value': mode, 'label': label, 'description': description}
+                           for mode, label, description in PERMISSION_OPTIONS]
+                return {'status': 'accepted', 'mode': public['permissionMode'],
+                        'options': options if live else []}
+            if action == 'resume':
+                if live:
+                    return {'status': 'ready'}
+                profile = self.profile_resolver()
+                if not profile or profile['origin'] != row['origin'] or not self._ready(profile, fresh=True):
+                    raise ResumePreflightBlocked('原 Claude Code 账号配置已变化或不可用')
+                if not row['permissionKnown'] or row['permissionMode'] not in MODES:
+                    raise ResumePreflightBlocked('无法确认原会话权限模式，请在电脑端继续')
+                try:
+                    cwd = str(Path(row['cwd']).resolve(strict=True))
+                except OSError as exc:
+                    raise ResumePreflightBlocked('原项目目录不可用，请在电脑端检查') from exc
+                env = managed_api_env() if profile.get('managedApi') else os.environ.copy()
+                env['CLAUDE_CONFIG_DIR'] = str(profile['directory'])
+                command = [profile['binary'], '-p', '--resume', native, '--input-format', 'stream-json',
+                           '--output-format', 'stream-json', '--verbose', '--replay-user-messages',
+                           '--setting-sources', 'user,project,local', '--permission-mode', row['permissionMode'],
+                           '--permission-prompt-tool', 'stdio', '--allow-dangerously-skip-permissions']
+                if self.upload_root is not None:
+                    upload_dir = self.upload_root/DesktopUploads.scope('claude', sid)
+                    upload_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    if self.upload_root.is_symlink() or upload_dir.is_symlink():
+                        raise ResumePreflightBlocked('Claude Code 附件目录无效')
+                    command.extend(('--add-dir', str(upload_dir.resolve())))
+                if row['model']:
+                    command.extend(('--model', row['model']))
+                command.extend(_permission_prompt_args(profile['binary'], env))
+                try:
+                    assert_session_closed(profile['directory'], native)
+                except BridgeUnavailable as exc:
+                    raise ResumePreflightBlocked(str(exc)) from exc
+                process = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.PIPE,
+                                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+                                           encoding='utf-8', errors='replace', bufsize=1)
+                owned = _Owned(process, profile['origin'], native, cwd)
+                try:
+                    owned.catalog = owned.control({'subtype': 'initialize', 'hooks': None}, timeout=30)
+                    owned.bind_native_process()
+                    if owned.error:
+                        raise BridgeUnavailable(owned.error)
+                    owned.permission = owned.catalog.get('current_permission_mode') or row['permissionMode']
+                    if owned.permission != row['permissionMode']:
+                        raise BridgeUnavailable('Claude Code 未保留原会话权限模式')
+                except Exception:
+                    owned.close()
+                    raise
+                self.owned[native] = owned
+                return {'status': 'ready'}
+            if not live:
+                raise BridgeUnavailable('请先继续这条 Claude Code 会话')
+            if action == 'send':
+                if body.get('mode') in ('queue', 'steer'):
+                    raise ValueError('Claude Code CLI 暂不支持此发送选项')
+                selected = body.get('plugins') or []
+                if not isinstance(selected, list) or len(selected) > 1:
+                    raise ValueError('Claude Code CLI 每条消息只能调用一个 Skill')
+                if selected:
+                    offered = {skill['id'] for skill in _skill_catalog(owned.catalog)
+                               if skill['selectable']}
+                    if selected[0] not in offered:
+                        raise ValueError('技能已不可用，请刷新后选择')
+                    message = '/' + selected[0] + (' ' + body['text'] if body['text'].strip() else '')
+                else:
+                    message = body['text']
+                content = _message_content({**body, 'text': message})
+                with owned.condition:
+                    if owned.active or owned.pending:
+                        raise BridgeUnavailable('请等待当前 Claude Code 任务结束后再发送')
+                    owned.active = True
+                    owned.write({'type': 'user', 'message': {'role': 'user', 'content': content}})
+            elif action == 'stop':
+                owned.control({'subtype': 'interrupt'})
+            elif action == 'settings':
+                _set_cli_settings(owned, body)
+            elif action == 'access':
+                mode = body.get('mode')
+                if mode not in MODES:
+                    raise ValueError('请选择 Claude Code 提供的权限模式')
+                if mode == 'bypassPermissions' and body.get('confirmed') is not True:
+                    raise ValueError('完全访问需要明确确认')
+                result = owned.control({'subtype': 'set_permission_mode', 'mode': mode})
+                if result.get('mode') != mode:
+                    raise BridgeUnavailable('Claude Code 未确认权限模式')
+                with owned.condition:
+                    owned.permission = mode
+            elif action == 'respond':
+                rid = body.get('requestId')
+                with owned.condition:
+                    pending = owned.pending.get(rid)
+                if not pending:
+                    raise ValueError('请求已处理或过期')
+                decision = {'accept': 'allow', 'decline': 'deny'}.get(body.get('decision'))
+                if not decision:
+                    raise ValueError('请选择本次允许或拒绝')
+                response = {'behavior': decision}
+                if decision == 'allow':
+                    updated = pending['request'].get('input', {})
+                    if pending['request'].get('tool_name') == 'AskUserQuestion':
+                        updated = dict(updated)
+                        answers = {}
+                        for index, question in enumerate(updated.get('questions') or []):
+                            key = str(question.get('id') or question.get('question') or index)
+                            values = ((body.get('answers') or {}).get(key) or {}).get('answers') or []
+                            if not values or not all(isinstance(value, str) for value in values):
+                                raise ValueError('请回答每一项问题')
+                            answers[question['question']] = ', '.join(values)
+                        updated['answers'] = answers
+                    response['updatedInput'] = updated
+                else:
+                    response['message'] = '用户拒绝了本次操作'
+                # Claim before a potentially ambiguous pipe write. A new HTTP request ID
+                # must never replay an approval whose result may already be applied.
+                with owned.condition:
+                    owned.pending.pop(rid, None)
+                owned.write({'type': 'control_response', 'response': {'subtype': 'success',
+                             'request_id': rid, 'response': response}})
+            else:
+                raise ValueError('不支持的 Claude Code 操作')
+            return {'status': 'accepted'}
+
+    def close(self):
+        with self.lock:
+            self.closed = True
+            for owned in self.owned.values():
+                owned.close()
+            self.owned.clear()

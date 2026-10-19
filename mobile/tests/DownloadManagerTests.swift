@@ -13,6 +13,39 @@ import Foundation
         precondition(DownloadManager.allows(URL(string: origin + path + "?path=a")!, origin: origin))
         precondition(!DownloadManager.allows(URL(string: "https://other.invalid" + path)!, origin: origin))
         precondition(!DownloadManager.allows(URL(string: origin + "/api/desktop-sessions/claude/send")!, origin: origin))
+        let diagnostic = "/api/sessions/diagnostics", thread = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        precondition(DownloadManager.allows(URL(string: origin + diagnostic)!, origin: origin))
+        precondition(DownloadManager.allows(URL(string: origin + diagnostic + "?thread=" + thread)!, origin: origin))
+        for suffix in ["?thread=bad", "?thread=" + thread + "&extra=1", "?other=1", "/extra", "#fragment"] {
+            precondition(!DownloadManager.allows(URL(string: origin + diagnostic + suffix)!, origin: origin))
+        }
+        let scopeA = origin + "/d/" + String(repeating: "a", count: 32)
+        let scopeB = origin + "/d/" + String(repeating: "b", count: 32)
+        precondition(DownloadManager.allows(URL(string: scopeA + diagnostic)!, origin: scopeA))
+        precondition(!DownloadManager.allows(URL(string: scopeA + diagnostic)!, origin: scopeB))
+        let report = DownloadManager(scratch: scratch)
+        var reportState = DownloadManager.Snapshot()
+        report.credentials = { _, _, done in done("codex_mobile_session=fixture") }
+        report.onChange = { reportState = $0 }
+        report.start(URL(string: origin + diagnostic)!, origin: origin)
+        wait("diagnostic download did not finish") { reportState.phase == .complete }
+        precondition(reportState.name == "codex-session-diagnostics.json")
+        let reportData = try Data(contentsOf: reportState.file!)
+        precondition(reportData == Data("{\"hosts\":[],\"phase\":\"discovery\"}".utf8))
+        report.cancel(); wait("diagnostic cleanup") { reportState.phase == .cancelled }
+        let partialReport = DownloadManager(scratch: scratch)
+        var partialState = DownloadManager.Snapshot(), pausedReport = false
+        partialReport.credentials = { _, _, done in done("codex_mobile_session=fixture") }
+        partialReport.onChange = { value in
+            partialState = value
+            if !pausedReport, value.phase == .downloading, value.received > 65536 {
+                pausedReport = true; partialReport.pause()
+            }
+        }
+        partialReport.start(URL(string: origin + diagnostic + "?thread=" + thread)!, origin: origin)
+        wait("diagnostic partial did not pause") { partialState.phase == .paused }
+        precondition(partialState.received > 0 && !partialState.canResume, "dynamic report partial was resumable")
+        partialReport.cancel(); wait("diagnostic partial cleanup") { partialState.phase == .cancelled }
         precondition(DownloadManager.filename("../folder/hello.txt") == "hello.txt")
         precondition(DownloadManager.filename("..") == "download")
         for scenario in ["pause", "changed", "changed-409", "offline-409", "etag", "ignored-range", "revoked", "cancel", "wrong-range", "redirect", "unauthorized", "oversize", "no-etag", "unknown", "unknown-range", "empty", "large"] {

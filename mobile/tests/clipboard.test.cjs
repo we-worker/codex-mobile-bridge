@@ -5,17 +5,19 @@ const vm = require('node:vm');
 const path = require('node:path');
 const root = path.resolve(__dirname, '../..');
 const script = fs.readFileSync(path.join(root, 'mobile/shared/web/mobile-clipboard.js'), 'utf8');
-function fixture({ reply = 'copied', late = false, frame = false } = {}) {
+const html = fs.readFileSync(path.join(root, 'web/index.html'), 'utf8');
+function fixture({ reply = 'copied', late = false, frame = false, domReadyBeforeNative = false } = {}) {
   const events = {}, writes = [], errors = [], timers = [];
   const context = { navigator: {}, setTimeout: fn => timers.push(fn),
     CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init.detail; } },
-    document: { addEventListener: (name, fn) => { events[name] = fn; }, dispatchEvent: e => errors.push(e.detail) },
+    document: { readyState: 'loading', addEventListener: (name, fn) => { events[name] = fn; }, dispatchEvent: e => errors.push(e.detail) },
     prompt: (command, text) => { writes.push({ command, text }); return reply; }
   };
   context.window = context; context.top = frame ? {} : context;
   vm.createContext(context);
   const loadWeb = () => vm.runInContext(fs.readFileSync(path.join(root, 'web/features/chat/message-actions.js'), 'utf8'), context);
   if (!late) loadWeb();
+  if (domReadyBeforeNative) { context.document.readyState = 'complete'; events.DOMContentLoaded?.(); }
   vm.runInContext(script.replace('__BRIDGE_CLIPBOARD_TOKEN__', 'test-token'), context);
   if (late) { loadWeb(); events.DOMContentLoaded(); }
   const button = { disabled: false, textContent: '复制' };
@@ -34,6 +36,16 @@ test('code-copy path uses the same async writer and handles deferred page script
   const f = fixture({ late: true }); f.button.textContent = '复制代码'; f.click();
   await f.context.BridgeClipboard.copy(async () => 'a\n b\t', f.button);
   assert.equal(f.writes[0].text, 'a\n b\t'); assert.equal(f.button.textContent, '已复制');
+});
+test('published native shells can install after DOMContentLoaded with the eager clipboard definition', async () => {
+  assert.match(html, /<script src="\/message-actions\.js\?[^\"]+" defer><\/script>/);
+  assert.doesNotMatch(html, /<script data-bridge-src="\/message-actions\.js/);
+  const eager = [...html.matchAll(/<script src="([^"]+)" defer><\/script>/g)].map(match => match[1]);
+  assert.deepEqual(eager.map(url => url.split('?')[0]), ['/message-actions.js']);
+  const f = fixture({ domReadyBeforeNative: true });
+  f.click();
+  await f.context.BridgeClipboard.copy(() => 'late native copy', f.button);
+  assert.equal(f.writes.at(-1).text, 'late native copy');
 });
 test('native rejection does not report copied or open the manual-copy dialog', async () => {
   const f = fixture({ reply: null }); f.click();

@@ -3,29 +3,37 @@ const test=require('node:test'),assert=require('node:assert/strict');
 const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
 
 // Run the actual phone handlers with an isolated DOM and notification API.
-async function fixture(){
-  const nodes=new Map(),saved=new Map(),writes=[],listRequests=[];
+async function fixture({sessionStore=new Map(),localStore=new Map(),skipStartup=false}={}){
+  const nodes=new Map(),saved=new Map(),writes=[],listRequests=[],acknowledgements=[];
   const node=(tag='')=>({tagName:tag.toUpperCase(),children:[],value:'',checked:false,disabled:false,hidden:false,open:false,textContent:'',dataset:{},options:[],style:{setProperty(k,v){this[k]=v;}},scrollTop:0,parentElement:{},listeners:{},
     setAttribute(k,v){this[k]=v;},after(child){this.nextSibling=child;},getBoundingClientRect(){return {width:390,height:844};},classList:{add(){},remove(){},toggle(){},contains(){return false;}},addEventListener(type,listener){(this.listeners[type]??=[]).push(listener);},dispatchEvent(event){for(const listener of this.listeners[event.type]||[])listener(event);},replaceChildren(...values){this.children=values;},append(...values){this.children.push(...values);},querySelectorAll(){return [];},querySelector(){return {disabled:false};},
     showModal(){this.open=true;},close(){this.open=false;this.dispatchEvent({type:'close'});}});
   const html=fs.readFileSync(path.join(__dirname,'../web/index.html'),'utf8');
   for(const match of html.matchAll(/\bid="([^"]+)"/g))nodes.set(match[1],node());
   const channelButtons=['bark','ntfy','pushplus'].map(channel=>Object.assign(node('button'),{dataset:{notificationChannel:channel}}));
-  const storage=()=>({getItem(){return null;},setItem(){},removeItem(){}});
+  const localStorage={get length(){return localStore.size;},key(index){return [...localStore.keys()][index]??null;},getItem(key){return localStore.get(key)??null;},setItem(key,value){localStore.set(key,String(value));},removeItem(key){localStore.delete(key);}};
+  const scopedStorage={get length(){return sessionStore.size;},key(index){return [...sessionStore.keys()][index]??null;},getItem(key){return sessionStore.get(key)??null;},setItem(key,value){sessionStore.set(key,String(value));},removeItem(key){sessionStore.delete(key);},clear(){sessionStore.clear();}};
   const archiveToggles=[];
   const archiveFilter={classList:{toggle:(name,enabled)=>archiveToggles.push([name,enabled])}};
   let nextPost,nextGet;
   const response=(data,status=200)=>({ok:status===200,status,json:async()=>data});
-  let listResponse=()=>response({sessions:[],unavailableHosts:[]});
-  const context=vm.createContext({ClientNavigation:class{constructor(){this.provider="codex";}async refresh(){}acknowledgeList(){}},DesktopSessionsView:class{clear(){}},Workbench:class{open(){}reset(){}setThumbnails(){}relabel(){}},navigator:{userAgent:'test'},document:{addEventListener(){},documentElement:{},getElementById:id=>nodes.get(id),querySelector:selector=>selector==='.archive-filter'?archiveFilter:{disabled:false},querySelectorAll:selector=>selector==='[data-notification-channel]'?channelButtons:[],createElement:node},
-    renderMarkdown(){},window:{addEventListener(){}},localStorage:storage(),sessionStorage:storage(),
+  let listResponse=()=>response({sessions:[],unavailableHosts:[]}),knownRows=[];
+  const context=vm.createContext({ClientNavigation:class{constructor(){this.provider="codex";}async refresh(){}acknowledgeList(provider,value){acknowledgements.push({provider,value});}},DesktopSessionsView:class{bindListCache(){}previewCachedList(){return false;}clear(){}},Workbench:class{constructor(){this.current={};}open(){}reset(){}setThumbnails(){}relabel(){}},navigator:{userAgent:'test'},document:{addEventListener(){},documentElement:{},getElementById:id=>nodes.get(id),querySelector:selector=>selector==='.archive-filter'?archiveFilter:{disabled:false},querySelectorAll:selector=>selector==='[data-notification-channel]'?channelButtons:[],createElement:node},
+    renderMarkdown(){},window:{addEventListener(){}},localStorage,sessionStorage:scopedStorage,
     location:{hash:'',pathname:'/',search:''},history:{replaceState(){}},setTimeout(){},clearTimeout(){},setInterval(){},
-    ChatTimeline:class{constructor(){this.abort=new AbortController();}async start(){}dispose(){this.abort.abort();}relabel(){}},
+    ChatTimeline:class{constructor(){this.abort=new AbortController();}async start(){}dispose(){this.abort.abort();}relabel(){}refreshActions(){}},
     fetch:async(url,options={})=>{
       if(url.includes('/respond?')){writes.push({url,body:JSON.parse(options.body)});return response({status:'accepted'});}
       if(url==='/api/auth')return response({authenticated:false});
       if(url.includes('/reconnect'))return response({ok:true});
-      if(url.startsWith('/api/sessions?')){listRequests.push(url);return listResponse(url);}
+      if(url.startsWith('/api/sessions?')){
+        listRequests.push(url);const result=await listResponse(url);
+        if(!result.ok)return result;
+        const data=await result.json(),offset=Number(new URL(url,'http://test').searchParams.get('offset')||0);
+        // Older fixture pages modelled the aggregate endpoint. Adapt their continuation to the host prefix contract.
+        if(offset&&data.complete===undefined&&!data.remoteHosts) data.sessions=[...knownRows,...data.sessions];
+        knownRows=data.sessions;return response(data);
+      }
       if(url==='/api/activity')return response({sessions:[]});
       if(url.startsWith('/api/notifications/channels/')||url.includes('/rename?')){
         if(options.method!=='POST'&&nextGet){const handle=nextGet;nextGet=null;return handle(url);}
@@ -52,10 +60,14 @@ async function fixture(){
       return response(saved.get(url)||{available:true,watching:false,notifyOnCompletion:false,requests:'inherit',completion:'inherit'});
     }});
   vm.runInContext(fs.readFileSync(path.join(__dirname,'../web/features/clients/client-navigation.js'),'utf8').match(/^function isCodexClient.*$/m)[0],context);
-  for(const file of ['web/hosts/environment.js','web/shared/i18n.js','web/features/chat/list-sync.js','web/features/accounts/account.js','web/features/chat/modes.js','web/features/chat/attachments.js','web/features/chat/activity.js','web/features/chat/fast-mode.js','web/features/chat/message-actions.js','web/features/chat/permissions.js','web/shell/app.js'])vm.runInContext(fs.readFileSync(path.join(__dirname,'..',file),'utf8'),context);
+  for(const file of ['web/hosts/environment.js','web/shared/i18n.js','web/features/chat/list-sync.js','web/features/accounts/account.js','web/features/chat/modes.js','web/features/chat/attachments.js','web/features/chat/activity.js','web/features/chat/fast-mode.js','web/features/chat/message-actions.js','web/features/chat/permissions.js','web/shell/app.js']){
+    let source=fs.readFileSync(path.join(__dirname,'..',file),'utf8');
+    if(skipStartup&&file==='web/shell/app.js')source=source.replace('startFromLink(initialPairingToken);initialPairingToken=null;','initialPairingToken=null;');
+    vm.runInContext(source,context);
+  }
   await new Promise(setImmediate);
   const run=code=>vm.runInContext(code,context);
-  return {nodes,channelButtons,writes,saved,run,html,response,archiveToggles,listRequests,setList:handle=>{listResponse=handle;},setPost:handle=>{nextPost=handle;},setGet:handle=>{nextGet=handle;},
+  return {nodes,channelButtons,writes,saved,run,html,response,archiveToggles,listRequests,sessionStore,localStore,acknowledgements,setList:handle=>{listResponse=handle;},setPost:handle=>{nextPost=handle;},setGet:handle=>{nextGet=handle;},
     async open(id='11111111-1111-4111-8111-111111111111',host='local'){
       await run(`openChat(${JSON.stringify(id)},${JSON.stringify(host)})`);await new Promise(setImmediate);
     },
@@ -371,4 +383,109 @@ test('downward gestures load more when collapsed projects cannot scroll, without
   root.dispatchEvent({type:'touchstart',touches:[{clientY:100,clientX:20}]});
   root.dispatchEvent({type:'touchmove',touches:[{clientY:40,clientX:20}]});await new Promise(setImmediate);
   assert.equal(ui.listRequests.length,3);assert.match(ui.listRequests[2],/offset=200/);assert.equal(root.children.filter(row=>row.dataset?.id).length,201);
+});
+
+test('local and fast SSH chats paint while another host is still reading',async()=>{
+  const ui=await fixture(),root=ui.nodes.get('sessions');ui.nodes.get('app').hidden=false;
+  const row=(id,host,recency)=>({id,host,title:id,projectKey:host,projectName:host,recency});
+  let release;
+  ui.setList(url=>{
+    const host=new URL(url,'http://test').searchParams.get('host');
+    if(host==='local')return ui.response({sessions:[row('local-chat','local',3)],remoteHosts:['remote-fast','remote-slow'],availableSources:['desktop'],unavailableHosts:[],complete:true,notificationRead:{streamId:'s',cursor:12}});
+    if(host==='remote-fast')return ui.response({sessions:[row('fast-chat',host,2)],availableSources:['cli'],unavailableHosts:[],complete:true});
+    return new Promise(resolve=>{release=()=>resolve(ui.response({sessions:[row('slow-chat',host,1)],availableSources:[],unavailableHosts:[],complete:true}));});
+  });
+  const pending=ui.run('loadList(true)');await new Promise(setImmediate);
+  assert.deepEqual(root.children.map(child=>child.dataset.id),['local-chat','fast-chat']);
+  assert.equal(ui.run('listOffset'),0);assert.equal(ui.run('listComplete'),false);assert.equal(ui.acknowledgements.length,0);
+  release();await pending;
+  assert.deepEqual(root.children.map(child=>child.dataset.id),['local-chat','fast-chat','slow-chat']);
+  assert.equal(ui.run('listOffset'),3);assert.equal(ui.run('listComplete'),true);
+  assert.equal(ui.acknowledgements.length,1);
+});
+
+test('cold local empty result remains loading until the remote result is known',async()=>{
+  const ui=await fixture(),root=ui.nodes.get('sessions');ui.nodes.get('app').hidden=false;
+  let release;
+  ui.setList(url=>new URL(url,'http://test').searchParams.get('host')==='local'
+    ?ui.response({sessions:[],remoteHosts:['remote-slow'],availableSources:[],unavailableHosts:[],complete:true})
+    :new Promise(resolve=>{release=()=>resolve(ui.response({sessions:[],availableSources:[],unavailableHosts:[],complete:true}));}));
+  const pending=ui.run('loadList(true)');await new Promise(setImmediate);
+  assert.equal(root.children[0].textContent,ui.run("t('正在读取…')"));assert.equal(ui.run('listComplete'),false);
+  release();await pending;assert.equal(root.children[0].textContent,ui.run("t('没有找到聊天。')"));
+});
+
+test('refresh preserves all loaded pages and their scroll position',async()=>{
+  const ui=await fixture(),root=ui.nodes.get('sessions');ui.nodes.get('app').hidden=false;
+  const all=sessionPage(0,151).sessions;
+  ui.setList(url=>{
+    const offset=Number(new URL(url,'http://test').searchParams.get('offset'));
+    return ui.response({sessions:all.slice(0,offset+101),remoteHosts:[],availableSources:['desktop'],unavailableHosts:[],complete:true});
+  });
+  await ui.run('loadList(true)');assert.equal(root.children.length,100);
+  await ui.run('loadList()');assert.equal(root.children.length,151);
+  root.scrollTop=3000;await ui.run('loadList(true)');
+  assert.equal(root.children.length,151);assert.equal(root.scrollTop,3000);
+  assert.match(ui.listRequests.at(-1),/offset=51/);
+});
+
+test('partial empty and failed remote never claim no chats or discard earlier rows',async()=>{
+  const ui=await fixture(),root=ui.nodes.get('sessions');ui.nodes.get('app').hidden=false;
+  const remote={id:'saved',host:'remote-a',title:'Saved',projectKey:'p',projectName:'P',recency:1};
+  ui.setList(url=>new URL(url,'http://test').searchParams.get('host')==='local'
+    ?ui.response({sessions:[],remoteHosts:['remote-a'],availableSources:[],unavailableHosts:[],complete:true})
+    :ui.response({sessions:[remote],availableSources:['desktop'],unavailableHosts:[],complete:true}));
+  await ui.run('loadList(true)');assert.equal(root.children[0].dataset.id,'saved');
+  let release;
+  ui.setList(url=>new URL(url,'http://test').searchParams.get('host')==='local'
+    ?ui.response({sessions:[],remoteHosts:['remote-a'],availableSources:[],unavailableHosts:[],complete:true})
+    :new Promise(resolve=>{release=()=>resolve(ui.response({sessions:[],availableSources:[],unavailableHosts:[{host:'remote-a',label:'Remote A',error:'Offline'}],complete:false}));}));
+  const pending=ui.run('loadList(true)');await new Promise(setImmediate);
+  assert.equal(root.children[0].dataset.id,'saved');assert.equal(ui.run('listComplete'),false);
+  release();await assert.rejects(pending,/Offline/);
+  assert.equal(root.children[0].dataset.id,'saved');assert.equal(ui.run('listOffset'),1);
+  assert.equal(ui.run('listComplete'),false);assert.equal(ui.acknowledgements.length,1);
+});
+
+test('refresh keeps a dismissed SSH fault dismissed while that host is pending',async()=>{
+  const ui=await fixture(),root=ui.nodes.get('host-errors');ui.nodes.get('app').hidden=false;
+  ui.run("dismissedHostFaults.set('|remote-a','Offline')");
+  let release;
+  ui.setList(url=>new URL(url,'http://test').searchParams.get('host')==='local'
+    ?ui.response({sessions:[],remoteHosts:['remote-a'],availableSources:[],unavailableHosts:[],complete:true})
+    :new Promise(resolve=>{release=()=>resolve(ui.response({sessions:[],availableSources:[],unavailableHosts:[{host:'remote-a',label:'Remote A',error:'Offline'}],complete:false}));}));
+  const pending=ui.run('loadList(true)');await new Promise(setImmediate);
+  assert.equal(ui.run("dismissedHostFaults.get('|remote-a')"),'Offline');
+  release();await assert.rejects(pending,/Offline/);
+  assert.equal(root.hidden,true);assert.equal(ui.run("dismissedHostFaults.get('|remote-a')"),'Offline');
+});
+
+test('list snapshot is restored only after matching authenticated gateway and session',async()=>{
+  const sessionStore=new Map(),first=await fixture({sessionStore,skipStartup:true});first.nodes.get('app').hidden=false;
+  first.run("listIdentity=listAuthIdentity({authenticated:true,listCacheIdentity:'"+'a'.repeat(64)+"'})");
+  first.setList(()=>first.response({sessions:[{id:'saved',host:'local',title:'Saved',projectKey:'p',projectName:'P',recency:1}],remoteHosts:[],availableSources:['desktop'],unavailableHosts:[],complete:true}));
+  await first.run('loadList(true)');assert.equal(sessionStore.size,1);
+  const second=await fixture({sessionStore,skipStartup:true});assert.equal(second.run('restoreListSnapshot()'),false);
+  second.run("listIdentity=listAuthIdentity({authenticated:true,listCacheIdentity:'"+'b'.repeat(64)+"'})");
+  assert.equal(second.run('restoreListSnapshot()'),false);
+  second.run("listIdentity=listAuthIdentity({authenticated:true,listCacheIdentity:'"+'a'.repeat(64)+"'})");
+  assert.equal(second.run('listIdentity'),first.run('listIdentity'));
+  assert.equal(second.run('currentListFilter()'),first.run('currentListFilter()'));
+  assert.equal(second.run('restoreListSnapshot()'),true);assert.equal(second.nodes.get('sessions').children[0].dataset.id,'saved');
+  second.run('clearListSnapshot()');assert.equal(sessionStore.size,0);
+});
+
+test('LAN HTTP list snapshots use the server identity without Web Crypto',async()=>{
+  const ui=await fixture({skipStartup:true});
+  assert.equal(ui.run("listAuthIdentity({authenticated:true,listCacheIdentity:'"+'c'.repeat(64)+"'})"),'c'.repeat(64));
+  assert.equal(ui.run("listAuthIdentity({authenticated:false,listCacheIdentity:'"+'c'.repeat(64)+"'})"),'');
+  assert.equal(ui.run("listAuthIdentity({authenticated:true,listCacheIdentity:'unsafe'})"),'');
+});
+
+test('logout cache cleanup removes desktop provider snapshots with Codex snapshots',async()=>{
+  const sessionStore=new Map([['desktop-list-v1:secret:gateway:claude','private'],['codex-list-v1:secret:all','private'],['unrelated','keep']]);
+  const localStore=new Map([['desktop-list-v1:secret:gateway:claude','private'],['desktop-list-v1:secret:gateway:deepseek','private'],['unrelated','keep']]);
+  const ui=await fixture({sessionStore,localStore,skipStartup:true});ui.run('clearListSnapshot()');
+  assert.deepEqual([...sessionStore], [['unrelated','keep']]);
+  assert.deepEqual([...localStore], [['unrelated','keep']]);
 });

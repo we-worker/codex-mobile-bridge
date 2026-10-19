@@ -155,6 +155,103 @@ test('Tailscale detection fills a read-only URL and preserves its unsaved identi
   assert.equal(controls.find(node=>node.dataset.connectionAction==='tailscaleInspect').textContent,'Detect Tailscale and read URL');
 });
 
+test('existing tunnel needs only an HTTPS address and keeps NAS upstream in the advanced location',async()=>{
+  const descendants=node=>[node,...(node.children||[]).flatMap(descendants)];
+  for(const language of ['zh-CN','en']){
+    const ui=await renderer(language);
+    ui.run(`connectionDraft=[{id:'entry',name:'Home',enabled:true,accessMode:'external',publicUrl:'',proxyUpstream:''}];renderConnections();`);
+    let controls=descendants(ui.nodes.get('connections'));
+    const url=controls.find(node=>node.dataset.connectionField==='publicUrl');
+    assert.equal(url.required,true);assert.equal(url.value,'');
+    assert.equal(controls.some(node=>node.dataset.connectionField==='proxyUpstream'),false);
+    assert.equal(controls.some(node=>node.dataset.connectionAction==='exportDeployment'),false);
+    assert.equal(controls.some(node=>node.dataset.connectionAction==='checkEntry'),true);
+    assert.equal(controls.find(node=>node.textContent==='http://127.0.0.1:8787')?.textContent,'http://127.0.0.1:8787');
+    url.value='bridge.example.com:8443';url.oninput();url.onblur();
+    assert.equal(ui.run('connectionDraft[0].publicUrl'),'https://bridge.example.com:8443');
+    assert.equal(ui.run("normalizeExternalUrl('http://bridge.example.com')"),'http://bridge.example.com');
+    assert.equal(ui.run("normalizeExternalUrl('bridge.example.com/path')"),'bridge.example.com/path');
+    const location=controls.find(node=>node.dataset.connectionField==='targetLocation');location.value='nas';location.onchange();
+    assert.equal(ui.run('connectionDraft[0].accessMode'),'nas');
+    controls=descendants(ui.nodes.get('connections'));
+    assert.equal(controls.some(node=>node.dataset.connectionField==='proxyUpstream'),true);
+    assert.equal(controls.some(node=>node.dataset.connectionAction==='exportDeployment'),true);
+    const copy=controls.map(node=>node.textContent).join(' ');
+    assert.match(copy,language==='en'?/Enable LAN access/:/需要开启局域网访问/);
+    assert.doesNotMatch(copy,language==='en'?/[\u4e00-\u9fff]/:/Fixed domain · NAS/);
+  }
+});
+
+test('submitting a focused bare hostname saves a strict HTTPS origin',async()=>{
+  const ui=await renderer();
+  ui.run(`connectionDraft=[{id:'entry',name:'Home',enabled:true,accessMode:'external',publicUrl:''}];renderConnections();`);
+  const descendants=node=>[node,...(node.children||[]).flatMap(descendants)];
+  const url=descendants(ui.nodes.get('connections')).find(node=>node.dataset.connectionField==='publicUrl');
+  url.value='bridge.example.com:8443';url.oninput();
+  let submitted;ui.api.save=async payload=>{submitted=payload;ui.value.preferences={...ui.value.preferences,...payload.preferences};return structuredClone(ui.value);};
+  await ui.nodes.get('settings').onsubmit({preventDefault(){}});
+  assert.equal(submitted.preferences.connections[0].publicUrl,'https://bridge.example.com:8443');
+  assert.equal(ui.value.preferences.connections[0].accessMode,'external');
+});
+
+test('external status updates a folded summary without replacing the focused card',async()=>{
+  const ui=await renderer();
+  ui.value.preferences.connections=[{id:'entry',name:'Home',enabled:true,accessMode:'external',publicUrl:'https://bridge.example.com'}];
+  await ui.poll();
+  const descendants=node=>[node,...(node.children||[]).flatMap(descendants)];
+  const card=ui.nodes.get('connections').children[0],items=descendants(card);
+  const status=items.find(node=>node.dataset.connectionStatus==='entry');
+  const summary=items.find(node=>node.className==='connection-summary');
+  status.closest=()=>({querySelector:()=>summary});
+  ui.context.document.querySelectorAll=selector=>selector==='[data-connection-status]'?[status]:[];
+  ui.context.document.activeElement={closest:selector=>selector==='#connections'?card:null};
+  await ui.poll();
+  assert.match(status.textContent,/保存并启动网关后可检测入口/);
+  assert.doesNotMatch(status.textContent,/导出部署包/);
+  ui.value.externalStatus={entry:{message:'入口已连接'}};
+  await ui.poll();
+  assert.match(summary.textContent,/Home · https:\/\/bridge.example.com · 入口已连接/);
+  assert.equal(ui.nodes.get('connections').children[0],card);
+});
+
+test('fixed-entry retry replaces an earlier error in card and summary across polling',async()=>{
+  const ui=await renderer();
+  ui.value.preferences.connections=[{id:'entry',name:'Home',enabled:true,accessMode:'external',publicUrl:'https://bridge.example.com:8443'}];
+  await ui.poll();
+  const descendants=node=>[node,...(node.children||[]).flatMap(descendants)];
+  const items=()=>descendants(ui.nodes.get('connections'));
+  const check=()=>items().find(node=>node.dataset.connectionAction==='checkEntry').click();
+  const text=()=>items().filter(node=>node.dataset.connectionStatus==='entry'||node.className==='connection-summary').map(node=>node.textContent).join('\n');
+  ui.api.checkEntry=async()=>{throw Error("Error invoking remote method 'bridge:check-entry': Error: HTTPS 证书或 TLS 握手失败；请检查域名、证书和反代配置");};
+  await check();assert.match(text(),/TLS/);
+  const message='固定 HTTPS 入口已连到当前网关。请再用手机蜂窝网络验证登录与聊天。';
+  ui.api.checkEntry=async()=>({url:'https://bridge.example.com:8443',message});
+  await check();assert.ok(text().includes(message));assert.doesNotMatch(text(),/TLS|Error invoking/);
+  await ui.poll();assert.ok(text().includes(message));assert.doesNotMatch(text(),/TLS|Error invoking/);
+  ui.run("applyLanguage('en')");assert.doesNotMatch(text(),/TLS|Error invoking/);
+  ui.api.checkEntry=async()=>{throw Error('入口没有连接到当前网关；请检查反代目标，旧版网关须先更新并重启');};
+  await check();assert.doesNotMatch(text(),/Please also verify|固定 HTTPS 入口已/);
+});
+
+test('fixed-entry results belong to the checked target and gateway instance',async()=>{
+  const ui=await renderer();
+  ui.value.runtime={running:true,instanceId:'first'};
+  ui.value.preferences.connections=[{id:'entry',name:'Home',enabled:true,accessMode:'external',publicUrl:'https://one.example.com'}];
+  await ui.poll();
+  const descendants=node=>[node,...(node.children||[]).flatMap(descendants)];
+  const check=()=>descendants(ui.nodes.get('connections')).find(node=>node.dataset.connectionAction==='checkEntry').click();
+  let finish,requests=0;
+  ui.api.checkEntry=()=>{requests++;return new Promise(resolve=>finish=resolve);};
+  const pending=check();await new Promise(setImmediate);await check();assert.equal(requests,1);
+  ui.value.preferences.connections[0].publicUrl='https://two.example.com';
+  await ui.poll();finish({message:'first target passed'});await pending;
+  assert.equal(ui.run("connectionSetupState.has('entry')"),false);
+  ui.api.checkEntry=async()=>({message:'second target passed'});await check();
+  assert.equal(ui.run("connectionSetupState.get('entry')"),'second target passed');
+  ui.value.runtime.instanceId='second';await ui.poll();
+  assert.equal(ui.run("connectionSetupState.has('entry')"),false);
+});
+
 test('changing the Tailscale HTTPS port invalidates the previously detected URL',async()=>{
   const ui=await renderer();
   ui.run(`connectionDraft=[{id:'ts',enabled:true,accessMode:'tailscale',publicUrl:'https://mac.example.ts.net',tailscaleMode:'funnel',tailscalePort:443,tailscaleNodeId:'n123'}];renderConnections();`);
@@ -523,6 +620,16 @@ test('check update button locks immediately and unlocks after failed check',asyn
   assert.equal(ui.nodes.get('check-update').disabled,false);
   assert.match(ui.nodes.get('update-state').textContent,/network failed/);
 });
+test('skipped update hides the automatic prompt while manual check offers installation',async()=>{
+  const ui=await renderer();let skips=0;
+  ui.value.update={state:'available',current:'2.0.0-preview.1',version:'2.0.0-preview.2'};await ui.poll();
+  assert.equal(ui.nodes.get('skip-update').hidden,false);
+  ui.api.skipUpdate=async()=>{skips++;ui.value.update={state:'skipped',current:'2.0.0-preview.1',version:'2.0.0-preview.2'};};
+  await ui.nodes.get('skip-update').onclick();assert.equal(skips,1);assert.equal(ui.nodes.get('update-banner').hidden,true);assert.equal(ui.nodes.get('skip-update').hidden,true);
+  ui.api.checkUpdate=async()=>{ui.value.update={state:'available',current:'2.0.0-preview.1',version:'2.0.0-preview.2',skipped:true};};
+  await ui.nodes.get('check-update').onclick();assert.equal(ui.nodes.get('install-update').hidden,false);assert.match(ui.nodes.get('update-state').textContent,/已跳过/);
+  ui.run("applyLanguage('en')");assert.match(ui.nodes.get('update-state').textContent,/skipped/);
+});
 
 test('download and retry states disable updates without permanently locking settings',async()=>{
   const ui=await renderer();
@@ -546,6 +653,17 @@ test('login validity is collected as zero and survives polling and language edit
   ui.run('dirty=false;render(snapshot)');assert.equal(Number(field.value),12);
   field.value='0';ui.run('updateDirty()');await ui.poll();ui.run("applyLanguage('en')");
   assert.equal(field.value,'0');assert.equal(ui.run('collect().auth.sessionHours'),0);
+});
+
+test('password edit defaults to revoking phones and can keep bindings explicitly',async()=>{
+  const ui=await renderer();
+  const password=ui.nodes.get('password'),option=ui.nodes.get('revoke-bound-devices-option'),box=ui.nodes.get('revoke-bound-devices');
+  assert.equal(option.hidden,true);assert.equal(box.checked,true);
+  password.value='a new password';ui.nodes.get('settings').oninput();
+  assert.equal(option.hidden,false);assert.equal(ui.run('collect().auth.revokeBoundDevices'),true);
+  box.checked=false;ui.nodes.get('settings').onchange();
+  assert.equal(ui.run('collect().auth.revokeBoundDevices'),false);
+  password.value='';ui.nodes.get('settings').oninput();assert.equal(option.hidden,true);
 });
 
 test('device policy drafts survive list refresh and language changes and use local IPC',async()=>{
@@ -643,15 +761,15 @@ test('snapshot worker reuses a process and isolates data directory changes',asyn
 });
 
 
-test('native window title ignores page changes and only updates when locale changes',()=>{
+test('native window title and local target copy respect their fixed origins',async()=>{
   const fs=require('node:fs'),vm=require('node:vm'),requireMain=require('node:module').createRequire(path.resolve(__dirname,'../desktop/main.cjs'));
-  const handlers={},events={};let instance,changes=0;
+  const handlers={},events={},copied=[],opened=[];let instance,changes=0;
   class Window {
     constructor(options){instance=this;this.title=options.title;this.webContents={mainFrame:{url:require('node:url').pathToFileURL(path.resolve(__dirname,'../desktop/index.html')).href},setWindowOpenHandler(){},on(){},once(){}};}
     on(name,handler){events[name]=handler;}loadFile(){}getTitle(){return this.title;}setTitle(value){changes++;this.title=value;}
   }
   const context=vm.createContext({__dirname:path.resolve(__dirname,'../desktop'),process:{env:{},platform:'darwin'},require(name){
-    if(name==='electron')return {app:{requestSingleInstanceLock:()=>true,whenReady:()=>({then(){}}),on(){},getPath:()=>'.tmp'},BrowserWindow:Window,ipcMain:{handle:(name,handler)=>handlers[name]=handler}};
+    if(name==='electron')return {app:{requestSingleInstanceLock:()=>true,whenReady:()=>({then(){}}),on(){},getPath:()=>'.tmp'},BrowserWindow:Window,ipcMain:{handle:(name,handler)=>handlers[name]=handler},clipboard:{writeText:value=>copied.push(value)},shell:{openExternal:url=>opened.push(url)}};
     if(name==='node:fs')return {...fs,mkdirSync(){},writeFileSync(){}};
     if(name==='./features/connections/qr.cjs')return {};
     if(name==='./shared/gateway-language.cjs')return {publishLanguage(){}};
@@ -666,6 +784,15 @@ test('native window title ignores page changes and only updates when locale chan
   handlers['bridge:set-language'](event,'zh-CN');assert.equal(changes,0);
   handlers['bridge:set-language'](event,'en');assert.equal(changes,1);
   handlers['bridge:set-language'](event,'en');assert.equal(changes,1);
+  vm.runInContext("lastSnapshot={urls:[],preferences:{port:8787}};updateQuitting=true;updater={status(){return {}}}",context);
+  await handlers['bridge:copy'](event,'http://127.0.0.1:8787');
+  await handlers['bridge:copy'](event,'http://127.0.0.1:8788');
+  assert.deepEqual(copied,['http://127.0.0.1:8787','http://127.0.0.1:8788']);
+  await assert.rejects(handlers['bridge:copy'](event,'http://127.0.0.1:65536'),/地址不可用/);
+  await assert.rejects(handlers['bridge:copy'](event,'http://127.0.0.1:8788/path'),/地址不可用/);
+  await assert.rejects(handlers['bridge:copy'](event,'http://192.168.1.2:8787'),/地址不可用/);
+  await handlers['bridge:open'](event,'setup-external');
+  assert.match(opened[0],/#external$/);
 });
 
 

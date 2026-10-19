@@ -146,7 +146,9 @@ class DownloadHttpTests(unittest.TestCase):
         auth = self.login()
         self.assertEqual(self.get({**auth, 'Host': 'evil.test', 'Range': 'bytes=0-9'})[0], 403)
         self.assertEqual(self.get(auth, self.url.replace('example.bin', '../outside'))[0], 403)
-        link = self.root / 'link'; link.symlink_to(self.file)
+        link = self.root / 'link'
+        try: link.symlink_to(self.file)
+        except OSError as exc: self.skipTest('File symlink unavailable: ' + str(exc))
         # Windows rejects reparse points explicitly; POSIX rejects O_NOFOLLOW opens.
         status, _, body = self.get(auth, self.url.replace('example.bin', 'link'))
         self.assertEqual(status, 403 if os.name == 'nt' else 400)
@@ -169,6 +171,12 @@ class DownloadHttpTests(unittest.TestCase):
         folder = self.root / 'folder'; folder.mkdir()
         outside = self.root / 'outside'; outside.mkdir()
         (folder / 'secret').write_bytes(b'allowed'); (outside / 'secret').write_bytes(b'forbidden')
+        probe = self.root / 'symlink-probe'
+        try:
+            probe.symlink_to(outside, target_is_directory=True)
+            probe.unlink()
+        except OSError as exc:
+            self.skipTest('Directory symlink unavailable: ' + str(exc))
         def artifact(thread, identifier):
             target = folder / 'secret'
             target.unlink(); folder.rmdir(); folder.symlink_to(outside, target_is_directory=True)
@@ -264,7 +272,9 @@ class FileActionsTests(unittest.TestCase):
                 with self.workspace.archive('folder'): pass
 
     def test_archive_and_info_reject_links_and_outside_paths(self):
-        (self.root / 'folder').mkdir(); (self.root / 'folder' / 'link').symlink_to(self.root.parent)
+        (self.root / 'folder').mkdir()
+        try: (self.root / 'folder' / 'link').symlink_to(self.root.parent)
+        except OSError as exc: self.skipTest('Directory symlink unavailable: ' + str(exc))
         with self.assertRaises(PermissionError):
             with self.workspace.archive('folder'): pass
         with self.assertRaises(PermissionError): self.workspace.info('../file')
@@ -280,7 +290,8 @@ class WorkspaceReferenceTests(unittest.TestCase):
             large = project / 'large.bin'
             with large.open('wb') as stream: stream.truncate(55 * 1024 * 1024)
             outside = root / 'outside.txt'; outside.write_text('private')
-            (project / 'escape').symlink_to(outside)
+            try: (project / 'escape').symlink_to(outside)
+            except OSError as exc: self.skipTest('File symlink unavailable: ' + str(exc))
             messages = [{'role': 'assistant', 'text': '[large](large.bin) [outside](../outside.txt) [link](escape) [remote](https://example.com/data)'}]
             rows = workspace_references(messages, str(project))
             self.assertEqual([row['path'] for row in rows], ['large.bin'])

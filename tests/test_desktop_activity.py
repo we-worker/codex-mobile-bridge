@@ -17,6 +17,7 @@ class DesktopActivityTests(unittest.TestCase):
         self.addCleanup(self.manager.close)
         self.adapter = Mock()
         self.manager.adapters['claude'] = self.adapter
+        self.manager._model_identity = Mock(return_value='fixture-model-catalog')
         self.row = {'id': 'chat', 'status': 'idle', 'updatedAt': 1}
         self.turn = {'turnId': 'old', 'status': 'completed'}
         self.adapter.call.side_effect = self.read
@@ -54,7 +55,9 @@ class DesktopActivityTests(unittest.TestCase):
         self.row['status'] = 'idle'; self.turn['status'] = 'completed'
         self.refresh()
         self.assertEqual(self.manager.list_with_activity('claude')['sessions'][0]['turnStatus'], 'completed')
-        self.assertEqual(self.manager.call('claude', 'detail', 'chat')['session']['turnId'], 'new')
+        detail = self.manager.call('claude', 'detail', 'chat')
+        self.assertEqual(detail['session']['turnId'], 'new')
+        self.assertEqual(detail['modelCatalogIdentity'], 'fixture-model-catalog')
 
     def test_unknown_history_is_not_inferred_as_success(self):
         original = self.read

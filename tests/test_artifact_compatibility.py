@@ -34,7 +34,10 @@ class ArtifactCompatibilityTests(unittest.TestCase):
         self.assertEqual(workspace_relative_path(file, self.project), 'report space.pdf')
         self.assertIsNone(workspace_relative_path(outside, self.project))
         link = self.project / 'link.pdf'
-        link.symlink_to(outside)
+        try:
+            link.symlink_to(outside)
+        except OSError as exc:
+            self.skipTest('File symlinks unavailable: ' + str(exc))
         self.assertEqual(self.artifacts([str(link)]), {})
 
     @unittest.skipUnless(os.name == 'nt', 'Windows path semantics')

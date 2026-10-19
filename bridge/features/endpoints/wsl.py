@@ -29,6 +29,14 @@ CAPABILITIES = {'send': True, 'stop': True, 'settings': True, 'approvals': True,
                 'notifications': False, 'messageActions': False}
 
 
+def access_state(connected):
+    return {'source': 'cli', 'runtime': 'wsl', 'readOnly': not connected,
+            'canSend': connected, 'canInterrupt': connected, 'canApprove': connected,
+            'canReconnect': True, 'canConfigure': True, 'canChangePermissions': False,
+            'canChangeModel': connected, 'canSelectSkills': False, 'canUseModes': False,
+            'canUseGoal': False, 'canUseSideChat': False, 'canEditMessages': False}
+
+
 class WslStore(RemoteStore):
     def __init__(self, entry):
         super().__init__(entry.row['distribution'])
@@ -280,6 +288,7 @@ class WslEntry:
                 session = self.live.get(row['id'])
                 self.listed.add(row['id'])
             row['connected'] = bool(session and session.connected)
+            row['access'] = access_state(row['connected'])
         return rows
 
     def view(self, identifier, **options):
@@ -287,7 +296,8 @@ class WslEntry:
         result = session.view()
         result.update(host=self.host, endpointId=self.host, hostLabel=self.row['label'],
                       files=[], queue=[], submissions=[], goalRuntimeAvailable=False,
-                      capabilities=CAPABILITIES, accessManagement='external', forkedFrom=None)
+                      capabilities=CAPABILITIES, access=access_state(result['connected']),
+                      accessManagement='external', forkedFrom=None)
         for turn in result['turns']:
             turn['actionable'] = False
         if not result['connected']:
@@ -399,20 +409,21 @@ class WslEntry:
         except StoreUnavailable:
             rows = []
         roots = sorted({row['cwd'] for row in rows if isinstance(row.get('cwd'), str) and row['cwd'].startswith('/')})
-        registered = self.directory_projects.list({self.host})
+        registered = [dict(row, type='cli') for row in self.directory_projects.list({self.host})]
         known = {row['cwd'] for row in registered}
-        return registered + [{'key': self.host + '|' + cwd, 'host': self.host, 'hostLabel': self.row['label'],
+        return registered + [{'key': self.host + '|' + cwd, 'type': 'cli', 'host': self.host, 'hostLabel': self.row['label'],
                  'cwd': cwd, 'name': cwd.rstrip('/').rsplit('/', 1)[-1] or cwd} for cwd in roots if cwd not in known]
 
-    def register_project(self, path, create=False, host=None):
+    def register_project(self, path, create=False, host=None, kind='cli'):
         if host not in (None, self.host): raise ValueError('请选择当前 WSL 应用的目录')
+        if kind != 'cli': raise ValueError('WSL 应用只创建 CLI 聊天')
         # Explicit action can wake only this already registered distribution.
         self.runtime(allow_start=True)
         source = source_text('features/sessions/create.py')
         source += '\ntry:\n result=project_directory(**' + payload({'value': path, 'create': create}) + ')\nexcept ValueError as error: result={"error":str(error)}\nprint(json.dumps(result))\n'
         identity = self.read(self.row['distribution'], source)
         if identity.get('error'): raise ValueError(identity['error'])
-        return self.directory_projects.save(self.host, self.row['label'], identity)
+        return self.directory_projects.save(self.host, self.row['label'], identity, 'cli')
 
     def project_directories(self, host, path=None, hidden=False, name=None, identity=None):
         if host != self.host: raise ValueError('请选择当前 WSL 应用')

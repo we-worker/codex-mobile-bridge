@@ -89,14 +89,30 @@ async function transfer(fetch,url,{limit,signal,file,onProgress=()=>{}}){
   }finally{await handle?.close();await reader.cancel();}
 }
 class Updater{
-  constructor({current,platform=process.platform,arch=process.arch,key,fetch,directory,install,supported=true}){
-    Object.assign(this,{current,platform,arch,key,fetch,directory,apply:install,supported});
+  constructor({current,platform=process.platform,arch=process.arch,key,fetch,directory,install,supported=true,skipFile}){
+    Object.assign(this,{current,platform,arch,key,fetch,directory,apply:install,supported,skipFile});
+    this.skipIdentity=platform+'-'+arch+':'+(current.match(/-(alpha|beta|preview|rc)\./)?.[1]||'stable');
     this.state={state:supported?'idle':'unsupported',current};
   }
   status(){return {...this.state};}
   get busy(){return ['downloading','preparing','restarting'].includes(this.state.state);}
   set(state,extra={}){this.state={current:this.current,...extra,state};return this.status();}
-  async check(){
+  async skippedVersions(){
+    if(!this.skipFile)return this.skipped||{};
+    try{const value=JSON.parse(await fs.readFile(this.skipFile,'utf8'));return value&&typeof value==='object'&&!Array.isArray(value)?value:{};}catch{return {};}
+  }
+  async skippedVersion(){
+    const value=(await this.skippedVersions())[this.skipIdentity];return typeof value==='string'?value:'';
+  }
+  async skip(){
+    if(this.checking||this.busy||!this.candidate||this.state.state!=='available')throw Error('请先检查更新。');
+    const version=this.candidate.version;
+    const skipped={...await this.skippedVersions(),[this.skipIdentity]:version};
+    if(this.skipFile){await fs.mkdir(path.dirname(this.skipFile),{recursive:true,mode:0o700});await fs.writeFile(this.skipFile,JSON.stringify(skipped),{mode:0o600});}
+    else this.skipped=skipped;
+    return this.set('skipped',{version,notes:this.candidate.notes});
+  }
+  async check({manual=false}={}){
     if(this.busy||this.checking||!this.supported)return this.status();
     this.checking=true;this.candidate=null;this.set('checking');
     try{
@@ -112,7 +128,8 @@ class Updater{
       const expected=candidates[0].tag_name.slice(1);
       const bytes=(await transfer(this.fetch,releaseUrl(expected,'bridge-update.json'),{signal,limit:256*1024})).bytes;
       this.candidate=manifest(bytes,this.key,{current:this.current,platform:this.platform,arch:this.arch,expected});
-      return this.set('available',{version:expected,notes:this.candidate.notes});
+      const skipped=(await this.skippedVersion())===expected;
+      return this.set(skipped&&!manual?'skipped':'available',{version:expected,notes:this.candidate.notes,...(skipped&&manual?{skipped:true}:{})});
     }catch(error){return this.set('error',{message:error.message});}
     finally{this.checking=false;}
   }

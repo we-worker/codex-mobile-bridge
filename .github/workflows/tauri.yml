@@ -32,15 +32,16 @@ jobs:
       - run: npm run test:desktop
       - run: python scripts/build-desktop.py
       - run: npm run build:tauri -- --target x86_64-pc-windows-msvc
-      - run: cargo test --manifest-path src-tauri/Cargo.toml --release --target x86_64-pc-windows-msvc
-      - run: python scripts/smoke-tauri.py src-tauri/target/x86_64-pc-windows-msvc/release/codex-mobile-bridge-tauri.exe
-      - name: Report independent download and installed sizes
-        run: python scripts/measure-tauri.py src-tauri/target/x86_64-pc-windows-msvc/release
-      - uses: actions/upload-artifact@v4
+      - name: Upload Tauri installer as soon as it is built
+        uses: actions/upload-artifact@v4
         with:
           name: Tauri-Windows-x64-Setup
           if-no-files-found: error
           path: src-tauri/target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+      - run: cargo test --manifest-path src-tauri/Cargo.toml --release --target x86_64-pc-windows-msvc
+      - name: Report independent download and installed sizes
+        run: python scripts/measure-tauri.py src-tauri/target/x86_64-pc-windows-msvc/release
+      - run: python scripts/smoke-tauri.py src-tauri/target/x86_64-pc-windows-msvc/release/codex-mobile-bridge-tauri.exe
       - uses: actions/upload-artifact@v4
         if: always()
         with:

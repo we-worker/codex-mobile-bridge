@@ -30,7 +30,7 @@ async function main(){
   assert.ok(lan,'A real LAN address is required by the unchanged mobile pairing policy');
   const qrOrigin=`http://${lan.address}:${gatewayPort}/`;
   fs.writeFileSync(path.join(data,'desktop.json'),JSON.stringify({port:gatewayPort,lan:true,lanAddresses:[lan.address],localAccess:true,autoStart:false,codexHome:home,ipcPath:'\\\\.\\pipe\\cmb-tauri-fixture-'+path.basename(fixture),connections:[]}));
-  const env={...process.env,CMB_DATA_DIR:data,WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS:`--remote-debugging-port=${debugPort}`};
+  const env={...process.env,CMB_DATA_DIR:data,CMB_TAURI_DEBUG_PORT:String(debugPort)};
   delete env.CMB_UPDATE_TRANSACTION;delete env.CMB_UPDATE_DATA_DIR;
   const child=spawn(staged,[],{env,cwd:appDir,windowsHide:true,stdio:'ignore'});let cdp;
   const checks=[];

@@ -72,6 +72,33 @@ class DesktopUploadHTTP(unittest.TestCase):
         self.assertEqual(result[0], 400)
         self.assertIn('文件传输', result[2]['error'])
 
+    def test_local_claude_cli_resolves_private_file_and_image_only_from_ledger(self):
+        self.manager.call.return_value = {'session': {'id': 'native', 'backend': 'cli', 'host': 'local'}}
+        headers = self.login()
+        identifiers = [str(uuid.uuid4()), str(uuid.uuid4())]
+        route = '/api/desktop-sessions/claude/uploads?sessionId=code%3Anative&id='
+        for identifier, name, data in zip(identifiers, ('note.txt', 'photo.png'), (b'private fixture', PNG)):
+            self.assertEqual(self.binary('POST', route+identifier+'&name='+name, data, headers)[0], 200)
+        body = {'id': str(uuid.uuid4()), 'sessionId': 'code:native', 'text': '', 'attachments': identifiers}
+        self.assertEqual(self.request('POST', '/api/desktop-sessions/claude/send', body, headers)[0], 200)
+        resolved = self.manager.call.call_args.args[3]
+        self.assertEqual(len(resolved['resolvedImages']), 1)
+        self.assertEqual(resolved['resolvedFiles'][0]['name'], 'note.txt')
+        self.assertEqual(Path(resolved['resolvedFiles'][0]['path']).read_bytes(), b'private fixture')
+        self.assertNotIn('attachments', resolved)
+
+    def test_remote_claude_cli_file_is_resolved_from_ledger_before_transport(self):
+        self.manager.call.return_value = {'session': {'id': 'native', 'backend': 'cli', 'host': 'remote'}}
+        headers = self.login(); identifier = str(uuid.uuid4())
+        route = '/api/desktop-sessions/claude/uploads?sessionId=code%3Anative&id='+identifier+'&name=note.txt'
+        self.assertEqual(self.binary('POST', route, b'private fixture', headers)[0], 200)
+        result = self.request('POST', '/api/desktop-sessions/claude/send',
+                              {'id': str(uuid.uuid4()), 'sessionId': 'code:native', 'text': '', 'attachments': [identifier]}, headers)
+        self.assertEqual(result[0], 200)
+        resolved = self.manager.call.call_args.args[3]['resolvedFiles'][0]
+        self.assertEqual(resolved['id'], identifier)
+        self.assertEqual(Path(resolved['path']).read_bytes(), b'private fixture')
+
     def test_missing_conversation_does_not_write_an_attachment(self):
         self.manager.call.return_value = {'session': None}
         headers = self.login();identifier = str(uuid.uuid4())

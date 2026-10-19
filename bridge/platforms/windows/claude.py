@@ -193,9 +193,15 @@ def native_action(action, *, helper, pid=None, executable=None, script=None, can
                  else 'needs-desktop' if '桌面不可用' in message else 'needs-retry')
         return {'setupState': state, 'reason': message[:300]}
     if action == 'inspect-error':
-        if 'OWNER_CONFLICT' in stdout:
-            return {'setupState': 'owner-conflict',
-                    'reason': 'Claude 桥接连接被其他网关占用，请先停止旧网关；旧版连接还需重新加载 Claude'}
+        owner_issue = stdout.strip().splitlines()[-1] if stdout.strip() else ''
+        owner_reasons = {
+            'OWNER_BUSY': 'Claude 桥接仍有请求进行中，请稍后重试连接',
+            'OWNER_UNCONFIRMED': '旧网关仍有未确认请求或未完成接替，请在旧网关检查结果后重试',
+            'OWNER_LEGACY': '旧版 Claude 桥接无法核验在途请求；请确认当前任务结束后重新加载或退出重开 Claude Desktop，再初始化新网关（只需迁移一次）',
+            'OWNER_CONFLICT': '旧版 Claude 桥接无法核验在途请求；请确认当前任务结束后重新加载或退出重开 Claude Desktop，再初始化新网关（只需迁移一次）',
+        }
+        if owner_issue in owner_reasons:
+            return {'setupState': 'owner-conflict', 'reason': owner_reasons[owner_issue]}
         return {'setupState': 'needs-trust' if 'NEEDS_TRUST' in stdout else 'failed',
                 'reason': '请在 Claude Code 中确认连接目录信任，然后重新连接'}
     return {'setupState': 'needs-developer-mode' if action == 'enable-devtools' else 'submitted',

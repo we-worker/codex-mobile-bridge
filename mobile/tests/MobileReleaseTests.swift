@@ -16,6 +16,8 @@ import Foundation
   check(try select([row("2.0.0",prerelease:false)]) == "2.0.0")
   check(try select([row("2.0.0-preview.1")]) == nil)
   precondition(!MobileRelease.newer("2.0.0-preview.999999999999999999999999",than:"2.0.0"))
+  precondition(MobileRelease.channel("2.0.0-preview.1") == "preview")
+  precondition(MobileRelease.channel("2.0.0") == "stable")
   print("Swift: mobile release channel, version and asset checks passed")
  }
 }

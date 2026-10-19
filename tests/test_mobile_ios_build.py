@@ -14,6 +14,22 @@ spec.loader.exec_module(builder)
 
 
 class IOSReleaseBuildTests(unittest.TestCase):
+    def test_app_declares_single_window_scene_lifecycle(self):
+        info = plistlib.loads((ROOT/'mobile/ios/BridgePreview/Info.plist').read_bytes())
+        manifest = info['UIApplicationSceneManifest']
+        self.assertFalse(manifest['UIApplicationSupportsMultipleScenes'])
+        configurations = manifest['UISceneConfigurations']['UIWindowSceneSessionRoleApplication']
+        self.assertEqual(len(configurations), 1)
+        self.assertEqual(configurations[0]['UISceneDelegateClassName'], '$(PRODUCT_MODULE_NAME).SceneDelegate')
+
+    def test_cold_launch_notification_is_retried_when_scene_becomes_active(self):
+        source = (ROOT/'mobile/ios/BridgePreview/App.swift').read_text(encoding='utf-8')
+        scene = source[source.index('final class SceneDelegate'):source.index('final class NoRedirect')]
+        will_connect = scene[scene.index('func scene(_ scene: UIScene, willConnectTo'):]
+        self.assertIn('connectionOptions.notificationResponse', will_connect[:will_connect.index('\n    }')])
+        active = scene[scene.index('func sceneDidBecomeActive'):]
+        self.assertIn('openPendingNotification()', active[:active.index('\n    }')])
+
     def setUp(self):
         (ROOT/'.tmp').mkdir(exist_ok=True)
         self.temporary = tempfile.TemporaryDirectory(dir=ROOT/'.tmp', prefix='ios-source-test-')
@@ -76,6 +92,20 @@ class IOSReleaseBuildTests(unittest.TestCase):
             (app/'embedded.mobileprovision').write_bytes(b'private signing profile')
             with self.assertRaisesRegex(RuntimeError, 'unsigned iOS bundle'):
                 builder.verify_app(app, '2.0.0', '27')
+            (app/'embedded.mobileprovision').unlink()
+            for bundle, _ in bundles:
+                info_path = bundle/'Info.plist'
+                info = plistlib.loads(info_path.read_bytes())
+                info.update(CFBundleShortVersionString='2.1.0', CFBundleVersion='31',
+                            BridgeReleaseVersion='2.1.0-preview.1')
+                info_path.write_bytes(plistlib.dumps(info))
+            builder.verify_app(app, '2.1.0-preview.1', '31')
+            info_path = bundles[1][0]/'Info.plist'
+            info = plistlib.loads(info_path.read_bytes())
+            info['CFBundleShortVersionString'] = '2.1.0-preview.1'
+            info_path.write_bytes(plistlib.dumps(info))
+            with self.assertRaisesRegex(RuntimeError, 'identity/version mismatch'):
+                builder.verify_app(app, '2.1.0-preview.1', '31')
 
 
 if __name__ == '__main__':

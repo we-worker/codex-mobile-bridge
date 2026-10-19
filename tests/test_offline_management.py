@@ -57,8 +57,12 @@ class OfflineManagement(unittest.TestCase):
         self.add_api()
         owner = self.desktop.local_bridge
         result = self.desktop.desktop_sessions({'action': 'scan'})
-        self.assertEqual({row['id'] for row in result['clients']}, {'codex', 'claude', 'deepseek'})
-        self.assertTrue(all(not row['installed'] for row in result['clients']))
+        identifiers = {row['id'] for row in result['clients']}
+        self.assertTrue({'codex', 'claude', 'deepseek'} <= identifiers)
+        self.assertTrue(all(identifier.startswith('wsl:') for identifier in
+                            identifiers - {'codex', 'claude', 'deepseek'}))
+        self.assertTrue(all(not row['installed'] for row in result['clients']
+                            if row['id'] in {'codex', 'claude', 'deepseek'}))
         self.assertIs(self.desktop.local_bridge, owner)
         self.assertTrue((self.root/'desktop-sessions/settings.json').exists())
         self.assertFalse((self.root/'gateway-control.json').exists())
@@ -68,6 +72,7 @@ class OfflineManagement(unittest.TestCase):
             {'action': 'accounts', 'payload': {'action': 'addApi', 'name': 'Stream fixture',
                 'baseUrl': 'https://upstream.invalid/v1', 'apiKey': 'private-stream-key', 'model': 'fixture'}},
             {'action': 'accounts', 'payload': {'action': 'list'}},
+            {'action': 'cli-access', 'payload': {'action': 'list'}},
         ]
         result = subprocess.run([sys.executable, '-B', str(ROOT/'desktop.py'), 'management-stream',
                                  '--data-dir', str(self.root)],
@@ -75,9 +80,16 @@ class OfflineManagement(unittest.TestCase):
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)
         responses = [json.loads(line) for line in result.stdout.splitlines()]
-        self.assertEqual(len(responses), 2)
+        self.assertEqual(len(responses), 3)
         self.assertTrue(all(response['ok'] for response in responses), responses)
         self.assertEqual(responses[0]['result']['accounts'], responses[1]['result']['accounts'])
+        codex_accounts = responses[2]['result']['codex']['accounts']
+        self.assertEqual(len(codex_accounts), 1)
+        identity = codex_accounts[0]['modelCatalogIdentity']
+        self.assertEqual(len(identity), 64)
+        self.assertTrue(all(character in '0123456789abcdef' for character in identity))
+        self.assertEqual([{key: value for key, value in row.items() if key != 'modelCatalogIdentity'}
+                          for row in codex_accounts], responses[1]['result']['accounts'])
         self.assertNotIn('private-stream-key', result.stdout)
         self.assertFalse((self.root/'gateway-control.json').exists())
 

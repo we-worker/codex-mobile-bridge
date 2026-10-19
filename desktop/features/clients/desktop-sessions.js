@@ -16,7 +16,7 @@ class DesktopConnectionsPanel {
       this.accountPanels[provider]=new DesktopClientAccountsPanel({root:content,provider,desktop:true,
         read:()=>api.desktopSessions({action:'accounts',provider,operation:'list'}),
         request:({action,...value})=>api.desktopSessions({action:'accounts',provider,operation:action,...value}),
-        readModels:()=>api.desktopSessions({action:'account',provider}),
+        readModels:(refresh=false)=>api.desktopSessions({action:'account',provider,refresh}),
         visible:()=>!document.hidden&&!document.getElementById('clients-page').hidden&&(!document.getElementById('clients-page').classList.contains('configuration-open')||!article.classList.contains('client-config-hidden')),
         onUpdate:value=>this.renderClientAccount(provider,value),onChanged:()=>this.refreshClients(true)});
     }

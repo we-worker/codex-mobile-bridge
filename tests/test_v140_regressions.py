@@ -80,7 +80,10 @@ class CatalogIntegrationTests(unittest.TestCase):
         target.write_text('installed skill')
         links = self.home / 'skills'
         links.mkdir()
-        (links / 'fixture').symlink_to(installed, target_is_directory=True)
+        try:
+            (links / 'fixture').symlink_to(installed, target_is_directory=True)
+        except OSError as exc:
+            self.skipTest('Directory symlink unavailable: ' + str(exc))
         # Native skills/list may return either the link or the resolved filename.
         for path in (links / 'fixture' / 'SKILL.md', target):
             self.reader._fetch = Mock(return_value={'skillEntries': [{'skills': [
@@ -95,7 +98,10 @@ class CatalogIntegrationTests(unittest.TestCase):
     def test_one_broken_link_does_not_block_other_installed_skills(self):
         links = self.home / 'skills'
         links.mkdir()
-        (links / 'missing').symlink_to(self.root / 'missing')
+        try:
+            (links / 'missing').symlink_to(self.root / 'missing')
+        except OSError as exc:
+            self.skipTest('File symlink unavailable: ' + str(exc))
         path = self.home / 'SKILL.md'
         path.write_text('working skill')
         self.reader._fetch = Mock(return_value={'skillEntries': [{'skills': [

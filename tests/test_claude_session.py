@@ -33,14 +33,19 @@ class ClaudeSessionTests(unittest.TestCase):
         self.snapshot.return_value = {'state': 'locked', 'interactive': False, 'reason': 'Windows 已锁定'}
 
     def test_windows_owner_conflict_receipt_has_actionable_state(self):
-        process = Mock(returncode=0)
-        process.communicate.return_value = ('OWNER_CONFLICT', '')
-        with patch.object(claude_setup, 'helper_path', return_value=Path(__file__)), \
-             patch.object(claude_setup.subprocess, 'Popen', return_value=process) as popen:
-            result = claude_setup.native_action('inspect-error', pid=42, script='attempt-marker')
-        self.assertEqual(result['setupState'], 'owner-conflict')
-        self.assertIn('旧网关', result['reason'])
-        self.assertEqual(popen.call_args.args[0][-1], 'attempt-marker')
+        for code, expected in (('OWNER_BUSY', '请求进行中'),
+                               ('OWNER_UNCONFIRMED', '未确认请求'),
+                               ('OWNER_LEGACY', '重新加载或退出重开 Claude Desktop'),
+                               ('OWNER_CONFLICT', '重新加载或退出重开 Claude Desktop')):
+            with self.subTest(code=code):
+                process = Mock(returncode=0)
+                process.communicate.return_value = (code, '')
+                with patch.object(claude_setup, 'helper_path', return_value=Path(__file__)), \
+                     patch.object(claude_setup.subprocess, 'Popen', return_value=process) as popen:
+                    result = claude_setup.native_action('inspect-error', pid=42, script='attempt-marker')
+                self.assertEqual(result['setupState'], 'owner-conflict')
+                self.assertIn(expected, result['reason'])
+                self.assertEqual(popen.call_args.args[0][-1], 'attempt-marker')
 
     def test_macos_error_inspection_receives_only_the_current_attempt_marker(self):
         from bridge.platforms.macos.claude import helper_command
@@ -150,7 +155,8 @@ class ClaudeSessionTests(unittest.TestCase):
             with self.subTest(replacement=replacement):
                 self.adapter.setup_cancel = threading.Event()
                 original = self.adapter.setup_cancel
-                self.adapter.desktop = Mock(connected=False, capabilities={})
+                self.adapter.desktop = Mock(connected=False, capabilities={}, unconfirmed_mutations=set())
+                self.adapter.desktop.lock.locked.return_value = False
                 def native(action, **kwargs):
                     if action == 'connect':
                         self.adapter.desktop.connected = True

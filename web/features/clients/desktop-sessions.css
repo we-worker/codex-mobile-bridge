@@ -1,2 +1,7 @@
 #desktop-backend{max-width:165px;padding:7px;border:1px solid var(--line);border-radius:8px;color:inherit;background:var(--raised)}
 .app.desktop-mode{display:block}.app.desktop-mode>#sidebar,.app.desktop-mode>main{display:none!important}
+.session.ds-session-row{display:grid;grid-template-columns:minmax(0,1fr) max-content;column-gap:10px;align-items:center}
+.ds-session-row>strong{min-width:0}.ds-session-row>.ds-session-type{font-size:10px;line-height:1.6;color:var(--muted);white-space:nowrap}.ds-session-row>small{grid-column:1/-1}
+.ds-model-dialog .picker-head-actions{display:flex;align-items:center;gap:8px}
+.ds-model-form .ds-model-actions{display:flex;justify-content:flex-end;gap:8px}.ds-model-form .ds-model-actions button{min-height:44px;border-radius:11px;white-space:nowrap}.ds-model-form .ds-model-actions .plain{flex:none}.ds-model-form .ds-model-actions .primary{flex:1;min-width:0;width:auto}
+.ds-model-form .error:empty,.ds-model-form .muted:empty{display:none}

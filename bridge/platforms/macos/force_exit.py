@@ -50,7 +50,8 @@ class Native:
             raise ProcessLookupError(errno.ESRCH, 'process changed')
         return {'pid': info.pid, 'parent': info.parent, 'uid': info.uid, 'ruid': info.ruid,
                 'image': str(Path(os.fsdecode(path.value)).resolve()),
-                'birth': (after.unique, after.version), 'zombie': info.status == 5}
+                'birth': (after.unique, after.version),
+                'started': (info.start_sec, info.start_usec), 'zombie': info.status == 5}
 
     def open(self, identity):
         # proc_signal_with_audittoken uses pid and pidversion in audit_token_t.

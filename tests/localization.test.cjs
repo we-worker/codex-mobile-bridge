@@ -1,4 +1,4 @@
-const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs');
+const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 const i18n=require('../web/shared/i18n.js');
 test('all declared mobile HTML labels have English translations',()=>{
  const html=fs.readFileSync(__dirname+'/../web/index.html','utf8');
@@ -6,7 +6,10 @@ test('all declared mobile HTML labels have English translations',()=>{
 });
 test('workbench literal translation keys are covered',()=>{
  for(const f of ['features/workspace/workbench','features/workspace/git-panel','features/workspace/side-chat','features/workspace/terminal-panel','features/workspace/floating-panel','features/workspace/agents-panel','features/chat/list-sync'])
-  for(const m of fs.readFileSync(__dirname+'/../web/'+f+'.js','utf8').matchAll(/BridgeI18n.t\('([^']*[\u4e00-\u9fff][^']*)'\)/g))assert.ok(Object.hasOwn(i18n.dictionary,m[1]),f+': '+m[1]);
+  for(const m of fs.readFileSync(__dirname+'/../web/'+f+'.js','utf8').matchAll(/BridgeI18n.t\('([^']*[\u4e00-\u9fff][^']*)'\)/g)){
+   const key=vm.runInNewContext(m[0].slice('BridgeI18n.t('.length,-1));
+   assert.ok(Object.hasOwn(i18n.dictionary,key),f+': '+key);
+  }
 });
 test('client readiness errors and live notices translate in both desktop and web',()=>{
  const desktop=require('../desktop/shared/i18n.js');

@@ -58,6 +58,13 @@ func output(_ state: String, _ reason: String) {
     let data = try! JSONSerialization.data(withJSONObject: value)
     print(String(data: data, encoding: .utf8)!)
 }
+func bridgeOwnerIssue(_ value: String, marker: String) -> String? {
+    guard value.contains("[\(marker)]") else { return nil }
+    if value.contains("BRIDGE_OWNER_BUSY") { return "busy" }
+    if value.contains("BRIDGE_OWNER_UNCONFIRMED") { return "unconfirmed" }
+    if value.contains("BRIDGE_OWNER_LEGACY") || value.contains("Claude 桥接连接被其他网关占用") { return "legacy" }
+    return nil
+}
 func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
     var value: CFTypeRef?
     return AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success ? value : nil
@@ -172,6 +179,18 @@ final class Connector {
         try fail("needs-attention", "焦点已离开 Claude，自动连接已停止，请重试")
     }
     func key(_ code: CGKeyCode, flags: CGEventFlags = [], prompt: AXUIElement? = nil) throws {
+        if let prompt = prompt {
+            guard let down = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: true),
+                  let up = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: false) else {
+                try fail("needs-attention", "无法创建键盘事件")
+            }
+            down.flags = flags; up.flags = flags
+            try check(prompt)
+            down.post(tap: .cghidEventTap)
+            up.post(tap: .cghidEventTap)
+            try check(prompt)
+            return
+        }
         for down in [true, false] {
             try check(prompt)
             guard let event = CGEvent(keyboardEventSource: nil, virtualKey: code, keyDown: down) else { try fail("needs-attention", "无法创建键盘事件") }
@@ -195,8 +214,9 @@ final class Connector {
     }
     func console() throws -> AXUIElement {
         try activate()
+        // Electron may leave Chromium's AX tree dormant until an assistive client asks for it.
+        _ = AXUIElementSetAttributeValue(root, "AXManualAccessibility" as CFString, kCFBooleanTrue)
         guard let initial = child(root, kAXFocusedWindowAttribute) else { try fail("needs-attention", "无法确认 Claude Console 输入焦点") }
-        let previous = attribute(root, kAXWindowsAttribute) as? [AXUIElement] ?? []
         if let prompt = find(initial, matching: isPrompt) { return prompt }
         // macOS Chromium exposes the tab name as AXDescription, with no title.
         // When DevTools is already open on Elements, select its Console directly.
@@ -212,7 +232,7 @@ final class Connector {
             guard let window = child(root, kAXFocusedWindowAttribute) else { try fail("needs-attention", "无法确认 Claude Console 输入焦点") }
             if !CFEqual(window, initial) {
                 var owner: pid_t = 0
-                guard !previous.contains(where: { CFEqual($0, window) }), AXUIElementGetPid(window, &owner) == .success,
+                guard AXUIElementGetPid(window, &owner) == .success,
                       devToolsWindow(role: text(window, kAXRoleAttribute), title: text(window, kAXTitleAttribute), owner: owner, expectedOwner: app.processIdentifier) else {
                     try fail("needs-attention", "Claude 窗口已改变，自动连接已停止，请重试")
                 }
@@ -225,46 +245,20 @@ final class Connector {
         try fail("failed", "未找到 Claude Console，请确认开发者工具窗口可用后重试")
     }
     func verify(_ prompt: AXUIElement, _ expected: String) throws {
-        func read() throws -> String? {
-            Thread.sleep(forTimeInterval: 0.025); try check(prompt)
-            return (attribute(prompt, kAXValueAttribute) as? String)?.trimmingCharacters(in: .newlines)
-        }
-        var observed: String?
+        var previous: String?
         for _ in 0..<40 {
-            observed = try read()
-            if observed == expected { return }
-        }
-        if !expected.isEmpty && observed?.isEmpty == false {
-            // A long Console line can expose only a rendered slice through AX.
-            // Move the caret to reveal more; only a single full-value match
-            // establishes that the editor contains the expected source.
-            var settable = DarwinBoolean(false)
+            Thread.sleep(forTimeInterval: 0.025)
             try check(prompt)
-            if AXUIElementIsAttributeSettable(prompt, kAXSelectedTextRangeAttribute as CFString, &settable) == .success && settable.boolValue {
-                for _ in 0..<3 {
-                    let live = try read()
-                    if live == expected {
-                        try key(125, flags: .maskCommand, prompt: prompt)
-                        return
-                    }
-                    guard let live = live, !live.isEmpty else { break }
-                    let position = min(expected.utf16.count / 2, live.utf16.count - 1)
-                    var range = CFRange(location: position, length: 0)
-                    guard let selected = AXValueCreate(.cfRange, &range) else { break }
-                    try check(prompt)
-                    guard AXUIElementSetAttributeValue(prompt, kAXSelectedTextRangeAttribute as CFString, selected) == .success else { break }
-                    // A selection alone need not scroll CodeMirror; Right updates its viewport.
-                    try key(124, prompt: prompt)
-                    for _ in 0..<4 {
-                        if try read() == expected {
-                            try key(125, flags: .maskCommand, prompt: prompt)
-                            return
-                        }
-                    }
-                }
-            }
+            let observed = (attribute(prompt, kAXValueAttribute) as? String)?.trimmingCharacters(in: .newlines)
+            if observed == expected { return }
+            // Chromium may expose only a viewport slice of a long Console line.
+            // This establishes input readiness, not full-source verification;
+            // the signed connector receipt establishes successful execution.
+            if !expected.isEmpty, let observed = observed, observed.utf16.count >= 32,
+               expected.contains(observed), observed == previous { return }
+            previous = observed
         }
-        try fail("needs-attention", "Console 无法核验完整内容，未执行连接脚本，请重试")
+        try fail("needs-attention", "Console 无法确认输入内容，未执行连接脚本，请重试")
     }
     func submit(_ prompt: AXUIElement) throws {
         try check(prompt)
@@ -281,15 +275,8 @@ final class Connector {
         down.post(tap: .cghidEventTap)
         Thread.sleep(forTimeInterval: 0.03)
         up.post(tap: .cghidEventTap)
-        try check(prompt)
-        let deadline = Date().addingTimeInterval(3)
-        while Date() < deadline {
-            try check(prompt)
-            // An unreadable AXValue is not an empty editor or proof of submit.
-            if submissionAccepted(attribute(prompt, kAXValueAttribute) as? String) { return }
-            Thread.sleep(forTimeInterval: 0.05)
-        }
-        try fail("failed", "未确认 Console 已提交，已停止自动操作；请检查 Console 和连接状态后重试")
+        // The owner waits for the signed connector receipt; AX focus/value can
+        // change as soon as this Enter is accepted and cannot gate dispatch.
     }
     func inject(_ path: String) throws {
         let source = try String(contentsOfFile: path, encoding: .utf8)
@@ -325,8 +312,8 @@ final class Connector {
                     event.postToPid(app.processIdentifier)
                 }
                 Thread.sleep(forTimeInterval: 0.01)
-                if end % 128 == 0 || end == units.count { try verify(prompt, String(decoding: units[0..<end], as: UTF16.self)) }
             }
+            try verify(prompt, source)
         }
         try submit(prompt)
         output("submitted", "连接脚本已输入，正在等待 Claude 确认")
@@ -367,10 +354,15 @@ final class Connector {
         let conflict = marker.flatMap { expected in find(root, matching: {
             guard text($0, kAXRoleAttribute) == "AXStaticText" else { return false }
             let value = text($0, kAXValueAttribute).isEmpty ? text($0, kAXTitleAttribute) : text($0, kAXValueAttribute)
-            return value.contains("Claude 桥接连接被其他网关占用") && value.contains("[\(expected)]")
+            return bridgeOwnerIssue(value, marker: expected) != nil
         }) }
-        if conflict != nil {
-            output("owner-conflict", "Claude 桥接连接被其他网关占用，请先停止旧网关；旧版连接还需重新加载 Claude")
+        if let conflict = conflict, let marker = marker {
+            let value = text(conflict, kAXValueAttribute).isEmpty ? text(conflict, kAXTitleAttribute) : text(conflict, kAXValueAttribute)
+            let issue = bridgeOwnerIssue(value, marker: marker)
+            let reason = issue == "busy" ? "Claude 桥接仍有请求进行中，请稍后重试连接" :
+                issue == "unconfirmed" ? "旧网关仍有未确认请求或未完成接替，请在旧网关检查结果后重试" :
+                "旧版 Claude 桥接无法核验在途请求；请确认当前任务结束后重新加载或退出重开 Claude Desktop，再初始化新网关（只需迁移一次）"
+            output("owner-conflict", reason)
             return
         }
         let error = find(root, matching: {

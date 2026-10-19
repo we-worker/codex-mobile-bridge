@@ -3,6 +3,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest.mock import patch
 
@@ -309,7 +310,10 @@ class ForceExitTests(unittest.TestCase):
         self.rejected(force.FAILED)
 
     def test_timeout_remains_bounded(self):
-        with patch.object(force.time, 'monotonic', side_effect=[0, 0, 26]):
+        real_monotonic = time.monotonic
+        with patch.object(force, 'time') as clock:
+            clock.monotonic.side_effect = [0, 0, 26]
+            self.assertIs(time.monotonic, real_monotonic)
             self.rejected(force.TIMEOUT)
 
     def test_invalid_descriptor_and_platform(self):

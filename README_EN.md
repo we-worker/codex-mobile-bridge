@@ -5,11 +5,11 @@
 
 # Codex Mobile Bridge · A remote workbench for desktop agents
 
-> **v2.0.3 (stable)**: [Release page](https://github.com/try2love/codex-mobile-bridge/releases/tag/v2.0.3) · [Full release notes](RELEASE_NOTES.md) · [Mobile installation](mobile/README.md). This release adds Android in-app updates with download choices and mobile/Web third-party notification settings, and improves search, landscape layouts and connection recovery.
+> **v2.1.1 (stable):** [Release page](https://github.com/try2love/codex-mobile-bridge/releases/tag/v2.1.1) · [Full release notes](RELEASE_NOTES.md) · [Mobile installation](mobile/README.md). This release unifies account/model controls and improves cached catalogs, saved drafts, file location and mobile navigation.
 
 [简体中文](README.md) · [English](README_EN.md)
 
-**[Product guide and interactive demos ↗](https://try2love.github.io/codex-mobile-bridge/?lang=en)** · **[Download desktop and mobile apps](https://github.com/try2love/codex-mobile-bridge/releases/tag/v2.0.3)**
+**[Product guide and interactive demos ↗](https://try2love.github.io/codex-mobile-bridge/?lang=en)** · **[Download desktop and mobile apps](https://github.com/try2love/codex-mobile-bridge/releases/tag/v2.1.1)**
 
 [![Desktop gateway: clients and access, with demo data](site/assets/v2-clients.png)](https://try2love.github.io/codex-mobile-bridge/?lang=en)
 
@@ -17,12 +17,48 @@ Continue **Codex, Claude Code / Cowork and DeepSeek Harness** sessions from a ph
 
 Tasks run on the original computer, or the original SSH host for Codex remote sessions. Bridge reuses the desktop session, authentication and execution environment. Your phone does not need the same model-service account: use gateway login or revocable QR pairing.
 
-## What's new in v2.0.3
+## What's new in v2.1.1
+
+- **Accounts and models:** consistent controls across clients; cached catalogs separated by computer, account and access, with update times, manual refresh and 12-hour background updates.
+- **Drafts and files:** keep unsent drafts across chats and computers; smoothly reveal and highlight linked files, return directly to chat lists from the header, and preview tool screenshots.
+- **Everyday use:** fix swipe jumps and repeated list/model loading, improve iOS notification navigation, skip an exact update, and optionally retain valid phone bindings when changing the gateway password.
+
+### What's new in v2.1.0
+
+- **CLI and file reading:** read and explicitly resume Codex/Claude Code CLI chats from mobile or Web; dedicated previews for source, PDF and self-contained HTML.
+- **Connections and lists:** configure an existing HTTPS tunnel or reverse proxy; progressively show Codex chats by host, sort mixed Claude chats by recency and keep source labels visible.
+- **Cross-platform experience:** improve Windows persistent terminals and Claude setup, DSH host detection, the iOS Safari viewport during input and stable client swipes. The gateway remains manageable with every client disabled.
+
+### What's new in v2.0.3
 
 - **Android updates:** download and install updates in the app, choose phone or computer downloads, and resume installation or export a completed APK. See [mobile installation and upgrades](mobile/README.md).
 - **Third-party notifications:** configure, save and test Bark for iPhone, ntfy for Android or PushPlus for WeChat on mobile or Web, using the same settings as the desktop gateway.
 - **Search and layout:** keep Search visible, size filters to their contents, improve English and landscape/tablet lists, add Claude/DSH pull-to-refresh and clear stale errors after recovery.
 - **Connections and workbench:** securely retain valid mobile bindings for sign-in recovery, improve Claude reconnection and setup, clarify settings and file-transfer actions, and preserve occupied split panes when closing tool tabs.
+
+<a id="workspace-reading"></a>
+
+## File reading and previews
+
+- **Locate and return:** smoothly reveal linked files and highlight them for three seconds. Top-left Back returns directly to the chat list. Folder-parent controls and system Back retain hierarchical navigation; system Back exits fullscreen first.
+- **Source reading:** view common languages with syntax highlighting and line numbers. Select **Wrap lines** to fit long lines to the screen, or restore **Original line width**. Copy preserves the source without line numbers; previews never edit the file. Unknown languages and larger text use plain text.
+- **PDF reading:** scroll and pinch on touch devices; use page and zoom buttons on desktop browsers. Select text when available; scanned pages do not gain OCR. Fit each page to the available width, including mixed page sizes. During rapid zoom, keep the completed image visible until its replacement is ready to reduce flashes.
+- **HTML reading:** switch between **Preview** and **Source code**. Self-contained inline interactions and animations work; external resources, CDN/API requests, popups and form submission are unsupported. Preview content is isolated from gateway sign-in data, the parent page and native mobile interfaces.
+- **Compact actions and fullscreen:** actions sit beside file details, with fullscreen next to Download. Entering or leaving fullscreen preserves PDF position and HTML state. Switching file tabs preserves PDF position but reloads HTML on return.
+
+PDF previews are capped at **20 MiB** and the configured ordinary-download limit, whichever is lower. HTML and source previews accept **UTF-8 text up to 512 KiB**. Download larger or unsupported files to open elsewhere. Update both the gateway and mobile app for the complete feature set; browser users reload after updating the gateway.
+
+## CLI chats (v2.1.0)
+
+Saved local and configured SSH CLI chats are readable without starting a runtime. Source badges remain visible above dates; chat-type filters appear when multiple origins are present. If Codex App already owns a chat, Bridge verifies and follows that connection. Otherwise, select **Continue chat** to connect to or resume the original native CLI chat, even if its terminal has closed. This explicit action may start the already installed managed daemon; Bridge does not install CLI or accept new SSH host keys.
+
+Open **SSH diagnostics** in Settings to inspect local and remote status and counts, copy a sanitized summary, or export a file. Older mobile apps can read and copy but need an update to export. After connection, supported controls include model/effort, Skills, default/plan modes, permissions and Goals on compatible local/SSH native CLI runtimes. See the [CLI guide](docs/codex-cli.md) for limits.
+
+Codex and Claude CLI access are configured in their own account sections. Local CLI sync is opt-in, with separate Desktop and CLI verification results; SSH hosts retain their own configuration. Claude can create CLI chats from existing local or SSH projects with the selected profile and directory. Source labels are always visible; type filters appear when multiple origins are present. Claude uses a blue context ring for known capacity and a neutral ring otherwise.
+
+### Platforms and access
+
+Desktop packages cover macOS, Windows and experimental Linux x64/ARM64. Codex and Claude Code CLI run locally or on configured SSH hosts. Linux Claude Code CLI is separate from Claude Desktop; automatic Desktop connection is available on macOS and Windows. See the [CLI guide](docs/codex-cli.md) and [Linux guide](docs/linux.md).
 
 ## The v2 workbench
 
@@ -31,7 +67,7 @@ Tasks run on the original computer, or the original SSH host for Codex remote se
 - **Files and images:** locate linked files in their folder or download them. Adjust the ordinary-download threshold live, and explicitly download large files/folders from the file list. Floating progress, speed, pause/resume, plus pinch/wheel/drag/double-click image zoom.
 - **Accounts and context:** inspect the current client's access, available models and upstream quota. Context usage sits beside permissions. Codex retains Fast, Skills, Plan/Goal, official quota and reset credits.
 - **Computers and alerts:** Android/iOS save multiple paired computers, sort by recent access and refresh availability. App icons show gateway-maintained unread counts and open the matching list. Standard mobile builds still need Bark, ntfy or PushPlus for dependable background alerts.
-- **Network choices:** LAN, temporary/fixed Cloudflare HTTPS, fixed Tailscale HTTPS, your own SSH server, or an existing NAS/reverse proxy.
+- **Network choices:** LAN, temporary/fixed Cloudflare HTTPS, fixed Tailscale HTTPS, an existing HTTPS tunnel, your own SSH server, or an advanced NAS proxy.
 
 | Client | Scope | Requirements and limits |
 | --- | --- | --- |
@@ -54,27 +90,27 @@ Supports macOS, Windows and experimental Ubuntu x64/ARM64. See the [Linux guide]
 
 ## Download and quick start (recommended)
 
-Download the desktop App for everyday use. **No deployment Agent, Python, Node.js or terminal is required.** The links below target **v2.0.3 (stable)**.
+Download the desktop App for everyday use. **No deployment Agent, Python, Node.js or terminal is required.** The links below target **v2.1.1 (stable)**.
 
 | Platform | Download | Open |
 | --- | --- | --- |
-| Windows x64 (recommended installer) | [Download Setup.exe](https://github.com/try2love/codex-mobile-bridge/releases/download/v2.0.3/Codex-Mobile-Bridge-2.0.3-Windows-x64-Setup.exe) | Run the installer and launch from the shortcut |
-| Windows x64 (no installation) | [Download full ZIP](https://github.com/try2love/codex-mobile-bridge/releases/download/v2.0.3/Codex-Mobile-Bridge-2.0.3-Windows-x64.zip) | Extract the entire ZIP and run `Codex Mobile Bridge.exe`; do not move just the exe |
-| macOS Apple Silicon (M series) | [Download arm64 DMG](https://github.com/try2love/codex-mobile-bridge/releases/download/v2.0.3/Codex-Mobile-Bridge-2.0.3-macOS-arm64.dmg) | Open the DMG and drag the App to Applications |
-| macOS Intel | [Download x64 DMG](https://github.com/try2love/codex-mobile-bridge/releases/download/v2.0.3/Codex-Mobile-Bridge-2.0.3-macOS-x64.dmg) | Open the DMG and drag the App to Applications |
-| Ubuntu x64 (experimental) | [Download .deb](https://github.com/try2love/codex-mobile-bridge/releases/download/v2.0.3/Codex-Mobile-Bridge-2.0.3-Linux-amd64.deb) | Ubuntu 22.04; launch as a regular user |
-| Ubuntu ARM64 (experimental) | [Download .deb](https://github.com/try2love/codex-mobile-bridge/releases/download/v2.0.3/Codex-Mobile-Bridge-2.0.3-Linux-arm64.deb) | Ubuntu 22.04 ARM64; no 32-bit ARM build |
+| Windows x64 (recommended installer) | [Download Setup.exe](https://github.com/try2love/codex-mobile-bridge/releases/download/v2.1.1/Codex-Mobile-Bridge-2.1.1-Windows-x64-Setup.exe) | Run the installer and launch from the shortcut |
+| Windows x64 (no installation) | [Download full ZIP](https://github.com/try2love/codex-mobile-bridge/releases/download/v2.1.1/Codex-Mobile-Bridge-2.1.1-Windows-x64.zip) | Extract the entire ZIP and run `Codex Mobile Bridge.exe`; do not move just the exe |
+| macOS Apple Silicon (M series) | [Download arm64 DMG](https://github.com/try2love/codex-mobile-bridge/releases/download/v2.1.1/Codex-Mobile-Bridge-2.1.1-macOS-arm64.dmg) | Open the DMG and drag the App to Applications |
+| macOS Intel | [Download x64 DMG](https://github.com/try2love/codex-mobile-bridge/releases/download/v2.1.1/Codex-Mobile-Bridge-2.1.1-macOS-x64.dmg) | Open the DMG and drag the App to Applications |
+| Ubuntu x64 (experimental) | [Download .deb](https://github.com/try2love/codex-mobile-bridge/releases/download/v2.1.1/Codex-Mobile-Bridge-2.1.1-Linux-amd64.deb) | Ubuntu 22.04; launch as a regular user |
+| Ubuntu ARM64 (experimental) | [Download .deb](https://github.com/try2love/codex-mobile-bridge/releases/download/v2.1.1/Codex-Mobile-Bridge-2.1.1-Linux-arm64.deb) | Ubuntu 22.04 ARM64; no 32-bit ARM build |
 
-[All releases and release notes](https://github.com/try2love/codex-mobile-bridge/releases) · [Download SHA256 checksums](https://github.com/try2love/codex-mobile-bridge/releases/download/v2.0.3/SHA256SUMS.txt). Both Mac architectures also include ZIPs for in-app updates or manual replacement. Windows ARM packages are not available. The Mac build is ad-hoc signed but not notarized and may require manual approval; Windows builds have no certificate signature. See the macOS first-launch instructions below.
+[All releases and release notes](https://github.com/try2love/codex-mobile-bridge/releases) · [Download SHA256 checksums](https://github.com/try2love/codex-mobile-bridge/releases/download/v2.1.1/SHA256SUMS.txt). Both Mac architectures also include ZIPs for in-app updates or manual replacement. Windows ARM packages are not available. The Mac build is ad-hoc signed but not notarized and may require manual approval; Windows builds have no certificate signature. See the macOS first-launch instructions below.
 
 1. Install and sign in to the desktop clients you need. Open **Codex Mobile Bridge**, inspect **Clients and access**, complete required permissions and enable configured clients.
 2. Keep LAN access or add an HTTPS entry under **Network access**, save, and select **Start gateway** from Overview or Clients. Preserve your configured port.
 3. In the mobile app, select **Scan to connect** and scan the chosen entry's QR code. A browser can also scan a sign-in code or open the address manually.
 4. Choose a client and chat, then continue the conversation or open workbench tabs. Keep the computer, gateway and selected client online.
 
-For remote access, choose [Tailscale HTTPS](docs/tailscale.md), bundled temporary Cloudflare HTTPS, a [fixed Cloudflare tunnel](docs/fixed-domain.md), [your own SSH server](docs/server-ssh.md) or a NAS proxy. See [Parallel connections](#parallel-connections). Fixed addresses do not guarantee mainland China performance; test the actual cellular network.
+For remote access, choose [Tailscale HTTPS](docs/tailscale.md), bundled temporary Cloudflare HTTPS, a [fixed Cloudflare tunnel](docs/fixed-domain.md), an [existing HTTPS tunnel](docs/external-tunnel.md), [your own SSH server](docs/server-ssh.md) or an advanced NAS proxy. See [Parallel connections](#parallel-connections). Fixed addresses do not guarantee mainland China performance; test the actual cellular network.
 
-Android APK, unsigned iOS IPA and Xcode source downloads are in the same [v2.0.3 Release](https://github.com/try2love/codex-mobile-bridge/releases/tag/v2.0.3). Install Android over the existing app; iOS requires your own signing, with no App Store/TestFlight distribution. Source/custom setups are covered by the [Deployment Agent instructions](#deployment-agent-instructions).
+Android APK, unsigned iOS IPA and Xcode source downloads are in the same [v2.1.1 Release](https://github.com/try2love/codex-mobile-bridge/releases/tag/v2.1.1). Install Android over the existing app; iOS requires your own signing, with no App Store/TestFlight distribution. Source/custom setups are covered by the [Deployment Agent instructions](#deployment-agent-instructions).
 
 ### In-app updates
 
@@ -82,7 +118,7 @@ Android APK, unsigned iOS IPA and Xcode source downloads are in the same [v2.0.3
 
 Starting with `v0.2.0-beta.5`, use **App updates** to check for a release, read its notes, and select **Update and restart**. The app verifies the signed manifest and package before replacing itself, preserves login, network, notification and watched-chat settings, and restores a previously running gateway. Installation failures attempt to restore the previous app. Older versions need one manual upgrade to a version with this feature. Temporary HTTPS addresses change when the gateway restarts.
 
-**Windows beta.7 / 1.0.0 users:** the old updater may roll back with `WinError 32` because its working directory is locked. Choose **Stop gateway and quit** in the tray, then install **2.0.3 Setup.exe** to the same location. Do not uninstall or delete your data. Version 1.1.0 fixes this working-directory issue for subsequent updates.
+**Windows beta.7 / 1.0.0 users:** the old updater may roll back with `WinError 32` because its working directory is locked. Choose **Stop gateway and quit** in the tray, then install **2.1.1 Setup.exe** to the same location. Do not uninstall or delete your data. Version 1.1.0 fixes this working-directory issue for subsequent updates.
 
 Android v2.0.3 adds in-app APK updates with a phone/computer download choice. Older apps can be upgraded manually once; computer-assisted downloads need a compatible gateway. Failed downloads allow another route, and completed APKs remain available for installation or export. iOS still uses the signing and installation flow described in the [mobile guide](mobile/README.md).
 
@@ -104,7 +140,9 @@ The desktop app can scan the current or a specified Codex data directory and imp
 
 The accounts panel follows the selected client. Codex official accounts show remaining usage, reset times and credits; API connections show access and model information. The active connection stays first. Claude and DSH use their own supported account/provider information, rather than displaying Codex accounts.
 
-Opening the panel queries usage automatically; visible panels update every five minutes. Manual refresh runs immediately and restarts the timer. Failed queries preserve the last successful values and timestamp; unavailable upstream data remains unknown.
+Opening the Codex panel queries usage automatically; visible panels update every five minutes. Manual refresh runs immediately and restarts the timer. Failed queries preserve the last successful values and timestamp; unavailable upstream data remains unknown.
+
+In v2.1.0, Claude queries usage only when you select **View remaining quota**. Opening, revisiting and periodically refreshing its panel show saved usage with the original successful date and time. Failures preserve that snapshot and indicate it was not updated. This reduces unrequested quota credential reads without claiming to eliminate every Keychain prompt. DSH keeps its existing query behavior.
 
 View remaining percentages, reset times and available usage resets. In v2.0.0, reset credits can be used for the current or another saved official account without switching sign-in or enabling Codex's agent usage-reset setting. Confirm the account and credit expiry, then wait five seconds before using a credit. Interrupted requests retain their original redemption ID for retry. Subscription dates are queried online; blocked or missing results remain unconfirmed rather than being inferred from token expiry or old login records. Account credentials are never sent to the phone.
 
@@ -114,7 +152,7 @@ View remaining percentages, reset times and available usage resets. In v2.0.0, r
 - Five consecutive password failures automatically block the source IP. The page shows remaining attempts; counts and blocks survive restarts. Successful authentication resets the count. Unblock and reset attempts only under **Login and devices → Automatically blocked IPs** in the desktop app.
 - **Notifications → Login security notifications** is enabled by default and uses enabled PushPlus, Bark and ntfy channels. Disabling alerts does not disable blocking.
 - Set standard login validity under **Login and devices → Login validity (hours)** to an integer from 0 to 87600, then restart the gateway. The default is 12 hours; 0 sets no server expiry. A finite deadline starts at login and does not slide with activity.
-- Normal gateway restarts and App updates preserve unexpired logins. Changing the account, password, login mode or validity invalidates earlier logins on restart. Logout, clearing browser cookies or changing hostnames requires signing in again; browsers may also remove long-unused cookies.
+- Normal gateway restarts and App updates preserve unexpired logins. Changing the account or login mode revokes earlier logins. A password change revokes all logins by default; uncheck **Also revoke all bound phones** to retain only current, valid logins marked as trusted phones. Ordinary browser logins must sign in again. This mark uses the existing mobile User-Agent check and is not an unforgeable device identity. Stop the gateway before saving a password change that keeps these logins. Logout, clearing browser cookies or changing hostnames requires signing in again; browsers may also remove long-unused cookies.
 - **Signed-in devices** shows browser login records, IPs, browser identifiers, login/expiry times and last activity (updated at most once a minute). **Revoke login** removes one login; **Block this IP** revokes every login at that IP and prevents new logins.
 - The optional allowlist accepts only listed IPs; the blocklist takes priority. Enter exact IPv4 or IPv6 addresses, one per line. Rules apply immediately and can always be changed in the local desktop App.
 - These are browser logins, not immutable hardware identities. Web pages cannot read phone MAC addresses, and phones may use rotating private MAC addresses. IPs can change, and devices sharing a public IP share its access rules.
@@ -128,7 +166,7 @@ The Mac build has an **ad-hoc integrity signature**, but **no Apple Developer ID
 1. Download the DMG or ZIP for your Mac's chip and `SHA256SUMS.txt` from this repository's Release. Calculate the downloaded file's hash and compare it with the matching filename in the checksum file. If they differ, download again instead of allowing the app. The example below uses the 2.0.3 Apple Silicon DMG; replace the filename for other downloads.
 
    ```sh
-   shasum -a 256 "$HOME/Downloads/Codex-Mobile-Bridge-2.0.3-macOS-arm64.dmg"
+   shasum -a 256 "$HOME/Downloads/Codex-Mobile-Bridge-2.1.1-macOS-arm64.dmg"
    ```
 
 2. Open the DMG, drag `Codex Mobile Bridge.app` to Applications, then eject the disk image. For a ZIP, extract it and move the App instead. Try opening it from Applications, then go to **System Settings → Privacy & Security → Open Anyway** and confirm.
@@ -184,10 +222,13 @@ Under **Network access → Add connection**, choose a type and click **Add conne
 | --- | --- | --- |
 | LAN | Phone and computer share a reachable network | Enable LAN access and keep the existing port |
 | Temporary Cloudflare HTTPS | No domain or existing public entry | Add a connection, save, and start using the bundled program |
+| Existing tunnel / reverse proxy | You already manage trusted HTTPS forwarding to this computer's loopback gateway | Enter only the phone's HTTPS root URL, optionally with a port; see the [guide](docs/external-tunnel.md) |
 | Fixed Cloudflare tunnel | Private domain, no server | Configure Cloudflare DNS and a public hostname; enter the domain and tunnel token |
 | Fixed Tailscale HTTPS | A fixed address without your own server | Sign in to the official client, discover its address and authorize Funnel/Serve; see the [guide](docs/tailscale.md) |
 | Own server + SSH | A public Linux server; the computer is behind NAT | Prepare HTTPS and forwarding, then use a regular SSH account. Bind a domain to the public IP, or leave the URL blank for HTTPS by public IP with a trusted IP certificate |
-| NAS / existing proxy / Docker | The NAS can reach the computer and already has an HTTPS reverse proxy | Enter the fixed HTTPS URL and the computer's HTTP address as reachable from the NAS |
+| NAS / other device (advanced existing-entry option) | The NAS can reach the computer and already has an HTTPS reverse proxy | Enter the fixed HTTPS URL and the computer's HTTP address as reachable from the NAS |
+
+The existing-tunnel option keeps tunnel software and certificates under your control. Use the gateway's actual loopback port and preserve the public Host; LAN and local browser access may stay off. A proxy on another device belongs under the advanced NAS option. See the [illustrated setup](site/setup.html#external).
 
 LAN, a temporary Cloudflare tunnel and multiple fixed entries can run together. Only one temporary tunnel is needed per gateway. Profiles targeting the same SSH server need different loopback ports. Different SSH aliases pointing to the same server can still conflict; choose their ports accordingly.
 
@@ -337,7 +378,7 @@ Alternatively, double-click `启动手机网关.command`. Stop with `Ctrl+C`, `p
 
 Open the printed LAN URL on a phone on the same network, for example `http://192.168.1.10:8787`. The initial username is `admin`; the generated password is in `.local/首次登录.txt`. Select a chat and wait for **Connected** before sending.
 
-Without `--lan`, the gateway listens only on `127.0.0.1`. It does not install a system login service. Restarting the gateway requires logging in again. If a chat shows saved history only, open it in the desktop App and reconnect on the phone; the gateway does not create a replacement execution owner for an unloaded chat.
+Without `--lan`, the gateway listens only on `127.0.0.1`. It does not install a system login service. Restarting with the same data directory preserves valid sign-ins and trusted phone bindings. If a Desktop chat shows saved history only, open it in the desktop App and reconnect on the phone; the gateway does not replace its original execution owner. Use **Continue chat** to explicitly connect or resume a CLI chat after its terminal closes. Reading history does not start a runtime.
 
 ## Temporary HTTPS and existing proxies
 
@@ -365,7 +406,7 @@ Preserve the external Host header, Origin, cookies and CSRF header; disable prox
 
 - **New chat:** choose a saved desktop project and name. Creation stores an empty chat through the official runtime, closes the helper and opens it in the original App. Sending waits for desktop ownership. Creation may change the desktop's visible chat. Saved request IDs prevent blind duplicate creation after an uncertain result.
 - **Model/Skills:** settings follow the current chat's host and project. Custom model availability depends on the provider. Changing a model does not change authentication or permission policy. Select up to eight Skills to send with the next message.
-- **Fast mode:** the model panel shows a toggle when the chat's host uses official ChatGPT login and its model and workspace allow Fast. Toggle it and select **Apply to this chat**; changes take effect from the next turn. Turning it off explicitly selects standard speed. The panel reads desktop settings and retains them after a refresh. Leaving the toggle untouched preserves the existing speed tier, including when changing model or reasoning effort. API/custom providers and unsupported models hide it; SSH chats use their remote account and workspace. Fast uses more allowance; see the [official speed guide](https://learn.chatgpt.com/docs/agent-configuration/speed).
+- **Fast mode:** the model panel shows a toggle for official ChatGPT login or an explicit native model catalog when the selected model and workspace allow Fast. Route IDs remain intact; speed support comes from that exact model's metadata, not a similarly named base model. Toggle it and select **Apply to this chat**; changes take effect from the next turn. Turning it off explicitly selects standard speed. The panel reads desktop settings and retains them after a refresh. Leaving the toggle untouched preserves the existing speed tier, including when changing model or reasoning effort. Ordinary API lists without native speed metadata and unsupported models hide it; SSH chats use their remote account and workspace. Fast uses more allowance; see the [official speed guide](https://learn.chatgpt.com/docs/agent-configuration/speed).
 - **Long model names:** the toolbar truncates the name while keeping reasoning effort visible. Open the model panel to read the full ID, or hover over the button on a computer.
 - **Work mode:** choose Default, Plan or Goal between the send-type selector and Send. Plan mode discusses the task first; its completion card lets you view the plan, implement it in Default mode, or send requested changes in Plan mode. Entering revision feedback emphasizes further planning and disables immediate implementation, so feedback cannot be silently ignored.
 - **Goal mode:** enter an objective of up to 4,000 characters after the current turn ends. The bridge sets the goal through the local native Goal API, then starts execution through the original desktop chat owner. The browser displays the confirmed objective, status and token usage; uncertain operations keep their request identity and are not automatically replayed. An unfinished goal or unresolved goal request prevents another start.
@@ -376,7 +417,7 @@ Preserve the external Host header, Origin, cookies and CSRF header; disable prox
 - **Confirmations:** respond to supported command, file, permission and question requests. Unsupported requests should be handled in the desktop App.
 - **Unknown result:** inspect chat history before trying again. The gateway does not automatically replay an uncertain submission.
 
-Work mode follows the chat unless manually selected. Default and Plan messages can be queued; steering retains the running turn's mode. Modes preserve the original host, model, provider and permissions. After a goal request is accepted, subsequent messages return to ordinary input without cancelling the goal. Local chats support pausing, resuming, editing and closing goals from the browser; these controls are not yet supported for SSH chats. Pause before editing. Saving replaces the objective and resets usage while retaining the token budget and paused state; resume to continue. Pausing or closing a goal does not interrupt an active reply; use Stop for that. Manage budgets with existing Codex controls. These features require desktop runtime support; see [verification scope](VERIFICATION.md).
+Work mode follows the chat unless manually selected. Default and Plan messages can be queued; steering retains the running turn's mode. Modes preserve the original host, model, provider and permissions. After a goal request is accepted, subsequent messages return to ordinary input without cancelling the goal. Compatible local App chats and local/SSH native CLI chats support pausing, resuming, editing and closing goals from the browser. SSH chats executed by an App owner do not support these controls. Pause before editing. Saving replaces the objective and resets usage while retaining the token budget and paused state; resume to continue. Pausing or closing a goal does not interrupt an active reply; use Stop for that. Manage budgets with existing Codex controls. These features require support from the actual execution runtime; see [verification scope](VERIFICATION.md).
 
 ## Login settings
 
@@ -447,7 +488,7 @@ Keep the process running using the user's chosen launcher or an authorized proce
 | HTTP 502/504 | Proxy upstream, SSH connection and remote loopback port |
 | Host/Origin rejection | Exact allowed HTTPS origin and preserved external Host header |
 | Login keeps resetting | HTTPS throughout the external path, cookies preserved, caching disabled |
-| Only saved history | Open the chat in the original desktop App and confirm owner connectivity |
+| Only saved history | Desktop: open the chat in its original App and confirm owner connectivity. CLI: choose **Continue chat** to connect or resume |
 | Tunnel fails but LAN works | Outbound network restrictions, executable path and tunnel logs |
 | QR login shows `CERTIFICATE_VERIFY_FAILED` | Update to beta.4 or later, which bundles trusted CA roots. If it persists, check system time, HTTPS interception and the domain's certificate chain; keep verification enabled. Restart the gateway for ntfy to use the updated TLS implementation |
 | ntfy receives but chat link fails | Notification click URL, gateway availability and phone network reachability |

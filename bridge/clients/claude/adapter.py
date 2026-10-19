@@ -9,9 +9,12 @@ import time
 from pathlib import Path
 
 import bridge.clients.claude.model as model
+from bridge.clients.claude.context import context_fields
 from bridge.clients.claude.setup import inspect_installation, console_source, developer_mode_enabled, native_action, running_app, claude_data_home, background_running_app
 from bridge.clients.errors import BridgeUnavailable
 from bridge.clients.claude.mailbox import FileDesktop, MAX_REQUEST, CONNECTOR_REVISION
+from bridge.clients.claude.cli_session import ClaudeCli
+from bridge.clients.claude.remote import RemoteClaudeCli
 from bridge.app.lifecycle import private_json
 from bridge.platforms.windows import session as windows_session
 from bridge.platforms.windows.session import DesktopUnavailable
@@ -20,8 +23,11 @@ DESKTOP_WAIT_STATES = {'needs-screen-saver', 'needs-unlock', 'needs-desktop'}
 
 
 class Claude:
-    def __init__(self, directory, *, auto_connect=True):
+    def __init__(self, directory, *, auto_connect=True, hosts=None):
         self.directory = Path(directory)
+        self.hosts = hosts
+        self.cli = ClaudeCli(self.directory.parent/'uploads')
+        self.remote_cli = RemoteClaudeCli(hosts)
         self.desktop = None
         self.index = {}
         self.loop = None
@@ -79,7 +85,7 @@ class Claude:
                                       developer_mode_enabled(self.discovery['dataHome'])),
                 'connected': self.status()['connected']}
 
-    def prepare(self, reset=False):
+    def prepare(self, reset=False, *, foreground=False):
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         path = self.directory/'connection.json'
         if not path.exists():
@@ -91,6 +97,7 @@ class Claude:
             self.thread.start()
         if self.desktop is None or reset:
             if self.desktop:
+                self._assert_reconnect_idle()
                 self.desktop.close()
             async def initialize():
                 self.desktop = FileDesktop(self.directory, token)
@@ -105,7 +112,10 @@ class Claude:
         target = self.directory/'connect-desktop.js'
         target.write_text(script, encoding='utf-8'); target.chmod(0o600)
         console = self.directory/'console-connect.js'
-        console.write_text(console_source(source, config), encoding='utf-8')
+        if sys.platform == 'win32' and foreground:
+            console.write_bytes(console_source(source, config, multiline=True).encode('utf-8'))
+        else:
+            console.write_text(console_source(source, config), encoding='utf-8')
         console.chmod(0o600)
         return {'workspace': str(self.directory), 'scriptPath': str(target), 'script': script,
                 'consolePath': str(console), 'inspectionMarker': config['inspectionMarker']}
@@ -267,7 +277,7 @@ class Claude:
         old_monitor = None
         background_monitor = False
         with self.setup_lock:
-            if existing_only or sys.platform == 'darwin' and (self.desktop or self.pending_calls):
+            if existing_only or self.desktop or self.pending_calls:
                 self._assert_reconnect_idle()
             if self.setup_cancel.is_set() and self.setup_thread:
                 old_monitor = self.setup_thread
@@ -307,11 +317,11 @@ class Claude:
             if self.desktop is None and ((self.directory/'connection.json').exists()
                                          or sys.platform == 'darwin' and not foreground):
                 self.prepare()
-            if sys.platform == 'win32' and not restart and not existing_only:
+            if sys.platform == 'win32' and not foreground and not restart and not existing_only:
                 self.setup_mode = 'background'
                 self.setup_thread = threading.Thread(target=self._connect_background,
                     args=(self.setup_cancel, self.discovery['executable'], self.discovery.get('dataHome')),
-                    kwargs={'foreground': True, 'cancel_path': cancel_path}, daemon=True)
+                    kwargs={'foreground': False, 'cancel_path': cancel_path}, daemon=True)
             else:
                 self.setup_mode = 'native'
                 self.setup_thread = threading.Thread(target=self._connect_native, args=(restart, cancel_path, self.setup_cancel),
@@ -340,6 +350,7 @@ class Claude:
 
     def _connect_native(self, restart, cancel_path, cancel=None, *, existing_only=False, foreground=True):
         cancel = cancel if cancel is not None else self.setup_cancel
+        restart_requested = restart
         asked_permission = False
         developer_prompt_pid = None
         force_console = self.connection_probe_failed
@@ -444,7 +455,10 @@ class Claude:
                     return
                 with self.setup_lock:
                     if cancel.is_set(): return
-                    if existing_only or sys.platform == 'darwin':
+                    first_owner_without_token = (sys.platform == 'win32' and foreground and
+                                                 not restart_requested and not existing_only and
+                                                 self.desktop is None and not (self.directory/'connection.json').exists())
+                    if self.desktop or existing_only:
                         self._assert_reconnect_idle()
                         self.reconnecting = True
                         if existing_only and self.desktop and self.desktop.stopped:
@@ -453,10 +467,13 @@ class Claude:
                             self.desktop.resume_after = time.time()
                             self.desktop.write({'generation': self.desktop.generation, 'seq': self.desktop.seq, 'type': 'idle'})
                             self.desktop.stopped = False
-                    prepared = self.prepare(reset=self.desktop is not None and not existing_only)
-                # Signed reconnect may finish while the app was being located.
-                for _ in range(5):
-                    if self.desktop.connected or cancel.wait(.2): break
+                    prepared = self.prepare(reset=self.desktop is not None and not existing_only,
+                                            foreground=foreground)
+                # A first owner with a new token has no earlier renderer to
+                # follow this generation before native Console setup.
+                if not first_owner_without_token:
+                    for _ in range(5):
+                        if self.desktop.connected or cancel.wait(.2): break
                 if cancel.is_set(): return
                 if self.desktop.connected and not force_console: continue
                 if force_console:
@@ -487,6 +504,14 @@ class Claude:
                                     'Claude 桌面连接暂未响应，请检查电脑端状态后重试；未重启客户端')
                                 return
                         self.connection_probe_failed = False
+                        # The signed renderer receipt (and required read probe)
+                        # makes the mailbox usable. Closing DevTools is separate
+                        # UI cleanup and must not keep normal calls blocked.
+                        with self.setup_lock:
+                            if not self._attempt_state(cancel, 'connected', '桌面连接可用',
+                                                       consoleCleanupPending=True):
+                                return
+                            self.reconnecting = False
                         try:
                             cleanup = native_action('close-devtools', pid=pid, executable=executable, cancelled=cancel)
                             pending = cleanup.get('setupState') not in ('connected', 'submitted')
@@ -551,6 +576,8 @@ class Claude:
             result.update(setupState='needs-retry', reason='Claude 连接已中断，请点击连接重试')
         elif not self.discovery:
             result.update(setupState='not-scanned', reason='请扫描本机客户端')
+        result.update(self.cli.status())
+        result['cliAvailable'] = result['cliAvailable'] or self.remote_cli.available()
         return result
 
     async def listing(self):
@@ -565,6 +592,18 @@ class Claude:
         self.index = {row['id']: row for row in rows}
         return {'connected': True, 'sessions': rows, 'coverage': coverage, 'complete': all(coverage.values())}
 
+    def desktop_listing(self):
+        """Read Desktop sessions without scanning Claude Code CLI history."""
+        if self.loop is None or self.desktop is None or not self.desktop.connected or self.setup_cancel.is_set():
+            raise BridgeUnavailable('Claude Desktop 未连接')
+        future = self._submit_call(lambda: self.listing())
+        try:
+            return future.result(timeout=100)
+        finally:
+            if future.done():
+                with self.setup_lock:
+                    self.pending_calls.discard(future)
+
     def session_capabilities(self, kind):
         methods = self.desktop.capabilities.get(kind, [])
         return {'models': 'setModel' in methods, 'effort': 'setEffort' in methods,
@@ -572,11 +611,70 @@ class Claude:
                 'skills': 'getSupportedCommands' in methods, 'queue': kind == 'code', 'steer': kind == 'code',
                 'contextUsage': any(method in methods for method in ('getContextUsageSummary', 'getContextUsage'))}
 
+    def cli_projects(self, include_remote=True):
+        projects = []
+        profile = self.cli.profile_resolver()
+        if profile and self.cli._ready(profile):
+            self.cli.listing()
+            with self.cli.lock:
+                cwds = {row['cwd'] for row in self.cli.index.values()
+                        if row['origin'] == profile['origin']}
+            if self.hosts is not None:
+                cwds.update(row['cwd'] for row in self.hosts.projects() if row['host'] == 'local')
+            for cwd in sorted(cwds):
+                if Path(cwd).is_dir():
+                    projects.append({'key': model.gateway_id('cli:project:'+profile['origin'], cwd),
+                                     'name': Path(cwd).name+' · Claude Code', 'cwd': cwd,
+                                     'surface': 'cli', 'host': 'local', 'origin': profile['origin'],
+                                     'createRequiresMessage': True})
+        if include_remote:
+            projects.extend(self.remote_cli.projects())
+        return projects
+
+    def create_cli(self, project, body):
+        message = body.get('firstMessage', body.get('text', ''))
+        if not isinstance(message, str) or not message.strip() or len(message) > 100000:
+            raise ValueError('请输入首条消息，Claude 将创建会话并发送此消息')
+        if project['host'] == 'local':
+            return self.cli.create(project['cwd'], project['origin'], message)
+        return self.remote_cli.create(project['host'], project['alias'], project['origin'],
+                                      project['cwd'], message)
+
     async def dispatch(self, action, sid, body):
+        if action == 'list':
+            cli = await asyncio.to_thread(self.cli.listing)
+            remote = await asyncio.to_thread(self.remote_cli.listing)
+            if self.status()['connected']:
+                desktop = await self.listing()
+                return {'connected': True, 'sessions': desktop['sessions'] + cli['sessions'] + remote['sessions'],
+                        'coverage': {**desktop['coverage'], 'cli': cli['connected']},
+                        'complete': desktop['complete'] and remote['complete']}
+            return {'connected': cli['connected'] or remote['connected'], 'sessions': cli['sessions'] + remote['sessions'],
+                    'coverage': {'code': False, 'cowork': False, 'cli': cli['connected']},
+                    'complete': (cli['connected'] or remote['connected']) and remote['complete']}
+        if action == 'resume':
+            if await asyncio.to_thread(self.remote_cli.contains, sid):
+                return await asyncio.to_thread(self.remote_cli.call, action, sid, body)
+            return await asyncio.to_thread(self.cli.call, action, sid, body)
+        if sid and sid not in self.index and await asyncio.to_thread(self.remote_cli.contains, sid):
+            return await asyncio.to_thread(self.remote_cli.call, action, sid, body)
+        if sid and sid not in self.index and await asyncio.to_thread(self.cli.contains, sid):
+            return await asyncio.to_thread(self.cli.call, action, sid, body)
+        if action == 'projects' or (action == 'create' and not str(body.get('projectKey', '')).startswith(('code:', 'cowork:'))):
+            cli_projects = await asyncio.to_thread(self.cli_projects, action == 'projects')
+            if action == 'create':
+                selected = next((row for row in cli_projects if row['key'] == body.get('projectKey')), None)
+                if selected is None:
+                    remote_projects = await asyncio.to_thread(self.remote_cli.projects)
+                    selected = next((row for row in remote_projects if row['key'] == body.get('projectKey')), None)
+                if selected:
+                    return await asyncio.to_thread(self.create_cli, selected, body)
+            elif not self.status()['connected']:
+                return {'projects': [{key: value for key, value in row.items()
+                                      if key not in ('origin', 'alias')} for row in cli_projects],
+                        'createRequiresMessage': True}
         if not self.status()['connected']:
             raise BridgeUnavailable(self.status()['reason'])
-        if action == 'list':
-            return await self.listing()
         if action == 'account':
             return await self.desktop.call('code', 'mobileAccount')
         if action in ('projects', 'create'):
@@ -591,7 +689,9 @@ class Claude:
                 projects[key] = {'key': key, 'cwd': root, 'folders': roots, 'surface': kind,
                                  'name': Path(root).name+' · '+kind, 'createRequiresMessage': True}
             if action == 'projects':
-                return {'projects': list(projects.values()), 'createRequiresMessage': True}
+                public_cli = [{key: value for key, value in row.items()
+                               if key not in ('origin', 'alias')} for row in cli_projects]
+                return {'projects': list(projects.values()) + public_cli, 'createRequiresMessage': True}
             project = projects.get(body.get('projectKey'))
             if not project:
                 raise ValueError('请选择桌面已有项目')
@@ -617,15 +717,24 @@ class Claude:
         if row['id'] != sid:
             raise BridgeUnavailable('桌面返回的会话标识不一致')
         if action == 'detail':
+            raw = detail['transcript'] if detail is not None else await self.desktop.call(kind, 'getTranscript', native)
             row['contextUsage'] = detail.get('contextUsage') if detail is not None else None
             usage_status = detail.get('contextUsageStatus') if detail is not None else None
             row['contextUsageStatus'] = (usage_status if usage_status in ('available', 'unavailable', 'unsupported') else
                                          'available' if row['contextUsage'] is not None else
                                          'unavailable' if self.session_capabilities(kind)['contextUsage'] else 'unsupported')
-            raw = detail['transcript'] if detail is not None else await self.desktop.call(kind, 'getTranscript', native)
+            if row['contextUsage'] is None:
+                observed = context_fields(raw)
+                if observed['contextUsage'] is not None:
+                    row.update(observed)
+            capabilities = self.session_capabilities(kind)
+            if row['contextUsage'] is not None:
+                capabilities = {**capabilities, 'contextUsage': True}
             return {'connected': True, 'session': row, 'messages': model.transcript(raw), 'turns': model.turns(raw), 'notice': model.transcript_notice(raw),
-                    'capabilities': self.session_capabilities(kind), 'maxRequestBytes': MAX_REQUEST}
+                    'capabilities': capabilities, 'maxRequestBytes': MAX_REQUEST}
         if action == 'catalog':
+            if body.get('section') == 'selection':
+                return {'currentModel': row.get('model'), 'currentEffort': row.get('effort')}
             value = await self.desktop.call(kind, 'mobileCatalog', native)
             value.update(currentModel=row.get('model'), currentEffort=row.get('effort'))
             return value
@@ -714,6 +823,34 @@ class Claude:
 
     def call(self, action, sid=None, body=None, *, timeout=100):
         if self.loop is None:
+            if action == 'list':
+                cli = self.cli.listing()
+                remote = self.remote_cli.listing()
+                return {'connected': cli['connected'] or remote['connected'],
+                        'sessions': cli['sessions'] + remote['sessions'],
+                        'coverage': {'code': False, 'cowork': False, 'cli': cli['connected']},
+                        'complete': (cli['connected'] or remote['connected']) and remote['complete']}
+            if action == 'resume':
+                if self.remote_cli.contains(sid):
+                    return self.remote_cli.call(action, sid, body or {})
+                return self.cli.call(action, sid, body or {})
+            if sid and self.remote_cli.contains(sid):
+                return self.remote_cli.call(action, sid, body or {})
+            if sid and self.cli.contains(sid):
+                return self.cli.call(action, sid, body or {})
+            if action in ('projects', 'create'):
+                cli_projects = self.cli_projects(action == 'projects')
+                if action == 'projects':
+                    return {'projects': [{key: value for key, value in row.items()
+                                          if key not in ('origin', 'alias')} for row in cli_projects],
+                            'createRequiresMessage': True}
+                selected = next((row for row in cli_projects
+                                 if row['key'] == (body or {}).get('projectKey')), None)
+                if selected is None:
+                    selected = next((row for row in self.remote_cli.projects()
+                                     if row['key'] == (body or {}).get('projectKey')), None)
+                if selected:
+                    return self.create_cli(selected, body or {})
             raise BridgeUnavailable(self.status()['reason'])
         future = self._submit_call(lambda: self.dispatch(action, sid, body or {}))
         try:
@@ -769,6 +906,8 @@ class Claude:
                     self.pending_calls.discard(future)
 
     def close(self):
+        self.cli.close()
+        self.remote_cli.close()
         # Ownership handoff must preserve explicit connection intent. A user's
         # Cancel action persists autoConnect=False instead.
         self.cancel(persist=False)

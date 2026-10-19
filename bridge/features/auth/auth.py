@@ -8,7 +8,42 @@ import re
 import secrets
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
+
+from bridge.features.accounts.draft_identity import draft_identity
+
+
+@contextmanager
+def session_file_lock(path):
+    """Serialize session-file replacements across gateway and desktop processes."""
+    lock_path = path.with_name(path.name + '.lock')
+    with os.fdopen(os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600), 'r+b') as stream:
+        if os.name == 'nt':
+            import msvcrt
+            stream.seek(0)
+            msvcrt.locking(stream.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(stream, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            if os.name == 'nt':
+                stream.seek(0)
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream, fcntl.LOCK_UN)
+
+
+def replace_session_file(path, contents):
+    temporary = path.with_name(path.name + '.' + secrets.token_hex(8) + '.tmp')
+    try:
+        with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'wb') as stream:
+            stream.write(contents)
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def session_hours(value):
@@ -80,8 +115,9 @@ class Auth:
         self.failures = {}
         self.auto_blocks = {}
         self.lock = threading.RLock()
+        self._loaded = self.path.read_bytes() if self.path and self.path.exists() else None
         if self.path and self.path.exists():
-            saved = json.loads(self.path.read_text(encoding='utf-8'))
+            saved = json.loads(self._loaded)
             self.cookie_name = saved.get('cookieName') or self.cookie_name
             self.policy = access_policy(saved['policy'])
             self.failures = saved.get('failures', {})
@@ -97,6 +133,12 @@ class Auth:
         elif self.path:
             self.persist()
 
+    @property
+    def draft_identity(self):
+        # The persisted cookie namespace follows the data directory. Neither
+        # renewable session tokens nor password hashes belong in a draft key.
+        return draft_identity('gateway', self.cookie_name, self.config.get('username') or '')
+
     @staticmethod
     def valid(session):
         return session['expires'] == 0 or session['expires'] > time.time()
@@ -108,13 +150,45 @@ class Auth:
     def persist(self):
         if self.path is None:
             return
-        temporary = self.path.with_name(self.path.name + '.' + secrets.token_hex(8) + '.tmp')
-        try:
-            with os.fdopen(os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), 'w', encoding='utf-8') as stream:
-                json.dump({'identity': self.identity, 'cookieName': self.cookie_name, 'policy': self.policy, 'sessions': self.sessions, 'failures': self.failures, 'autoBlocks': self.auto_blocks}, stream)
-            temporary.replace(self.path)
-        finally:
-            temporary.unlink(missing_ok=True)
+        with session_file_lock(self.path):
+            current = self.path.read_bytes() if self.path.exists() else None
+            if current != self._loaded:
+                raise ValueError('设备授权已变化，请刷新后重试')
+            contents = json.dumps({'identity': self.identity, 'cookieName': self.cookie_name, 'policy': self.policy, 'sessions': self.sessions, 'failures': self.failures, 'autoBlocks': self.auto_blocks}).encode('utf-8')
+            replace_session_file(self.path, contents)
+            self._loaded = contents
+
+    @classmethod
+    def preserve_trusted_on_password_change(cls, old_config, new_config, data_dir, publish_config):
+        """Move current trusted phone sessions and publish credentials as one locked operation.
+
+        A process crash between session and config writes fails closed. A
+        caught config-write failure restores the exact previous session file.
+        """
+        path = Path(data_dir) / 'auth-sessions.json'
+        old_identity = cls(old_config).identity
+        new_identity = cls(new_config).identity
+        with session_file_lock(path):
+            before = path.read_bytes() if path.exists() else None
+            if before is None:
+                publish_config()
+                return
+            saved = json.loads(before)
+            if saved['identity'] != old_identity:
+                raise ValueError('设备授权已变化，请刷新后重试')
+            migrated = {**saved, 'identity': new_identity,
+                        'sessions': {key: session for key, session in saved['sessions'].items()
+                                     if cls.valid(session) and session.get('trustedDevice') is True
+                                     and cls.mobile_client(session.get('userAgent', ''))}}
+            after = json.dumps(migrated).encode('utf-8')
+            replace_session_file(path, after)
+            try:
+                publish_config()
+            except Exception:
+                # No cooperating writer can change this file while the lock is held.
+                if path.read_bytes() == after:
+                    replace_session_file(path, before)
+                raise
 
     def permitted(self, address):
         with self.lock:

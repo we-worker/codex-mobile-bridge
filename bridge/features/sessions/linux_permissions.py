@@ -18,6 +18,7 @@ RESTRICTED = '当前工作区或管理员策略不允许此权限模式。'
 FULL_HIDDEN = '请先在 Codex 桌面设置中开启“完全访问权限”选项，再重新打开此面板。'
 AUTO_UNKNOWN = '尚未确认桌面已开放“帮我批准”；请先在桌面选择此模式，再重新打开此面板。'
 AUTO_DISABLED = '当前 Codex 运行时或配置未启用“帮我批准”。'
+PROFILE_UNAVAILABLE = '当前运行时未提供此权限配置，请在桌面检查或更新 Codex。'
 
 
 def read_permission_facts(request, cwd):
@@ -122,7 +123,7 @@ def permission_options(facts, preferences, current, *, native=True):
             if facts['profiles'].get(settings['permissions']) is False:
                 reason = RESTRICTED
             elif facts['profiles'].get(settings['permissions']) is not True:
-                reason = reason or '当前运行时未提供此权限配置，请在桌面检查或更新 Codex。'
+                reason = reason or PROFILE_UNAVAILABLE
         if not reason and preset == 'full-access':
             if preferences.get('fullAccess') is False:
                 reason = FULL_HIDDEN

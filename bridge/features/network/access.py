@@ -4,6 +4,8 @@ import ipaddress
 import json
 import re
 import shlex
+import socket
+import ssl
 from urllib.parse import urlsplit
 
 from bridge.features.auth.tls import client_context
@@ -21,8 +23,14 @@ def origin(value, scheme='https'):
         raise ValueError('地址不能包含空白字符')
     parsed = urlsplit(value)
     if (parsed.scheme != scheme or not parsed.hostname or parsed.username or parsed.password
-            or parsed.path not in ('', '/') or parsed.query or parsed.fragment):
+            or parsed.path not in ('', '/') or '?' in value or '#' in value):
         raise ValueError(f'请填写完整 {scheme.upper()} 地址，不含路径、账号或参数')
+    try:
+        port = parsed.port
+    except ValueError:
+        raise ValueError('地址端口不正确') from None
+    if parsed.netloc.endswith(':'):
+        raise ValueError('地址端口不正确')
     host = parsed.hostname
     try:
         ipaddress.ip_address(host)
@@ -31,11 +39,11 @@ def origin(value, scheme='https'):
     except ValueError:
         if not re.fullmatch(r'[a-zA-Z0-9](?:[a-zA-Z0-9.-]{0,251}[a-zA-Z0-9])?', host):
             raise ValueError('请使用域名或 IP 地址；国际化域名请填写 Punycode')
-    if parsed.port is not None and not 1 <= parsed.port <= 65535:
+    if port is not None and not 1 <= port <= 65535:
         raise ValueError('地址端口不正确')
     authority = '['+host+']' if ':' in host else host
-    if parsed.port is not None and parsed.port != (443 if scheme == 'https' else 80):
-        authority += ':'+str(parsed.port)
+    if port is not None and port != (443 if scheme == 'https' else 80):
+        authority += ':'+str(port)
     return f'{scheme}://{authority.lower()}'
 
 
@@ -55,7 +63,7 @@ def server_ip_url(preferences):
 
 def validate(preferences):
     p = {**DEFAULTS, **preferences}
-    if p['accessMode'] not in ('lan', 'quick', 'cloudflare', 'server', 'nas', 'tailscale'):
+    if p['accessMode'] not in ('lan', 'quick', 'cloudflare', 'server', 'nas', 'tailscale', 'external'):
         raise FieldError('请选择有效的外网连接方式', 'connection-kind')
     if p['publicUrl']:
         p['publicUrl'] = at_field('publicUrl', origin, p['publicUrl'])
@@ -79,13 +87,13 @@ def validate(preferences):
     port = p['sshRemotePort']
     if isinstance(port, bool) or not isinstance(port, int) or not 1024 <= port <= 65535:
         raise FieldError('服务器回环端口须为 1024–65535', 'sshRemotePort')
-    if p['accessMode'] in ('nas', 'cloudflare') and not p['publicUrl']:
+    if p['accessMode'] in ('nas', 'cloudflare', 'external') and not p['publicUrl']:
         raise FieldError('请填写手机访问的固定 HTTPS 地址', 'publicUrl')
     if p['accessMode'] == 'server':
         if p['sshAuth'] == 'config' and not p['sshTarget']:
             raise FieldError('请填写服务器的 SSH 目标', 'sshTarget')
         if urlsplit(p['publicUrl']).port not in (None, 443):
-            raise FieldError('服务器 HTTPS 入口使用 443 端口；已有其他入口请选择 NAS / 已有反代', 'publicUrl')
+            raise FieldError('服务器 HTTPS 入口使用 443 端口；已有其他入口请选择已有穿透 / 反向代理', 'publicUrl')
     if p['accessMode'] == 'nas':
         if not p['lan'] or not p['proxyUpstream']:
             raise FieldError('NAS 方式需要开启局域网访问并填写 NAS 可达的电脑 HTTP 地址', 'proxyUpstream')
@@ -139,7 +147,7 @@ def validate_connections(preferences):
         if row['id'] in ids:
             raise ValueError('连接配置 ID 重复')
         ids.add(row['id'])
-        if not isinstance(row.get('enabled'), bool) or row.get('accessMode') not in ('quick', 'cloudflare', 'server', 'nas', 'tailscale'):
+        if not isinstance(row.get('enabled'), bool) or row.get('accessMode') not in ('quick', 'cloudflare', 'server', 'nas', 'tailscale', 'external'):
             raise ValueError('连接类型或开关格式不正确')
         if not isinstance(row.get('name', ''), str) or len(row.get('name', '')) > 100:
             raise FieldError('连接名称最多 100 个字符', 'name', row['id'])
@@ -179,7 +187,7 @@ def validate_connections(preferences):
 
 def public_urls(preferences):
     return [c['publicUrl'] for c in connections(preferences)
-            if c['enabled'] and c['accessMode'] in ('server', 'nas', 'cloudflare', 'tailscale') and c['publicUrl']]
+            if c['enabled'] and c['accessMode'] in ('server', 'nas', 'cloudflare', 'tailscale', 'external') and c['publicUrl']]
 
 
 def public_url(preferences):
@@ -188,7 +196,7 @@ def public_url(preferences):
 
 def select_connection(preferences, value, allow_disabled=False):
     selected = next((c for c in connections(preferences) if c['id'] == value.get('id')), None)
-    if not selected or (not selected['enabled'] and not allow_disabled) or selected['accessMode'] not in ('server', 'nas', 'cloudflare', 'tailscale'):
+    if not selected or (not selected['enabled'] and not allow_disabled) or selected['accessMode'] not in ('server', 'nas', 'cloudflare', 'tailscale', 'external'):
         raise ValueError('请先保存并启用需要操作的固定连接配置')
     return validate({**selected, 'lan': preferences['lan'], 'port': preferences['port']})
 
@@ -411,9 +419,14 @@ def read_auth(url):
     try:
         connection.request('GET', '/api/auth', headers={'Cache-Control': 'no-cache'})
         response = connection.getresponse()
+        if 300 <= response.status < 400:
+            raise ValueError(f'入口返回 HTTP {response.status} 重定向；请直接填写网关的 HTTPS 根地址')
         if response.status != 200:
             raise ValueError(f'入口返回 HTTP {response.status}；检查反代上游、Host 和 HTTPS 配置')
-        value = json.loads(response.read(65536))
+        try:
+            value = json.loads(response.read(65536))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            raise ValueError('入口返回的不是网关响应，请检查反代目标') from None
         if not isinstance(value, dict):
             raise ValueError('入口返回的不是网关响应，请检查反代目标')
         return value
@@ -427,7 +440,12 @@ def check_entry(preferences, instance_id=None):
         raise ValueError('请先保存固定 HTTPS 入口配置')
     if instance_id is None:
         instance_id = read_auth(f'http://127.0.0.1:{preferences["port"]}').get('instanceId')
-    remote = read_auth(url)
+    try:
+        remote = read_auth(url)
+    except ssl.SSLError:
+        raise ValueError('HTTPS 证书或 TLS 握手失败；请检查域名、证书和反代配置') from None
+    except (socket.gaierror, TimeoutError, ConnectionError, OSError, http.client.HTTPException):
+        raise ValueError('无法连接固定 HTTPS 入口；请检查域名解析、网络和反代是否运行') from None
     if not instance_id or remote.get('instanceId') != instance_id:
         raise ValueError('入口没有连接到当前网关；请检查反代目标，旧版网关须先更新并重启')
     return {'message': '固定 HTTPS 入口已连到当前网关。请再用手机蜂窝网络验证登录与聊天。', 'url': url}

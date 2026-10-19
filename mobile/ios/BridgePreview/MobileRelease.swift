@@ -6,6 +6,10 @@ struct MobileRelease {
     let version: String
     let notes: String
     var page: URL { URL(string: Self.repository + "/releases/tag/v" + version)! }
+    static func channel(_ version: String) -> String {
+        let part = version.split(separator: "-", maxSplits: 1).dropFirst().first?.split(separator: ".").first
+        return part.map { String($0) } ?? "stable"
+    }
     static func parts(_ value: String) -> [Int]? {
         let pattern = #"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(alpha|beta|preview|rc)\.(0|[1-9][0-9]*))?$"#
         guard let match = try? NSRegularExpression(pattern: pattern).firstMatch(in: value, range: NSRange(value.startIndex..., in: value)) else { return nil }

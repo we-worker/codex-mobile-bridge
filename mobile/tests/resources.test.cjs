@@ -77,7 +77,10 @@ test('iOS missing resources stop connection visibly before replacing the current
   const connect = app.slice(app.indexOf('private func connect('), app.indexOf('@objc private func refresh()'));
   assert.match(connect, /do \{ scripts = try WebScripts\(\) \}\s+catch \{ info\(error\.localizedDescription\); return \}/);
   assert.ok(connect.indexOf('try WebScripts()') < connect.indexOf('clear()'));
-  assert.equal([...connect.matchAll(/injectionTime: \.atDocumentEnd, forMainFrameOnly: true/g)].length, 4);
+  for (const script of ['WebScripts.fixedViewport', 'appearanceScript', 'clipboardScript', 'systemBarsScript']) {
+    assert.match(connect, new RegExp(`addUserScript\\(WKUserScript\\(source: ${script.replace('.', '\\.')}\\, injectionTime: \\.atDocumentEnd, forMainFrameOnly: true\\)\\)`));
+  }
+  assert.match(connect, /addUserScript\(WKUserScript\(source: "window\.BridgeMobileCapabilities = Object\.freeze\(\{ diagnosticsExport: true \}\);", injectionTime: \.atDocumentEnd, forMainFrameOnly: true\)\)/);
   assert.match(connect, /scripts\.appearance\.replacingOccurrences\(of: "__BRIDGE_CLIPBOARD_TOKEN__", with: clipboardToken\)/);
   assert.match(connect, /scripts\.clipboard\.replacingOccurrences\(of: "__BRIDGE_CLIPBOARD_TOKEN__", with: clipboardToken\)/);
   assert.doesNotMatch(app, /private static let web(Appearance|Clipboard) =/);

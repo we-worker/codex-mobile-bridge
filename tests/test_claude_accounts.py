@@ -1,4 +1,7 @@
 import json
+import io
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import base64
 import hashlib
 import importlib.util
@@ -65,6 +68,128 @@ class ClaudeAccountSnapshots(unittest.TestCase):
                    'inferenceGatewayApiKey': secret, 'inferenceGatewayAuthScheme': 'bearer',
                    'inferenceModels': [{'name': 'actual-upstream-model'}]})
         return config_id
+
+    def test_current_desktop_api_catalog_uses_native_gateway_key_and_preserves_upstream_efforts(self):
+        config_id = self.gateway('DESKTOP-GATEWAY-SECRET')
+        config_path = self.threep/'configLibrary'/(config_id+'.json')
+        config = json.loads(config_path.read_text())
+        config['inferenceGatewayBaseUrl'] = 'https://provider.test/v1'
+        self.write(config_path, config)
+        rows = [{'id': 'provider/model', 'name': 'Provider model', 'efforts': ['high'], 'defaultEffort': 'high'}]
+        with patch(MODULE+'model_catalog', return_value=rows) as query:
+            result = self.accounts.models()
+        query.assert_called_once_with('https://provider.test/v1', 'DESKTOP-GATEWAY-SECRET', headers={
+            'Authorization': 'Bearer DESKTOP-GATEWAY-SECRET', 'anthropic-version': '2023-06-01'})
+        self.assertEqual(result['groups'][0]['models'], rows)
+        self.assertEqual(result['groups'][0]['source'], 'upstream-api')
+
+    def test_desktop_api_model_request_uses_v1_path_version_and_selected_auth_scheme(self):
+        config_id = self.gateway('DESKTOP-GATEWAY-SECRET')
+        config_path = self.threep/'configLibrary'/(config_id+'.json')
+        for base, scheme in (('https://provider.test', 'bearer'),
+                             ('https://provider.test/v1', 'x-api-key')):
+            with self.subTest(base=base, scheme=scheme):
+                config = json.loads(config_path.read_text())
+                config['inferenceGatewayBaseUrl'] = base
+                config['inferenceGatewayAuthScheme'] = scheme
+                self.write(config_path, config)
+                with patch('bridge.features.accounts.models.build_opener') as factory:
+                    factory.return_value.open.return_value = io.BytesIO(
+                        b'{"data":[{"id":"provider/model","display_name":"Provider model"}]}')
+                    result = self.accounts.models()
+                request = factory.return_value.open.call_args.args[0]
+                self.assertEqual(request.full_url, 'https://provider.test/v1/models')
+                self.assertEqual(request.get_header('Anthropic-version'), '2023-06-01')
+                self.assertEqual(request.get_header('Authorization'),
+                                 'Bearer DESKTOP-GATEWAY-SECRET' if scheme == 'bearer' else None)
+                self.assertEqual(request.get_header('X-api-key'),
+                                 'DESKTOP-GATEWAY-SECRET' if scheme == 'x-api-key' else None)
+                self.assertEqual(result['groups'][0]['models'][0]['id'], 'provider/model')
+                self.assertNotIn('DESKTOP-GATEWAY-SECRET', json.dumps(result))
+
+    def test_desktop_api_model_request_reaches_only_local_fixture_with_expected_path_and_headers(self):
+        received = []
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                received.append((self.path, self.headers.get('Authorization'),
+                                 self.headers.get('x-api-key'), self.headers.get('anthropic-version')))
+                payload = b'{"data":[{"id":"local-model","capabilities":{"effort":{"supported":true,"low":{"supported":true},"high":{"supported":false}}}}]}'
+                self.send_response(200)
+                self.send_header('Content-Type', 'application/json')
+                self.send_header('Content-Length', str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            config_id = self.gateway('LOCAL-FIXTURE-KEY')
+            path = self.threep/'configLibrary'/(config_id+'.json')
+            for suffix, scheme in (('', 'bearer'), ('/v1', 'x-api-key')):
+                config = json.loads(path.read_text())
+                config['inferenceGatewayBaseUrl'] = f'http://127.0.0.1:{server.server_port}{suffix}'
+                config['inferenceGatewayAuthScheme'] = scheme
+                self.write(path, config)
+                result = self.accounts.models()
+                self.assertEqual(result['models'][0]['efforts'], ['low'])
+            self.assertEqual(received, [
+                ('/v1/models', 'Bearer LOCAL-FIXTURE-KEY', None, '2023-06-01'),
+                ('/v1/models', None, 'LOCAL-FIXTURE-KEY', '2023-06-01')])
+        finally:
+            server.shutdown()
+            thread.join(2)
+            server.server_close()
+
+    def test_slow_model_catalog_does_not_block_account_panel_snapshot(self):
+        config_id = self.gateway('FIXTURE-KEY')
+        path = self.threep/'configLibrary'/(config_id+'.json')
+        config = json.loads(path.read_text())
+        config['inferenceGatewayBaseUrl'] = 'https://provider.test/v1'
+        self.write(path, config)
+        entered, release, panel_done = threading.Event(), threading.Event(), threading.Event()
+        errors = []
+        def slow_catalog(*args, **kwargs):
+            entered.set()
+            if not release.wait(3):
+                raise AssertionError('catalog fixture timed out')
+            return [{'id': 'fixture-model', 'name': 'Fixture', 'efforts': []}]
+        def read_models():
+            try:
+                self.accounts.models()
+            except Exception as exc:
+                errors.append(exc)
+        def read_panel():
+            try:
+                self.accounts.public()
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                panel_done.set()
+        with patch(MODULE+'model_catalog', side_effect=slow_catalog):
+            model_thread = threading.Thread(target=read_models)
+            model_thread.start()
+            self.assertTrue(entered.wait(1))
+            panel_thread = threading.Thread(target=read_panel)
+            panel_thread.start()
+            try:
+                self.assertTrue(panel_done.wait(.5), 'account panel waited on the upstream model request')
+            finally:
+                release.set()
+                model_thread.join(3)
+                panel_thread.join(3)
+        self.assertEqual(errors, [])
+
+    def test_official_desktop_catalog_has_no_invented_models_or_network_call(self):
+        with patch(MODULE+'model_catalog') as query:
+            result = self.accounts.models()
+        self.assertEqual(result['models'], [])
+        self.assertEqual(result['groups'], [])
+        self.assertIn('未提供可离线读取', result['notice'])
+        query.assert_not_called()
 
     def test_import_keeps_native_profile_and_excludes_conversations_and_cli(self):
         before = (self.home/'Cookies').read_bytes()
@@ -294,14 +419,14 @@ class ClaudeAccountSnapshots(unittest.TestCase):
             self.save()
         self.assertEqual(self.accounts.public()['accounts'], [])
 
-    def test_usage_queries_once_then_caches_and_manual_refresh_restarts_timer(self):
+    def test_passive_details_reads_snapshot_and_only_explicit_refresh_queries(self):
         identifier = self.save()
         data = {'five_hour': {'utilization': 25, 'resets_at': '2026-10-09T12:00:00Z'}, 'seven_day': {'utilization': 50}}
-        with patch(MODULE+'_web_json', return_value=data) as fetch:
-            first = self.accounts.details(identifier)
-            again = self.accounts.details(identifier)
-            self.assertEqual(fetch.call_count, 1)
-            self.assertEqual(first, again)
+        with patch(MODULE+'_web_json', return_value=data) as fetch, patch(MODULE+'_decrypt_cookie') as decrypt:
+            self.assertNotIn('usage', self.accounts.details(identifier)['current'])
+            fetch.assert_not_called()
+            decrypt.assert_not_called()
+            first = self.accounts.details(identifier, refresh=True)
             usage = first['current']['usage']
             self.assertEqual(usage['status'], 'ready')
             self.assertIsInstance(usage['checkedAt'], (int, float))
@@ -310,25 +435,53 @@ class ClaudeAccountSnapshots(unittest.TestCase):
             self.assertEqual(usage['limits'][0]['windows'][0]['remainingPercent'], 75)
             self.assertEqual(fetch.call_args.args[0], '/api/organizations/ORG-first/usage')
             self.assertNotIn('NEVER-SEND', json.dumps(fetch.call_args.args))
+            self.assertEqual(self.accounts.details(identifier), first)
             self.accounts.details(identifier, refresh=True)
-            self.accounts.details(identifier)
             self.assertEqual(fetch.call_count, 2)
 
-    def test_expired_usage_cache_fetches_again_and_errors_are_cached_and_redacted(self):
+    @unittest.skipUnless(importlib.util.find_spec('keyring'), 'bundled desktop keyring dependency required')
+    def test_passive_current_with_encrypted_cookie_never_opens_keyring(self):
+        with closing(sqlite3.connect(self.home/'Cookies')) as db, db:
+            db.execute("UPDATE cookies SET value='', encrypted_value=? WHERE name='sessionKey'", (b'v10synthetic',))
+        with patch(MODULE+'sys.platform', 'darwin'), patch('keyring.backends.macOS.Keyring') as vault, \
+                patch(MODULE+'_web_json') as fetch:
+            result = self.accounts.details('current')
+        self.assertEqual(result['activeId'], 'current')
+        vault.assert_not_called()
+        fetch.assert_not_called()
+
+    def test_failed_explicit_query_preserves_last_success_and_does_not_retry_passively(self):
         identifier = self.save()
+        with patch(MODULE+'_web_json', return_value={'five_hour': {'utilization': 25}}):
+            original = self.accounts.details(identifier, refresh=True)['current']['usage']
         with patch(MODULE+'_web_json', side_effect=RuntimeError('PRIVATE-SERVER-BODY COOKIE-first')) as fetch:
-            result = self.accounts.details(identifier)
+            result = self.accounts.details(identifier, refresh=True)
             self.accounts.details(identifier)
             self.assertEqual(fetch.call_count, 1)
             usage = result['current']['usage']
             self.assertEqual(usage['status'], 'error')
-            self.assertTrue(usage['checkedAt'])
+            self.assertEqual(usage['checkedAt'], original['checkedAt'])
+            self.assertEqual(usage['limits'], original['limits'])
             self.assertNotIn('PRIVATE', json.dumps(result))
-            index = json.loads((self.root/'accounts'/'index.json').read_text(encoding='utf-8'))
-            index['accounts'][0]['usage']['checkedAt'] = '2000-01-01T00:00:00+00:00'
-            self.write(self.root/'accounts'/'index.json', index)
-            self.accounts.details(identifier)
-            self.assertEqual(fetch.call_count, 2)
+            self.assertEqual(ClaudeAccounts(self.root/'accounts', self.home).public()['current']['usage']['checkedAt'], original['checkedAt'])
+            self.assertEqual(fetch.call_count, 1)
+
+    def test_unrecognized_response_keeps_successful_saved_and_current_snapshots(self):
+        saved = self.save()
+        for identifier in (saved, 'current'):
+            with self.subTest(identifier=identifier):
+                if identifier == 'current':
+                    self.login('unsaved')
+                with patch(MODULE+'_web_json', return_value={'five_hour': {'utilization': 25}}):
+                    original = self.accounts.details(identifier, refresh=True)['current']['usage']
+                with patch(MODULE+'_web_json', return_value={'unrecognized': 'private'}):
+                    result = self.accounts.details(identifier, refresh=True)
+                usage = result['current']['usage']
+                self.assertEqual(usage['status'], 'error')
+                self.assertEqual(usage['checkedAt'], original['checkedAt'])
+                self.assertEqual(usage['limits'], original['limits'])
+                recreated = ClaudeAccounts(self.root/'accounts', self.home)
+                self.assertEqual(recreated.public()['current']['usage'], usage)
 
     def test_api_has_no_subscription_quota_request(self):
         self.gateway()
@@ -341,7 +494,7 @@ class ClaudeAccountSnapshots(unittest.TestCase):
     def test_current_alias_resolves_saved_account_and_detected_threep_profile(self):
         identifier = self.save()
         with patch(MODULE+'_web_json', return_value={'five_hour': {'utilization': 30}}):
-            result = self.accounts.details('current')
+            result = self.accounts.details('current', refresh=True)
         self.assertEqual(result['current']['id'], identifier)
         self.assertEqual(result['current']['usage']['status'], 'ready')
         self.gateway()
@@ -465,14 +618,15 @@ class ClaudeAccountSnapshots(unittest.TestCase):
     def test_unknown_usage_payload_never_implies_full_remaining_quota(self):
         identifier = self.save()
         with patch(MODULE+'_web_json', return_value={'unrecognized': 'private'}):
-            result = self.accounts.details(identifier)
+            result = self.accounts.details(identifier, refresh=True)
         self.assertEqual(result['current']['usage']['status'], 'error')
         self.assertEqual(result['current']['usage']['limits'], [])
+        self.assertNotIn('checkedAt', result['current']['usage'])
 
     def test_unsaved_current_can_query_quota_without_enrollment_or_a_profile_snapshot(self):
         self.assertEqual(self.accounts.public()['activeId'], 'current')
         with patch(MODULE+'_web_json', return_value={'five_hour': {'utilization': 10}}) as fetch:
-            result = self.accounts.details('current')
+            result = self.accounts.details('current', refresh=True)
             self.accounts.details('current')
         self.assertEqual(fetch.call_count, 1)
         self.assertEqual(result['current']['usage']['status'], 'ready')
@@ -485,16 +639,16 @@ class ClaudeAccountSnapshots(unittest.TestCase):
 
     def test_unsaved_current_cache_is_bound_to_native_identity_across_manager_recreation(self):
         with patch(MODULE+'_web_json', return_value={'five_hour': {'utilization': 10}}) as fetch:
-            self.accounts.details('current')
+            self.accounts.details('current', refresh=True)
             recreated = ClaudeAccounts(self.root/'accounts', self.home)
             recreated.details('current')
             self.assertEqual(fetch.call_count, 1)
             self.login('second')
             self.assertNotIn('usage', recreated.public()['current'])
-            recreated.details('current')
+            recreated.details('current', refresh=True)
             self.assertEqual(fetch.call_count, 2)
         (self.home/'Cookies').unlink()
-        result = self.accounts.details('current')
+        result = self.accounts.details('current', refresh=True)
         self.assertIsNone(result['current'])
         self.assertTrue(result['notice'])
 
@@ -524,7 +678,7 @@ class ClaudeAccountSnapshots(unittest.TestCase):
             self.login('second')
             return {'five_hour': {'utilization': 10}}
         with patch(MODULE+'_web_json', side_effect=query):
-            result = self.accounts.details('current')
+            result = self.accounts.details('current', refresh=True)
         self.assertNotIn('usage', result['current'])
 
     def test_current_usage_limits_schema_preserves_scopes_and_skips_missing_values(self):
@@ -535,7 +689,7 @@ class ClaudeAccountSnapshots(unittest.TestCase):
             {'group': 'weekly'}, {'group': 'weekly', 'percent': float('nan')},
         ]}
         with patch(MODULE+'_web_json', return_value=data):
-            result = self.accounts.details('current')
+            result = self.accounts.details('current', refresh=True)
         limits = result['current']['usage']['limits']
         self.assertEqual(len(limits), 3)
         self.assertEqual(limits[0]['windows'][0]['remainingPercent'], 57.6)
@@ -547,7 +701,7 @@ class ClaudeAccountSnapshots(unittest.TestCase):
         with closing(sqlite3.connect(self.home/'Cookies')) as db, db:
             db.execute('UPDATE cookies SET expires_utc=1')
         with patch(MODULE+'_web_json') as fetch:
-            result = self.accounts.details(identifier)
+            result = self.accounts.details(identifier, refresh=True)
         fetch.assert_not_called()
         self.assertEqual(result['current']['usage']['status'], 'error')
 
@@ -589,7 +743,10 @@ class ClaudeAccountSnapshots(unittest.TestCase):
         encrypted = b'v10'+encryptor.update(padded)+encryptor.finalize()
         with patch(MODULE+'sys.platform', 'darwin'), patch('keyring.backends.macOS.Keyring') as vault:
             vault.return_value.get_password.side_effect = [None, password]
-            self.assertEqual(_decrypt_cookie(host, encrypted, self.home), 'fixture-session')
+            keys = {}
+            self.assertEqual(_decrypt_cookie(host, encrypted, self.home, keys), 'fixture-session')
+            self.assertEqual(_decrypt_cookie(host, encrypted, self.home, keys), 'fixture-session')
+            self.assertEqual(vault.return_value.get_password.call_count, 2, 'one lookup per keychain item in one query')
             self.assertEqual(vault.return_value.get_password.call_args_list[0].args, ('Claude Safe Storage', 'Claude'))
             self.assertEqual(vault.return_value.get_password.call_args_list[1].args, ('Claude Safe Storage', 'Claude Key'))
 

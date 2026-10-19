@@ -3,8 +3,8 @@ const timelineText=source=>typeof BridgeI18n==='undefined'?source:BridgeI18n.t(s
 
 // History and live changes share stable keys, but never share a request queue.
 class ChatTimeline {
-  constructor({url, request, renderMeta, renderText, status, onAction, elements = {}, active = () => true}) {
-    Object.assign(this,{url,request,renderMeta,renderText,status,onAction,active});
+  constructor({url, request, renderMeta, renderText, status, onAction, canEdit = () => true, elements = {}, active = () => true}) {
+    Object.assign(this,{url,request,renderMeta,renderText,status,onAction,canEdit,active});
     this.viewport=elements.viewport||document.getElementById('timeline');
     this.container=elements.container||document.getElementById('messages');
     this.older=elements.older||document.getElementById('older');
@@ -14,6 +14,7 @@ class ChatTimeline {
     this.busy=false;this.generation=0;this.windowRevision=0;this.following=true;this.lastTop=0;this.retryCount=0;
     this.showReasoning=document.documentElement.dataset.showReasoning!=='false';
     this.showProcess=document.documentElement.dataset.showProcess!=='false';
+    this.showToolImages=document.documentElement.dataset.showToolImages!=='false';
     this.onScroll=()=>{
       if(this.suppress||!this.viewport.clientHeight)return;
       const upward=this.viewport.scrollTop<this.lastTop;
@@ -37,11 +38,22 @@ class ChatTimeline {
     if(row.role==='activity'||row.phase==='commentary')return this.showProcess;
     return true;
   }
-  setVisibility({showReasoning,showProcess}){
-    if(this.showReasoning===showReasoning&&this.showProcess===showProcess)return;
+  setVisibility({showReasoning=this.showReasoning,showProcess=this.showProcess,showToolImages=this.showToolImages}){
+    if(this.showReasoning===showReasoning&&this.showProcess===showProcess&&this.showToolImages===showToolImages)return;
+    const imagesChanged=this.showToolImages!==showToolImages;
+    this.showToolImages=showToolImages;
     this.showReasoning=showReasoning;this.showProcess=showProcess;
     const anchor=this.capture(node=>this.rowVisible(this.rows.get(node.dataset.key).row)),bottom=this.following;
-    for(const [key,{node}] of this.nodes)node.hidden=!this.rowVisible(this.rows.get(key).row);
+    for(const [key,entry] of this.nodes){
+      const row=this.rows.get(key).row;
+      if(imagesChanged&&row.attachments?.some(item=>item.type==='toolImage')){
+        const open=(entry.node.tagName==='DETAILS'?entry.node:entry.node.querySelector('details.activity'))?.open;
+        const node=this.renderRow(row,open);node.dataset.key=key;
+        entry.node.replaceWith(node);entry.node=node;
+      }
+      entry.node.hidden=!this.rowVisible(row);
+    }
+    this.refreshActions();
     this.restore(anchor,bottom);this.fillRecent();
   }
   jumpBottom(){this.viewport.scrollTop=this.viewport.scrollHeight;this.following=true;this.newer.hidden=true;}
@@ -100,7 +112,7 @@ class ChatTimeline {
       this.rows.set(row.key,{row,sequence:page.sequence});
       const stamp=JSON.stringify(row),old=this.nodes.get(row.key);
       if(old?.stamp===stamp)continue;
-      const open=old?.node.tagName==='DETAILS'&&old.node.open;
+      const open=(old?.node.tagName==='DETAILS'?old.node:old?.node.querySelector('details.activity'))?.open;
       const node=this.renderRow(row,open);node.dataset.key=row.key;
       node.hidden=!this.rowVisible(row);changed=changed||!node.hidden;
       if(old)old.node.replaceWith(node);
@@ -115,10 +127,13 @@ class ChatTimeline {
     if(reset)requestAnimationFrame(()=>this.fillRecent());
   }
   renderRow(row,open){
-    const activity=row.role==='activity',node=document.createElement(activity?'details':'div');
-    node.className=activity?'activity timeline-row':'message timeline-row '+row.role;
+    const activity=row.role==='activity',toolImages=activity&&row.attachments?.some(item=>item.type==='toolImage');
+    const node=document.createElement(activity&&!toolImages?'details':'div');
+    node.className=toolImages?'tool-images timeline-row':activity?'activity timeline-row':'message timeline-row '+row.role;
+    const content=toolImages?document.createElement('details'):node;
+    if(toolImages){content.className='activity';node.append(content);}
     const heading=document.createElement(activity?'summary':'span');heading.className=activity?'':'who';
-    heading.textContent=activity?(row.title||row.kind)+(row.status==='inProgress'?timelineText(' · 进行中'):''):row.role==='user'?timelineText('你'):row.role==='error'?timelineText('执行错误'):['CODEX',row.model&&[row.model,row.effort].filter(Boolean).join(' ')].filter(Boolean).join(' · ');node.append(heading);
+    heading.textContent=activity?(row.title||row.kind)+(row.status==='inProgress'?timelineText(' · 进行中'):''):row.role==='user'?timelineText('你'):row.role==='error'?timelineText('执行错误'):['CODEX',row.model&&[row.model,row.effort].filter(Boolean).join(' ')].filter(Boolean).join(' · ');content.append(heading);
     const body=document.createElement(activity?'pre':'div');body.className=activity?'activity-body':'message-body';
     const more=document.createElement('button');more.className='plain detail-more';more.type='button';
     const cached=this.details.get(row.key);
@@ -142,7 +157,7 @@ class ChatTimeline {
       }catch(e){if(!this.abort.signal.aborted){more.hidden=false;more.textContent=timelineText('读取失败，点击重试');}}
       finally{more.disabled=false;}
     };
-    more.onclick=load;node.append(body,more);paint();
+    more.onclick=load;content.append(body,more);paint();
     if(row.role==='user'||row.role==='assistant'){
       const actions=document.createElement('div');actions.className='message-actions';
       const copy=document.createElement('button');copy.type='button';copy.className='plain message-copy';copy.textContent=timelineText('复制');copy.onclick=()=>window.BridgeClipboard?.copy(()=>this.fullText(row),copy);actions.append(copy);node.append(actions);
@@ -150,7 +165,8 @@ class ChatTimeline {
     if(row.attachments?.length){
       const attachments=document.createElement('div');attachments.className='timeline-attachments';
       for(const item of row.attachments){
-        if((item.type==='localImage'||item.type==='image')&&(item.uploadId||item.desktopId)){
+        if(item.type==='toolImage'&&!this.showToolImages)continue;
+        if(['localImage','image','toolImage'].includes(item.type)&&(item.uploadId||item.desktopId)){
           const source=item.uploadId
             ?this.url('uploads/'+encodeURIComponent(item.uploadId)+'/preview')
             :this.url('desktop-images/'+encodeURIComponent(item.desktopId));
@@ -168,7 +184,7 @@ class ChatTimeline {
       attachment.textContent=timelineText('附件：')+row.attachments.map(a=>a.name||a.type).join('、');
       attachments.append(attachment);node.append(attachments);
     }
-    if(activity){node.open=!!open;node.ontoggle=()=>{if(node.open&&!this.details.has(row.key))load();};}
+    if(activity){content.open=!!open;content.ontoggle=()=>{if(content.open&&!this.details.has(row.key))load();};}
     return node;
   }
   async fullText(row){
@@ -190,8 +206,9 @@ class ChatTimeline {
       const row=this.rows.get(key)?.row,bar=node.querySelector('.message-actions');if(!bar||!row)continue;
       if(!this.onAction)continue;
       const add=(action,label,disabled)=>{const cls=action==='fork'?'message-fork':'message-edit';let b=bar.querySelector('.'+cls);if(!b){b=document.createElement('button');b.type='button';b.className='plain '+cls;bar.append(b);}b.textContent=timelineText(label);b.disabled=disabled;b.onclick=()=>this.onAction(action,row,this);};
-      if(row.editable){const latest=this.meta?.latestUserTurnId===row.turnId;add(latest?'edit':'edit-fork',latest?'编辑并重新发送':'编辑并新建分支',row.turnStatus==='inProgress'||latest&&this.meta?.status==='active');}
-      if(row.forkable)add('fork','从这里分支',false);
+      for(const action of bar.querySelectorAll('.message-edit,.message-fork'))action.hidden=!this.canEdit();
+      if(row.editable&&this.canEdit()){const latest=this.meta?.latestUserTurnId===row.turnId;add(latest?'edit':'edit-fork',latest?'编辑并重新发送':'编辑并新建分支',row.turnStatus==='inProgress'||latest&&this.meta?.status==='active');}
+      if(row.forkable&&this.canEdit())add('fork','从这里分支',false);
     }
   }
   relabel(){
@@ -201,7 +218,7 @@ class ChatTimeline {
     this.historyStatus();
     for(const [key,entry] of this.nodes){
       const row=this.rows.get(key)?.row;if(!row)continue;
-      const node=entry.node,heading=node.firstElementChild;
+      const node=entry.node,heading=row.role==='activity'?(node.tagName==='DETAILS'?node.firstElementChild:node.querySelector('details.activity > summary')):node.firstElementChild;
       if(heading)heading.textContent=row.role==='activity'?(row.title||row.kind)+(row.status==='inProgress'?timelineText(' · 进行中'):''):row.role==='user'?timelineText('你'):row.role==='error'?timelineText('执行错误'):['CODEX',row.model&&[row.model,row.effort].filter(Boolean).join(' ')].filter(Boolean).join(' · ');
       const more=node.querySelector('.detail-more');
       if(more&&!more.disabled)more.textContent=timelineText(this.details.has(key)?'继续加载正文':'展开完整内容');

@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from aiohttp import web, WSMsgType
+from bridge.api.html_preview import SHELL_PATH, SHELL_FILE, SHELL_CSP
 from .protocol import MAX_BODY, MAX_FRAME, origin, validate, decode, content_type, download_headers
 from .registry import Registry, token, PHONE_LIFETIME
 from .stream import WINDOW, unpack
@@ -18,6 +19,12 @@ from .stream import WINDOW, unpack
 # is independent and the connector never forwards this cookie to the computer.
 COOKIE = 'codex_mobile_session'
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def security_headers(origin, scope=''):
+    return {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
+            'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY',
+            'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-src " + origin + scope + SHELL_PATH + "; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"}
 
 
 class Relay:
@@ -330,8 +337,7 @@ class Relay:
                 headers['Content-Disposition'] = disposition
             if item.get('queue') is not None:
                 result = web.StreamResponse(status=status, headers={**headers, 'Content-Length': str(item['length']),
-                                            'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff',
-                                            'Referrer-Policy': 'no-referrer'})
+                                            **security_headers(self.origin, self.scope(request))})
                 self.renew(request, result, phone)
                 await result.prepare(request)
                 try:
@@ -371,6 +377,12 @@ class Relay:
     async def page(self, request):
         scope = self.scope(request)
         path = request.path[len(scope):]
+        if path == SHELL_PATH:
+            if request.query_string:
+                raise web.HTTPNotFound()
+            self.phone_auth(request)
+            return web.Response(body=(ROOT/'web'/SHELL_FILE).read_bytes(), content_type='text/html',
+                                headers={'Content-Security-Policy': SHELL_CSP, 'X-Frame-Options': 'SAMEORIGIN'})
         if path == '/relay/admin':
             raise web.HTTPFound('/relay/admin/')
         if path in ('/relay/', '/relay/pair.js', '/relay/mode.js'):
@@ -378,7 +390,7 @@ class Relay:
             mime = 'text/html' if name.endswith('.html') else 'text/javascript'
             return web.Response(body=(ROOT/'relay'/'web'/name).read_bytes(), content_type=mime)
         # Serve the same v2 web assets; execution and authentication stay on devices.
-        from bridge.api.assets import STATIC, FONT_ROUTE, asset_bytes
+        from bridge.api.assets import STATIC, FONT_ROUTE, PDF_CMAP_ROUTE, PDF_FONT_ROUTE, asset_bytes
         if path in ('/', '/index.html'):
             try:
                 self.phone_auth(request)
@@ -401,6 +413,16 @@ class Relay:
         match = FONT_ROUTE.fullmatch(path)
         if match:
             return web.FileResponse(ROOT/'web/vendor/katex/fonts'/match[1])
+        cmap = PDF_CMAP_ROUTE.fullmatch(path)
+        if cmap:
+            file = ROOT/'web/vendor/pdfjs/cmaps'/cmap[1]
+            if file.is_file():
+                return web.FileResponse(file, headers={'Content-Type': 'application/octet-stream'})
+        pdf_font = PDF_FONT_ROUTE.fullmatch(path)
+        if pdf_font:
+            file = ROOT/'web/vendor/pdfjs/standard_fonts'/pdf_font[1]
+            if file.is_file():
+                return web.FileResponse(file, headers={'Content-Type': 'font/ttf' if file.suffix == '.ttf' else 'application/octet-stream'})
         raise web.HTTPNotFound()
 
     async def maintenance(self):
@@ -441,9 +463,7 @@ def create_app(directory, public_origin, test_http=False, timeout=90):
             else:
                 response = web.json_response({'error': exc.reason}, status=exc.status)
         if not response.prepared:
-            defaults = {'Cache-Control': 'no-store', 'Referrer-Policy': 'no-referrer',
-                                     'X-Content-Type-Options': 'nosniff', 'X-Frame-Options': 'DENY',
-                                     'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"}
+            defaults = security_headers(state.origin, state.scope(request))
             for key, value in defaults.items():
                 response.headers.setdefault(key, value)
         return response

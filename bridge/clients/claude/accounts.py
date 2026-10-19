@@ -24,6 +24,7 @@ from pathlib import Path
 from urllib import error, parse, request
 
 from bridge.features.accounts.accounts import private_bytes, private_json
+from bridge.features.accounts.models import model_catalog
 from bridge.features.auth.tls import client_context
 from bridge.platforms.windows.claude import windows_claude_profile_paths
 
@@ -32,7 +33,6 @@ AUTH_ITEMS = ('Local State', 'Preferences', 'Cookies', 'Cookies-journal', 'Cooki
               'Local Storage', 'IndexedDB', 'Session Storage', 'Service Worker', 'ant-did')
 CONFIG = 'claude_desktop_config.json'
 TOKEN_KEY = 'oauth:tokenCache'
-TTL = 300
 AMBIGUOUS_PROFILE = '检测到多个 Claude 登录目录，无法安全切换账号；请在设置中指定客户端数据目录'
 
 
@@ -130,18 +130,25 @@ def _web_json(path, cookies, organization):
         raise ValueError('Claude 暂时无法查询剩余额度，请稍后重试') from None
 
 
-def _decrypt_cookie(host, encrypted, home):
+def _decrypt_cookie(host, encrypted, home, keys=None):
     # The original OS protects native cookies. Decrypted values remain only in
     # this process, never in snapshots, command arguments, public data or logs.
     from cryptography.hazmat.primitives import padding
     from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
     if sys.platform == 'darwin':
-        from keyring.backends.macOS import Keyring
-        vault = Keyring()
-        password = vault.get_password('Claude Safe Storage', 'Claude') or vault.get_password('Claude Safe Storage', 'Claude Key')
-        if not password or not encrypted.startswith(b'v10'):
+        if not encrypted.startswith(b'v10'):
             raise ValueError('无法读取 Claude 登录凭据，请解锁系统钥匙串后重试')
-        key = hashlib.pbkdf2_hmac('sha1', password.encode(), b'saltysalt', 1003, dklen=16)
+        if keys is None or 'claude' not in keys:
+            from keyring.backends.macOS import Keyring
+            vault = Keyring()
+            password = vault.get_password('Claude Safe Storage', 'Claude') or vault.get_password('Claude Safe Storage', 'Claude Key')
+            if not password:
+                raise ValueError('无法读取 Claude 登录凭据，请解锁系统钥匙串后重试')
+            key = hashlib.pbkdf2_hmac('sha1', password.encode(), b'saltysalt', 1003, dklen=16)
+            if keys is not None:
+                keys['claude'] = key
+        else:
+            key = keys['claude']
         decryptor = Cipher(algorithms.AES(key), modes.CBC(b' '*16)).decryptor()
         padded = decryptor.update(encrypted[3:])+decryptor.finalize()
         unpadder = padding.PKCS7(128).unpadder()
@@ -338,6 +345,50 @@ class ClaudeAccounts:
         if 'official' in self._ambiguous_profiles:
             raise ValueError(AMBIGUOUS_PROFILE)
         return 'official', _fingerprint(_cookies(self.home)), None
+
+    def models(self):
+        """Read the current Desktop account's model source without connecting it."""
+        with self.lock:
+            kind, _, gateway = self._current()
+            if kind == 'official':
+                return {'models': [], 'groups': [], 'notice':
+                    'Claude 官方账号未提供可离线读取的模型目录；连接 Desktop 后已有的缓存仍可查看'}
+            gateway = copy.deepcopy(gateway)
+        config = gateway['config']
+        base = config.get('inferenceGatewayBaseUrl')
+        key = config.get('inferenceGatewayApiKey')
+        scheme = config.get('inferenceGatewayAuthScheme', 'bearer')
+        credential_kind = config.get('inferenceCredentialKind', 'static')
+        configured = []
+        native_models = config.get('inferenceModels')
+        for entry in native_models if isinstance(native_models, list) else []:
+            identifier = entry if isinstance(entry, str) else entry.get('name') if isinstance(entry, dict) else None
+            if isinstance(identifier, str) and identifier:
+                configured.append({'id': identifier, 'name': identifier, 'efforts': []})
+        parsed = parse.urlsplit(base) if isinstance(base, str) else None
+        static = (credential_kind == 'static' and isinstance(key, str) and bool(key)
+                  and scheme in ('bearer', 'x-api-key') and parsed is not None
+                  and (parsed.scheme == 'https' or parsed.scheme == 'http' and parsed.hostname in ('localhost', '127.0.0.1', '::1'))
+                  and bool(parsed.hostname) and not (parsed.username or parsed.password or parsed.query or parsed.fragment))
+        if static:
+            url = base.rstrip('/')
+            if not parsed.path.rstrip('/').endswith('/v1'):
+                url += '/v1'
+            auth = {'Authorization': 'Bearer '+key} if scheme == 'bearer' else {'x-api-key': key}
+            headers = {**auth, 'anthropic-version': '2023-06-01'}
+            try:
+                rows = model_catalog(url, key, headers=headers)
+                return {'models': rows, 'groups': [{'surface': 'api', 'source': 'upstream-api',
+                    'name': gateway.get('name') or 'Claude API', 'models': rows}]}
+            except ValueError:
+                if not configured:
+                    raise
+        if configured:
+            notice = '上游模型目录暂不可用；以下是 Claude Desktop 当前配置的模型' if static else '以下是 Claude Desktop 当前配置的模型；此接入不支持直接查询上游目录'
+            return {'models': configured, 'groups': [{'surface': 'api', 'source': 'desktop-config',
+                'name': gateway.get('name') or 'Claude API', 'models': configured, 'notice': notice}],
+                **({'modelError': '上游模型目录刷新失败'} if static else {})}
+        return {'models': [], 'groups': [], 'notice': '当前 Claude Desktop API 接入未提供可读取的模型目录'}
 
     def public(self):
         with self.lock:
@@ -647,6 +698,10 @@ class ClaudeAccounts:
 
     def details(self, identifier, refresh=False):
         with self.lock:
+            if not refresh:
+                if identifier != 'current':
+                    self._account(identifier)
+                return self.public()
             ephemeral = identifier == 'current'
             if ephemeral:
                 active = self.public()['activeId']
@@ -667,25 +722,21 @@ class ClaudeAccounts:
                     row['usage'] = cache['usage']
             else:
                 row, snapshot = self._account(identifier)
-            usage = row.get('usage') or {}
-            try:
-                checked = _timestamp(usage.get('checkedAt', ''))
-            except (TypeError, ValueError, AttributeError, OSError, OverflowError):
-                checked = 0
-            if not refresh and 0 <= time.time()-checked < TTL:
-                return self.public()
-            usage = {'status': 'unsupported' if row['kind'] == 'api' else 'error',
-                     'checkedAt': time.time(), 'limits': []}
+            previous = row.get('usage') or {}
+            usage = {'status': 'unsupported' if row['kind'] == 'api' else 'error', 'limits': []}
+            if row['kind'] != 'api' and previous.get('limits') and previous.get('checkedAt'):
+                usage.update(checkedAt=previous['checkedAt'], limits=previous['limits'])
             if row['kind'] != 'api':
                 try:
                     cookies = {}
+                    keys = {}
                     # The active native cookie can rotate; use its current login
                     # only when the fingerprint still matches this saved account.
                     source = self.home if self.public()['activeId'] == identifier else snapshot
                     for host, name, value, encrypted, expiry in _cookies(source):
                         if expiry and expiry/1000000-11644473600 <= time.time():
                             continue
-                        value = value or _decrypt_cookie(host, encrypted, source)
+                        value = value or _decrypt_cookie(host, encrypted, source, keys)
                         if not value or any(ord(c) < 33 or ord(c) > 126 or c in ';\r\n' for c in value):
                             raise ValueError('Claude 登录凭据不可用，请在客户端重新登录后保存')
                         cookies[name] = value
@@ -695,10 +746,12 @@ class ClaudeAccounts:
                     data = _web_json('/api/organizations/'+parse.quote(org, safe='')+'/usage', cookies, org)
                     if ephemeral and self._current()[:2] != (kind, fingerprint):
                         raise ValueError('Claude 当前登录已发生变化，请重新查询')
-                    usage['limits'] = _usage_limits(data)
-                    if not usage['limits']:
+                    limits = _usage_limits(data)
+                    if not limits:
                         raise ValueError('Claude 未返回可识别的剩余额度')
+                    usage['limits'] = limits
                     usage['status'] = 'ready'
+                    usage['checkedAt'] = time.time()
                 except Exception:
                     # Network/server bodies and OS errors may contain credentials.
                     usage['error'] = '无法查询 Claude 剩余额度，请确认客户端登录有效并解锁系统凭据存储后重试'

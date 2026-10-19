@@ -58,7 +58,11 @@ class DirectoryReferenceTests(unittest.TestCase):
             self.assertEqual(work.info(target.name), {'name': target.name, 'path': target.name, 'kind': 'directory', 'size': None})
             with self.assertRaises((OSError, ValueError)):
                 with work.download(target.name): pass
-            link = root / 'outside'; link.symlink_to(root.parent, target_is_directory=True)
+            link = root / 'outside'
+            try:
+                link.symlink_to(root.parent, target_is_directory=True)
+            except OSError as exc:
+                self.skipTest('Directory symlink unavailable: ' + str(exc))
             with self.assertRaises((OSError, ValueError, PermissionError)): work.info('outside')
             self.assertFalse(workspace_references([{'role': 'assistant', 'text': '[bad](' + str(link) + ')'}], str(root)))
 

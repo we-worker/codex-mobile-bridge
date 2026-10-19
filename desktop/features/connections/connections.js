@@ -2,11 +2,16 @@
 const connectionSecretDraft=new Map();
 const connectionSetupState=new Map();
 const connectionExpanded=new Map();
-function connectionLabel(mode){return t({quick:'临时 HTTPS · Cloudflare',cloudflare:'固定域名 · Cloudflare Tunnel',server:'固定域名 · 自有服务器 + SSH',nas:'固定域名 · NAS / 已有反代 / Docker',tailscale:'固定 HTTPS · Tailscale'}[mode]);}
+const connectionAdvancedExpanded=new Map();
+function connectionLabel(mode){return t({quick:'临时 HTTPS · Cloudflare',cloudflare:'固定域名 · Cloudflare Tunnel',server:'固定域名 · 自有服务器 + SSH',external:'已有穿透 / 反向代理',nas:'已有穿透 / 反向代理',tailscale:'固定 HTTPS · Tailscale'}[mode]);}
+function normalizeExternalUrl(value){const trimmed=value.trim();return /^[^\s/:?#@]+(?::\d+)?$/.test(trimmed)?'https://'+trimmed:trimmed;}
+function connectionCheckIdentity(row){return JSON.stringify([snapshot?.dataDir,snapshot?.runtime.instanceId,snapshot?.runtime.running,row]);}
+function connectionSummary(row){return [row.name,row.publicUrl||'',t(row.enabled?(connectionSetupState.get(row.id)||snapshot?.externalStatus?.[row.id]?.message||'已启用'):'未启用')].filter(Boolean).join(' · ');}
 function setupGuide(link,mode){
   link.className='setup-guide';link.textContent=t('在线指引');
-  link.href=mode==='tailscale'?'https://tailscale.com/docs/how-to/quickstart':'https://try2love.github.io/codex-mobile-bridge/setup.html?lang='+(BridgeI18n.language()==='en'?'en':'zh')+'#'+mode;
-  link.onclick=event=>{event.preventDefault();api.open('setup-'+mode).catch(e=>feedback(e.message,true));};
+  const guideMode=mode==='nas'?'external':mode;
+  link.href=mode==='tailscale'?'https://tailscale.com/docs/how-to/quickstart':'https://try2love.github.io/codex-mobile-bridge/setup.html?lang='+(BridgeI18n.language()==='en'?'en':'zh')+'#'+guideMode;
+  link.onclick=event=>{event.preventDefault();api.open('setup-'+guideMode).catch(e=>feedback(e.message,true));};
 }
 async function saveConnectionCredentials(id){
   const draft=connectionSecretDraft.get(id);
@@ -21,7 +26,10 @@ async function saveAllConnectionCredentials(enabledOnly=false){
 function renderConnections(){
   for(const link of document.querySelectorAll('[data-setup-guide]'))setupGuide(link,link.dataset.setupGuide);
   setupGuide($('connection-guide'),$('connection-kind').value);
-  for(const card of $('connections').querySelectorAll('details.connection-card'))connectionExpanded.set(card.dataset.connectionId,card.open);
+  for(const card of $('connections').querySelectorAll('details.connection-card')){
+    connectionExpanded.set(card.dataset.connectionId,card.open);
+    const advanced=card.querySelector?.('details.connection-advanced');if(advanced)connectionAdvancedExpanded.set(card.dataset.connectionId,advanced.open);
+  }
   $('connections').replaceChildren();
   if(!connectionDraft.length){const empty=document.createElement('p');empty.className='hint';empty.textContent=t('尚未添加外网连接。局域网可独立使用。');$('connections').append(empty);}
   for(const row of connectionDraft){
@@ -29,18 +37,19 @@ function renderConnections(){
     const card=document.createElement('div');card.className='connection-body';
     const head=document.createElement('summary');head.className='section-head';
     const heading=document.createElement('h3');heading.textContent=connectionLabel(row.accessMode);
+    const summary=document.createElement('span');summary.className='connection-summary';summary.textContent=connectionSummary(row);
     const title=document.createElement('div');title.className='connection-title';
-    const guideLink=document.createElement('a');setupGuide(guideLink,row.accessMode);title.append(heading,guideLink);
+    const guideLink=document.createElement('a');setupGuide(guideLink,row.accessMode);title.append(heading,summary,guideLink);
     const remove=document.createElement('button');remove.type='button';remove.textContent=t('删除');remove.dataset.removeConnection=row.id;remove.disabled=!!snapshot?.runtime.running;
-    remove.onclick=()=>{connectionDraft=connectionDraft.filter(c=>c.id!==row.id);connectionSecretDraft.delete(row.id);connectionExpanded.delete(row.id);renderConnections();updateDirty();};head.append(title,remove);container.append(head,card);
+    remove.onclick=()=>{connectionDraft=connectionDraft.filter(c=>c.id!==row.id);connectionSecretDraft.delete(row.id);connectionExpanded.delete(row.id);connectionAdvancedExpanded.delete(row.id);renderConnections();updateDirty();};head.append(title,remove);container.append(head,card);
     function field(key,label,type='text',placeholder='',parent=card){
       const wrap=document.createElement('label'),text=document.createElement('span'),node=document.createElement('input');text.textContent=t(label);node.type=type;node.dataset.connectionField=key;
       node.id='connection-'+row.id+'-'+key;node.placeholder=t(placeholder);node.disabled=!!snapshot?.runtime.running||busyActions.size>0;
       if(type==='checkbox'){wrap.className='check';node.checked=row[key];}else node.value=row[key]??'';
       if(type==='number'){node.min=key==='sshPort'?1:1024;node.max=65535;}
       if(key==='name')node.maxLength=100;
-      if(key==='publicUrl'){node.onfocus=()=>{if(!node.value)node.value='https://';};node.onblur=()=>{if(node.value==='https://'){node.value='';row[key]='';updateDirty();}};}
-      node.oninput=()=>{connectionSetupState.delete(row.id);row[key]=type==='checkbox'?node.checked:type==='number'?Number(node.value):node.value;updateDirty();};
+      if(key==='publicUrl'){node.onfocus=()=>{if(!node.value&&row.accessMode!=='external'&&row.accessMode!=='nas')node.value='https://';};node.onblur=()=>{node.value=row.accessMode==='external'||row.accessMode==='nas'?normalizeExternalUrl(node.value):node.value==='https://'?'':node.value;row[key]=node.value;summary.textContent=connectionSummary(row);updateDirty();};}
+      node.oninput=()=>{connectionSetupState.delete(row.id);row[key]=type==='checkbox'?node.checked:type==='number'?Number(node.value):node.value;if(key==='name'||key==='publicUrl')summary.textContent=connectionSummary(row);updateDirty();};
       node.onchange=()=>{node.oninput();if(key==='enabled')renderConnections();};
       if(type==='checkbox')wrap.append(node,text);else wrap.append(text,node);parent.append(wrap);return node;
     }
@@ -48,9 +57,9 @@ function renderConnections(){
     function action(label,method,callback){
       const button=document.createElement('button');button.type='button';button.textContent=t(label);button.dataset.connectionAction=method;button.dataset.connection=row.id;button.dataset.key=row.id+':'+method;
       button.onclick=async()=>{
-        const key=button.dataset.key;if(dirty||busyActions.size)return;busyActions.add(key);updateDirty();
-        try{if(!['clearCredentials','diagnostics'].includes(method))await saveConnectionCredentials(row.id);const result=await callback();if(result?.message)feedback(result.message);}
-        catch(e){showError(e);connectionSetupState.set(row.id,e.message);}
+        const key=button.dataset.key;if(dirty||busyActions.size)return;const target=method==='checkEntry'?connectionCheckIdentity(row):null;const current=()=>target===null||target===connectionCheckIdentity(connectionDraft.find(c=>c.id===row.id));busyActions.add(key);updateDirty();
+        try{if(!['clearCredentials','diagnostics'].includes(method))await saveConnectionCredentials(row.id);const result=await callback();if(!current())return;if(method==='checkEntry')connectionSetupState.set(row.id,result?.message||'');if(result?.message)feedback(result.message);}
+        catch(e){if(current()){e.message=e.message.replace(/^Error invoking remote method '[^']+': (?:Error: )?/,'');showError(e);connectionSetupState.set(row.id,e.message);}}
         finally{busyActions.delete(key);renderConnections();updateDirty();}
       };return button;
     }
@@ -72,7 +81,7 @@ function renderConnections(){
       const actions=document.createElement('div');actions.className='actions';
       actions.append(action('保存连接凭据','credentials',async()=>({message:t('连接凭据已保存。')})),action('清除已保存凭据','clearCredentials',async()=>{const result=await api.connectionCredentials({id:row.id,secrets:{clear:true}});draft.secrets={};draft.changed=false;draft.revision++;return result;}));card.append(actions);
     }
-    field('enabled','启用此连接','checkbox');field('name','连接名称','text','可选，例如家中 NAS');
+    field('enabled','启用此连接','checkbox');field('name','连接名称','text',row.accessMode==='external'||row.accessMode==='nas'?'可选，例如家里电脑':'可选，例如家中 NAS');
     if(row.accessMode==='quick'){
       note(snapshot?.cloudflared?.available?'已准备好 Cloudflare 程序。保存配置后启动网关，即可获取临时 HTTPS 地址。':'当前源码环境尚未准备 Cloudflare 程序，请在运行配置中安装。');
       const status=note(quickTunnelMessage());status.dataset.quickStatus='true';
@@ -108,6 +117,33 @@ function renderConnections(){
       actions.append(action('检测固定入口','checkEntry',()=>api.checkEntry({id:row.id})));card.append(actions);
       const status=note([connectionSetupState.get(row.id),snapshot?.externalStatus?.[row.id]?.message].filter(Boolean).map(t).join(' ')||'先保存连接配置，然后检测 Tailscale。');status.dataset.connectionStatus=row.id;
       note('入口随网关启停；退出网关不会退出 Tailscale 或修改其他服务。');
+    }else if(row.accessMode==='external'||row.accessMode==='nas'){
+      const address=field('publicUrl','手机访问地址（HTTPS）','text','https://bridge.example.com');
+      address.required=true;
+      note('先在你的穿透或反向代理中配置 HTTPS，再将手机访问地址粘贴到这里。地址只填写域名或 IP 与可选端口，不含路径。');
+      if(row.accessMode==='external'){
+        const target=document.createElement('div');target.className='connection-target';card.append(target);
+        note('穿透或反向代理的 HTTP 目标地址',target);
+        const loopback=document.createElement('code');loopback.className='mono';loopback.dataset.loopbackTarget='true';loopback.textContent='http://127.0.0.1:'+($('port').value||8787);target.append(loopback);
+        const copy=document.createElement('button');copy.type='button';copy.textContent=t('复制目标地址');copy.onclick=()=>api.copy('http://127.0.0.1:'+($('port').value||8787)).then(()=>feedback(t('目标地址已复制。'))).catch(showError);target.append(copy);
+      }
+      const advanced=document.createElement('details');advanced.className='guide-more connection-advanced';advanced.open=connectionAdvancedExpanded.get(row.id)??(row.accessMode==='nas');
+      const advancedHead=document.createElement('summary');advancedHead.textContent=t('高级：目标所在位置');advanced.append(advancedHead);card.append(advanced);
+      const locationWrap=document.createElement('label'),locationText=document.createElement('span'),location=document.createElement('select');
+      locationText.textContent=t('穿透或反向代理运行在');location.dataset.connectionField='targetLocation';
+      for(const [value,label] of [['external','这台电脑'],['nas','NAS 或另一台设备']]){const option=document.createElement('option');option.value=value;option.textContent=t(label);location.append(option);}
+      location.value=row.accessMode;location.disabled=!!snapshot?.runtime.running||busyActions.size>0;
+      location.onchange=()=>{row.accessMode=location.value;advanced.open=true;connectionSetupState.delete(row.id);renderConnections();updateDirty();};
+      locationWrap.append(locationText,location);advanced.append(locationWrap);
+      if(row.accessMode==='nas'){
+        field('proxyUpstream','另一台设备可访问的电脑地址','text','http://192.168.1.10:'+($('port').value||8787),advanced);
+        note('需要开启局域网访问，填写另一台设备能访问的电脑 HTTP 地址，端口与网关一致。',advanced);
+        const deploy=document.createElement('div');deploy.className='actions';
+        for(const [label,method] of [['导出部署包…','exportDeployment'],['复制给部署 Agent','copyDeployment']])deploy.append(action(label,method,()=>api[method]({id:row.id,language:BridgeI18n.language()})));
+        advanced.append(deploy);
+      }
+      const actions=document.createElement('div');actions.className='actions';actions.append(action('检测固定入口','checkEntry',()=>api.checkEntry({id:row.id})));card.append(actions);
+      const status=note([connectionSetupState.get(row.id),snapshot?.externalStatus?.[row.id]?.message].filter(Boolean).map(t).join(' ')||'保存并启动网关后可检测入口。');status.dataset.connectionStatus=row.id;
     }else{
       const publicAddress=field('publicUrl',row.accessMode==='server'?'手机访问地址（可选）':'手机访问地址','text',row.accessMode==='server'?'留空使用服务器公网 IP':'https://codex.try2love.com');
       if(row.accessMode==='server'){
@@ -171,19 +207,17 @@ function renderConnections(){
           await checkHost();unwrapValidation(await api.start());await refresh();
           return {message:t('网关已启动，SSH 正在连接。请查看连接状态，再检测固定入口；启动网关会同时启动其他已启用的连接。')};
         }));card.append(connectActions);
-      }else{
-        field('proxyUpstream','NAS 可访问的电脑地址','text','http://192.168.1.10:'+($('port').value||8787));
-        note('填写 NAS 可达的电脑 HTTP 地址，端口与网关一致。需要开启局域网访问；两端网络不通时，先建立路由或使用自有服务器 + SSH。');
       }
       const actions=document.createElement('div');actions.className='actions';
       if(row.accessMode!=='cloudflare')for(const [label,method] of [[row.accessMode==='server'?'导出手动配置参考…':'导出部署包…','exportDeployment'],[row.accessMode==='server'?'复制手动配置说明':'复制给部署 Agent','copyDeployment']])actions.append(action(label,method,()=>api[method]({id:row.id,language:BridgeI18n.language()})));
       actions.append(action('检测固定入口','checkEntry',()=>api.checkEntry({id:row.id})));card.append(actions);
-      const status=note([connectionSetupState.get(row.id),snapshot?.externalStatus?.[row.id]?.message].filter(Boolean).map(t).join(' ')||'保存配置后可检测入口。');status.dataset.connectionStatus=row.id;
+      const status=note([connectionSetupState.get(row.id),snapshot?.externalStatus?.[row.id]?.message].filter(Boolean).map(t).join(' ')||'保存并启动网关后可检测入口。');status.dataset.connectionStatus=row.id;
     }
     $('connections').append(container);
   }
   BridgeI18n.apply();
 }
+document.getElementById('port').addEventListener?.('input',()=>{for(const target of document.querySelectorAll('[data-loopback-target]'))target.textContent='http://127.0.0.1:'+($('port').value||8787);});
 function addConnection(){
   if(snapshot?.runtime.running)return;
   connectionDraft.push({id:crypto.randomUUID(),name:'',enabled:true,accessMode:$('connection-kind').value,publicUrl:'',sshTarget:'',sshRemotePort:18787,proxyUpstream:'',sshAuth:'password',sshHost:'',sshUser:'',sshPort:22,sshKeyPath:'',tailscaleMode:'funnel',tailscalePort:443,tailscaleNodeId:''});

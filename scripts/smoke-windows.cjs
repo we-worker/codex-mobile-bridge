@@ -2,13 +2,23 @@
 // Only synthetic gateway data is used; no model requests or real phone pushes.
 'use strict';
 const assert=require('node:assert/strict');
-const fs=require('node:fs/promises'),path=require('node:path'),net=require('node:net');
+const fs=require('node:fs/promises'),path=require('node:path'),net=require('node:net'),http=require('node:http');
 const {spawn,execFile}=require('node:child_process');
 const {promisify}=require('node:util');
 const execute=promisify(execFile),root=path.resolve(__dirname,'..');
 const delay=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function get(url){
-  try{return await fetch(url,{headers:{Connection:'close'},signal:AbortSignal.timeout(5000)});}
+  // Avoid bundled Undici's socket-end assertion (nodejs/undici#5360) in
+  // loopback probes. Consume the entire HTTP stream before returning a response.
+  try{return await new Promise((resolve,reject)=>{
+    const request=http.get(url,{headers:{Connection:'close','Accept-Encoding':'identity'},signal:AbortSignal.timeout(5000)},response=>{
+      const chunks=[];
+      response.on('data',chunk=>chunks.push(chunk));
+      response.once('error',reject);
+      response.once('end',()=>resolve(new Response(Buffer.concat(chunks),{status:response.statusCode})));
+    });
+    request.once('error',reject);
+  });}
   catch(error){throw Error('GET '+url+': '+(error.cause?.message||error.message),{cause:error});}
 }
 async function freePort(){

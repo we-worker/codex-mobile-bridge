@@ -8,7 +8,10 @@ import java.util.regex.*;
 public final class ArtifactDownload {
  public static final long CHUNK=1024L*1024;
  public static boolean accepts(String url,String origin){
-  try{return GatewayURL.sameOrigin(url,origin)&&GatewayURL.apiPath(url,origin).matches("(?:/api/sessions/[0-9a-f-]{36}/(?:files/[a-f0-9]{64}|workspace/download)|/api/desktop-sessions/(?:claude|deepseek)/workspace/download)");}catch(Exception e){return false;}
+  try{return GatewayURL.sameOrigin(url,origin)&&(GatewayURL.apiPath(url,origin).matches("(?:/api/sessions/[0-9a-f-]{36}/(?:files/[a-f0-9]{64}|workspace/download)|/api/desktop-sessions/(?:claude|deepseek)/workspace/download)")||diagnostics(url,origin));}catch(Exception e){return false;}
+ }
+ static boolean diagnostics(String url,String origin){
+  try{URI value=new URI(url);String query=value.getRawQuery();return GatewayURL.sameOrigin(url,origin)&&value.getRawFragment()==null&&GatewayURL.apiPath(url,origin).equals("/api/sessions/diagnostics")&&(query==null||query.matches("thread=[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"));}catch(Exception e){return false;}
  }
  public static String filename(String disposition){
   String name="download";
@@ -34,7 +37,7 @@ public final class ArtifactDownload {
  /** One resumable task, independent of the current WebView or chat. */
  public static final class Task {
   public final String url,origin;private final File directory;private final long limit;
-  private final long expectedSize;private final String expectedSha256;private final String fallbackName;private final boolean update;
+  private final long expectedSize;private final String expectedSha256;private final String fallbackName;private final boolean update,diagnosticReport;
   public final boolean gatewayUpdate;
   public volatile State state=State.READY;
   public volatile long downloaded,total=-1;public volatile double bytesPerSecond;
@@ -52,12 +55,12 @@ public final class ArtifactDownload {
    return new Task(base+"/api/mobile/update/packages/"+identifier,base,directory,release.size,release.sha256,MobileRelease.asset(release.version),true);
   }
   private Task(String url,String origin,File directory,long expectedSize,String expectedSha256,String fallbackName,boolean gatewayUpdate)throws IOException {
-   this.gatewayUpdate=gatewayUpdate;update=gatewayUpdate||MobileRelease.isDownload(url);
+   this.gatewayUpdate=gatewayUpdate;update=gatewayUpdate||MobileRelease.isDownload(url);diagnosticReport=diagnostics(url,origin);
    if(!accepts(url,origin)&&!update)throw new IOException("下载地址不是当前电脑的附件");
    if(update&&(expectedSize<=0||expectedSize>MobileRelease.MAX_SIZE||expectedSha256==null||!expectedSha256.matches("[a-fA-F0-9]{64}")))throw new IOException("更新缺少有效的大小或 SHA-256 校验信息，请打开版本页面下载。");
    this.url=url;this.origin=origin;this.directory=directory;this.expectedSize=expectedSize;this.expectedSha256=expectedSha256;this.fallbackName=fallbackName==null||fallbackName.isEmpty()?"download":fallbackName;name=this.fallbackName;limit=update?MobileRelease.MAX_SIZE:9007199254740991L; // Gateway policy is enforced by the authenticated relay; update packages have a local size ceiling.
   }
-  public synchronized boolean resumable(){return !restartRequired&&(downloaded==0||etag!=null);}
+  public synchronized boolean resumable(){return !restartRequired&&(downloaded==0||!diagnosticReport&&etag!=null);}
   public void pause(){HttpURLConnection active;synchronized(this){if(state!=State.RUNNING)return;pause=true;state=State.PAUSING;active=connection;}if(active!=null)active.disconnect();}
   public void cancel(){HttpURLConnection active;synchronized(this){cancelled=true;state=State.CANCELLED;active=connection;if(!running)removeFile();}if(active!=null)active.disconnect();}
   private void removeFile(){if(file!=null){file.delete();file=null;}}

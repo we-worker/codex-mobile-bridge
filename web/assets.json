@@ -3,7 +3,7 @@
   "/index.html": "index.html",
   "/icon.png": "icon.png",
   "/manifest.webmanifest": "manifest.webmanifest",
-  "/app.js": "shell/app.js",
+  "/app.js": ["shared/dialog-dismiss.js", "shell/app.js"],
   "/bootstrap.js": "shared/bootstrap.js",
   "/style.css": [
     "shell/style.css",
@@ -13,7 +13,7 @@
     "shell/content.css"
   ],
   "/activity.js": "features/chat/activity.js",
-  "/attachments.js": "features/chat/attachments.js",
+  "/attachments.js": ["features/chat/composer-drafts.js", "features/chat/attachments.js"],
   "/fast-mode.js": "features/chat/fast-mode.js",
   "/list-sync.js": "features/chat/list-sync.js",
   "/message-actions.js": "features/chat/message-actions.js",
@@ -24,6 +24,7 @@
   "/account.js": "features/accounts/account.js",
   "/accounts.js": "features/accounts/accounts.js",
   "/client-accounts.js": "features/accounts/client-accounts.js",
+  "/cli-access.js": "features/accounts/cli-access.js",
   "/client-lifecycle.css": "features/clients/client-lifecycle.css",
   "/client-navigation.css": [
     "features/clients/client-navigation.css",
@@ -59,6 +60,8 @@
     "features/workspace/workbench-input.css"
   ],
   "/workbench.js": "features/workspace/workbench.js",
+  "/source-view.js": "features/workspace/source-view.js",
+  "/vendor/prism/source-view.min.js": "vendor/prism/source-view.min.js",
   "/presentation.js": "features/settings/presentation.js",
   "/i18n.js": "shared/i18n.js",
   "/markdown.js": "shared/markdown.js",
@@ -73,5 +76,9 @@
   ],
   "/host.js": "hosts/environment.js",
   "/layout.js": "layouts/viewport.js",
-  "/file-actions.js": "features/workspace/file-actions.js"
+  "/file-actions.js": "features/workspace/file-actions.js",
+  "/pdf-preview.js": "features/workspace/pdf-preview.js",
+  "/html-preview.js": "features/workspace/html-preview.js",
+  "/vendor/pdfjs/pdf.min.mjs": "vendor/pdfjs/pdf.min.mjs",
+  "/vendor/pdfjs/pdf.worker.min.mjs": "vendor/pdfjs/pdf.worker.min.mjs"
 }

@@ -12,6 +12,22 @@ from unittest.mock import patch
 
 
 class TerminalStartupTests(unittest.TestCase):
+    def test_cmd_cwd_only_shortens_equivalent_extended_local_drive_paths(self):
+        from bridge.platforms.windows import terminal
+        local = '\\\\?\\C:\\project 中文 space'
+        with patch.object(terminal.os.path, 'samefile', return_value=True) as same:
+            self.assertEqual(terminal.cmd_working_directory(local), 'C:\\project 中文 space')
+            same.assert_called_once_with(local, 'C:\\project 中文 space')
+        with patch.object(terminal.os.path, 'samefile', return_value=False):
+            self.assertEqual(terminal.cmd_working_directory('\\\\?\\C:\\trailing. '), '\\\\?\\C:\\trailing. ')
+        with patch.object(terminal.os.path, 'samefile', side_effect=OSError):
+            self.assertEqual(terminal.cmd_working_directory(local), local)
+        with patch.object(terminal.os.path, 'samefile') as same:
+            for root in ('\\\\server\\share\\project', '\\\\?\\UNC\\server\\share\\project',
+                         '\\\\.\\C:\\device', 'C:\\project'):
+                self.assertEqual(terminal.cmd_working_directory(root), root)
+            same.assert_not_called()
+
     def kernel(self, failure=None):
         calls, next_pipe = [], [20]
         def job(*args):
@@ -138,6 +154,17 @@ class TerminalCompletionTests(unittest.TestCase):
 
 @unittest.skipUnless(os.name == 'nt', 'ConPTY requires Windows')
 class ConPtyTests(unittest.TestCase):
+    def wait_for_output(self, session, marker, after=0, timeout=10):
+        deadline = time.monotonic() + timeout
+        output = ''
+        while time.monotonic() < deadline:
+            result = session.read(after)
+            output = result['output']
+            if marker(output): return result
+            self.assertTrue(result['running'], repr(result))
+            time.sleep(.05)
+        self.fail('Timed out waiting for terminal output: ' + repr(output[-1000:]))
+
     def test_close_immediately_after_open_reaps_bootstrap(self):
         from bridge.platforms.windows.terminal import WindowsTerminalSession
         directory = Path(__file__).resolve().parents[1] / '.tmp'; directory.mkdir(exist_ok=True)
@@ -206,3 +233,85 @@ class ConPtyTests(unittest.TestCase):
             finally:
                 session.stop();self.assertTrue(session.done.wait(10))
                 self.assertIsNone(session.process_handle)
+
+    def test_extended_local_drive_start_cwd_and_cd_state(self):
+        from bridge.platforms.windows.terminal import WindowsTerminalSession
+        parent = Path(__file__).resolve().parents[1] / '.tmp'; parent.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix='cmb cwd 中文 space ', dir=parent) as folder:
+            root = Path(folder); (root / 'nested').mkdir()
+            runtime = os.environ.get('CMB_TEST_RUNTIME')
+            with patch.object(sys, 'executable', runtime or sys.executable), patch.object(sys, 'frozen', bool(runtime), create=True):
+                session = WindowsTerminalSession('\\\\?\\' + str(root), 80, 24)
+            try:
+                self.wait_for_output(session, lambda output: '>' in output)
+                marker = root / 'startup-cwd.txt'
+                session.write(str(uuid.uuid4()), 'cd > "' + str(marker) + '"\r')
+                deadline = time.monotonic() + 10
+                while not marker.exists() and time.monotonic() < deadline: time.sleep(.05)
+                self.assertTrue(marker.exists(), repr(session.read()))
+                self.assertIn(root.name.rsplit(' ', 1)[-1], marker.read_bytes().decode('ascii', 'ignore'))
+                session.write(str(uuid.uuid4()), 'cd nested\r')
+                session.write(str(uuid.uuid4()), 'echo retained> same-drive.txt\r')
+                same = root / 'nested' / 'same-drive.txt'
+                deadline = time.monotonic() + 10
+                while not same.exists() and time.monotonic() < deadline: time.sleep(.05)
+                self.assertEqual(same.read_text().strip(), 'retained')
+            finally:
+                session.stop(); self.assertTrue(session.done.wait(10))
+
+    def test_ping_output_ctrl_c_and_shell_survives(self):
+        from bridge.platforms.windows.terminal import WindowsTerminalSession
+        directory = Path(__file__).resolve().parents[1] / '.tmp'; directory.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=directory) as folder:
+            runtime = os.environ.get('CMB_TEST_RUNTIME')
+            with patch.object(sys, 'executable', runtime or sys.executable), patch.object(sys, 'frozen', bool(runtime), create=True):
+                session = WindowsTerminalSession(Path(folder), 80, 24)
+            try:
+                self.wait_for_output(session, lambda output: '>' in output)
+                cursor = session.read()['cursor']
+                session.write(str(uuid.uuid4()), 'ping 127.0.0.1 -n 2\r')
+                # Command echo contributes one occurrence. The others must
+                # arrive from ping itself through the ConPTY output pipe.
+                self.wait_for_output(session, lambda output: output.count('127.0.0.1') >= 3, cursor, 15)
+                session.write(str(uuid.uuid4()), 'echo done> ping-done.txt\r')
+                deadline = time.monotonic() + 10
+                while not (Path(folder) / 'ping-done.txt').exists() and time.monotonic() < deadline: time.sleep(.05)
+                self.assertTrue((Path(folder) / 'ping-done.txt').exists(), repr(session.read(cursor)))
+
+                cursor = session.read()['cursor']
+                session.write(str(uuid.uuid4()), 'ping 127.0.0.1 -t\r')
+                self.wait_for_output(session, lambda output: output.count('127.0.0.1') >= 3, cursor, 15)
+                cursor = session.read()['cursor']
+                session.write(str(uuid.uuid4()), '\x03')
+                self.wait_for_output(session, lambda output: '>' in output, cursor, 10)
+                session.write(str(uuid.uuid4()), 'echo survived> after-ctrl-c.txt\r')
+                deadline = time.monotonic() + 10
+                while not (Path(folder) / 'after-ctrl-c.txt').exists() and time.monotonic() < deadline: time.sleep(.05)
+                self.assertEqual((Path(folder) / 'after-ctrl-c.txt').read_text().strip(), 'survived')
+                self.assertFalse(session.done.is_set())
+            finally:
+                session.stop(); self.assertTrue(session.done.wait(10))
+
+    def test_reopen_same_tab_preserves_shell_state(self):
+        from bridge.features.terminals.manager import TerminalManager
+        directory = Path(__file__).resolve().parents[1] / '.tmp'; directory.mkdir(exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=directory) as folder:
+            root = Path(folder); (root / 'nested').mkdir()
+            manager = TerminalManager(); identifier = str(uuid.uuid4()); session = None
+            runtime = os.environ.get('CMB_TEST_RUNTIME')
+            try:
+                with patch.object(sys, 'executable', runtime or sys.executable), patch.object(sys, 'frozen', bool(runtime), create=True):
+                    manager.open_session('owner', 'thread', identifier, root, 80, 24)
+                session = manager.session('owner', 'thread', identifier)
+                self.wait_for_output(session, lambda output: '>' in output)
+                session.write(str(uuid.uuid4()), 'cd nested\rset CMB_RECONNECT=retained\r')
+                reopened = manager.open_session('owner', 'thread', identifier, root, 80, 24)
+                self.assertTrue(reopened['running'])
+                self.assertIs(manager.session('owner', 'thread', identifier), session)
+                session.write(str(uuid.uuid4()), 'echo %CMB_RECONNECT%> continuity.txt\r')
+                deadline = time.monotonic() + 10
+                while not (root / 'nested' / 'continuity.txt').exists() and time.monotonic() < deadline: time.sleep(.05)
+                self.assertEqual((root / 'nested' / 'continuity.txt').read_text().strip(), 'retained')
+            finally:
+                manager.close()
+                if session: self.assertTrue(session.done.wait(10))

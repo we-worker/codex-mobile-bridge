@@ -148,6 +148,7 @@ class Reads(unittest.TestCase):
         store.restore.return_value = {'fixture': True}
         store.public.return_value = {'activeIds': ['new-account']}
         with patch.object(self.manager, '_account_store', return_value=store), \
+             patch.object(self.manager, '_account_model_identity', return_value='fixture-account'), \
              patch.object(self.manager, '_descriptor', return_value={}), \
              patch.object(self.manager, '_stop_client'), \
              patch('bridge.clients.lifecycle.inspect_client', return_value={'running': False}):
@@ -163,7 +164,9 @@ class Reads(unittest.TestCase):
                 if not release.wait(3):
                     raise TimeoutError('fixture was not released')
             return copy(value)
-        with patch.object(manager_module, '_copy_read', delayed_copy), ThreadPoolExecutor(1) as pool:
+        with patch.object(manager_module, '_copy_read', delayed_copy), \
+             patch.object(self.manager, '_account_model_identity', return_value='fixture-account'), \
+             ThreadPoolExecutor(1) as pool:
             pending = pool.submit(self.manager.call, 'deepseek', 'account')
             try:
                 self.assertTrue(entered.wait(2))

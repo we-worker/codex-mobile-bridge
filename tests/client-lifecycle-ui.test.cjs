@@ -108,6 +108,8 @@ test('connection labels distinguish startup, required action, failure and actual
  assert.equal(connection({...base,connectionState:'timeout',retryable:true}).retryable,true);assert.equal(connection({...base,connectionState:'connecting',retryable:true}).retryable,false);
  assert.equal(connection({...base,setupStatus:'recovery-required',connectionState:'connecting',backgroundRunning:true,mainRunning:false}).label,'后台运行，桌面未打开');
  assert.equal(connection({...base,pendingEnable:true,reason:'请手动连接 Claude'}).reason,'正在等待客户端连接，完成后会自动显示聊天。');
+ const restarting=connection({...base,pendingEnable:true,setupStatus:'failed',connectionState:'error'});
+ assert.equal(restarting.label,'正在启动应用…');assert.equal(restarting.error,false);
  for(const setupStatus of ['needs-initialization','needs-retry','needs-developer-mode','needs-trust','needs-permission','failed'])assert.equal(connection({...base,id:'claude',setupStatus}).canInitialize,true);
  const prepared={...base,id:'claude',setupStatus:'needs-initialization',reconnectSupported:true,canReconnect:true};
  assert.equal(connection(prepared).canReconnect,true);assert.equal(connection(prepared).canInitialize,true);

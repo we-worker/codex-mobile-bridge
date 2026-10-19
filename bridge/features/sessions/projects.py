@@ -21,10 +21,11 @@ class Projects:
         with self.lock:
             return dict(self.rows[key]) if key in self.rows else None
 
-    def save(self, host, label, identity):
+    def save(self, host, label, identity, project_type='desktop'):
         key = host + '|directory:' + hashlib.sha256(identity['cwd'].encode('utf-8')).hexdigest()
         row = {'key': key, 'host': host, 'hostLabel': label, 'cwd': identity['cwd'],
                'name': identity['cwd'].replace('\\', '/').rstrip('/').rsplit('/', 1)[-1] or identity['cwd'],
+               'type': project_type,
                'directoryIdentity': identity}
         with self.lock:
             updated = {**self.rows, key: row}

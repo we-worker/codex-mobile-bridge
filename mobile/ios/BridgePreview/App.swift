@@ -53,12 +53,11 @@ final class BridgeNavigationController: UINavigationController {
 
 @main
 final class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationCenterDelegate {
-    var window: UIWindow?
     let controller = BridgeController()
+    private var pendingNotification: UNNotificationResponse?
+    private var lastNotificationRoute: (response: UNNotificationResponse, fromScene: Bool)?
     func application(_ application: UIApplication, didFinishLaunchingWithOptions options: [UIApplication.LaunchOptionsKey: Any]?) -> Bool {
         UNUserNotificationCenter.current().delegate = self
-        let window = UIWindow(frame: UIScreen.main.bounds); window.rootViewController = BridgeNavigationController(rootViewController: controller); window.makeKeyAndVisible(); self.window = window
-        if let url = options?[.url] as? URL { DispatchQueue.main.async { self.controller.openLink(url) } }
         return true
     }
     func application(_ application: UIApplication, didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data) {
@@ -66,12 +65,54 @@ final class AppDelegate: UIResponder, UIApplicationDelegate, UNUserNotificationC
         controller.registerNativePush()
     }
     func application(_ application: UIApplication, didFailToRegisterForRemoteNotificationsWithError error: Error) { controller.info(MobileStrings.text("系统推送注册失败，请检查推送签名与网络。")) }
-    func application(_ app: UIApplication, open url: URL, options: [UIApplication.OpenURLOptionsKey: Any] = [:]) -> Bool { controller.openLink(url); return true }
     func userNotificationCenter(_ center: UNUserNotificationCenter, didReceive response: UNNotificationResponse, withCompletionHandler completion: @escaping () -> Void) {
+        DispatchQueue.main.async { self.receiveNotification(response, fromScene: false) }
+        completion()
+    }
+    func receiveNotification(_ response: UNNotificationResponse, fromScene: Bool) {
+        if let last = lastNotificationRoute,
+           last.response === response, last.fromScene != fromScene {
+            lastNotificationRoute = nil
+            return
+        }
+        lastNotificationRoute = (response, fromScene)
+        pendingNotification = response
+        openPendingNotification()
+    }
+    func openPendingNotification() {
+        guard controller.viewIfLoaded?.window != nil, let response = pendingNotification else { return }
+        pendingNotification = nil
         let data = response.notification.request.content.userInfo
-        if let origin = data["origin"] as? String { controller.openNotification(origin, thread: data["thread"] as? String, host: data["host"] as? String ?? "local") }; completion()
+        if let origin = data["origin"] as? String { controller.openNotification(origin, thread: data["thread"] as? String, host: data["host"] as? String ?? "local") }
     }
     func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification, withCompletionHandler completion: @escaping (UNNotificationPresentationOptions) -> Void) { completion([.banner, .sound]) }
+}
+
+final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
+    var window: UIWindow?
+    func scene(_ scene: UIScene, willConnectTo session: UISceneSession, options connectionOptions: UIScene.ConnectionOptions) {
+        guard let windowScene = scene as? UIWindowScene,
+              let app = UIApplication.shared.delegate as? AppDelegate else { return }
+        let window = UIWindow(windowScene: windowScene)
+        window.rootViewController = BridgeNavigationController(rootViewController: app.controller)
+        self.window = window
+        window.makeKeyAndVisible()
+        DispatchQueue.main.async {
+            if let response = connectionOptions.notificationResponse { app.receiveNotification(response, fromScene: true) }
+            app.openPendingNotification()
+            if let url = connectionOptions.urlContexts.first?.url { app.controller.openLink(url) }
+        }
+    }
+    // A cold-launch tap can arrive before the first layout attaches the
+    // controller; activation is the next point where its window is ready.
+    func sceneDidBecomeActive(_ scene: UIScene) {
+        (UIApplication.shared.delegate as? AppDelegate)?.openPendingNotification()
+    }
+    func scene(_ scene: UIScene, openURLContexts URLContexts: Set<UIOpenURLContext>) {
+        guard let url = URLContexts.first?.url,
+              let app = UIApplication.shared.delegate as? AppDelegate else { return }
+        app.controller.openLink(url)
+    }
 }
 
 final class NoRedirect: NSObject, URLSessionTaskDelegate {
@@ -114,6 +155,7 @@ final class GatewayReachability: NSObject, URLSessionDataDelegate {
 
 final class BridgeController: UIViewController, WKNavigationDelegate, WKUIDelegate, UIDocumentPickerDelegate, UIDocumentInteractionControllerDelegate {
     private var web: WKWebView?
+    private var nativeMainNavigation: (web: WKWebView, generation: Int, url: String)?
     private var origin = ""
     private var routeDiscovery: ConnectionDiscovery?
     private var routeAttempted = false
@@ -331,7 +373,7 @@ final class BridgeController: UIViewController, WKNavigationDelegate, WKUIDelega
         let inbox = UIBarButtonItem(image: UIImage(systemName: "bell"), style: .plain, target: self, action: #selector(self.inbox)); inbox.accessibilityLabel = MobileStrings.text("通知")
         navigationItem.rightBarButtonItems = [settings, inbox]
     }
-    private func clear() { updateSystemBars(reset: true); pendingStorage = nil; routeDiscovery?.cancel(); routeDiscovery = nil; cancelSync(); finishUpload(nil); stopComputerChecks(); computerStates.removeAll(); computerNotifications.removeAll(); gatewayMenuTop?.isActive = false; gatewayMenuTop = nil; generation += 1; web?.stopLoading(); web?.navigationDelegate = nil; web?.uiDelegate = nil; web = nil; for v in page.arrangedSubviews where v !== subtitle { page.removeArrangedSubview(v); v.removeFromSuperview() } }
+    private func clear() { updateSystemBars(reset: true); pendingStorage = nil; nativeMainNavigation = nil; routeDiscovery?.cancel(); routeDiscovery = nil; cancelSync(); finishUpload(nil); stopComputerChecks(); computerStates.removeAll(); computerNotifications.removeAll(); gatewayMenuTop?.isActive = false; gatewayMenuTop = nil; generation += 1; web?.stopLoading(); web?.navigationDelegate = nil; web?.uiDelegate = nil; web = nil; for v in page.arrangedSubviews where v !== subtitle { page.removeArrangedSubview(v); v.removeFromSuperview() } }
     @objc func home() {
         clear(); navigation(home: true); subtitle.isHidden = true
         let container = UIView(); page.addArrangedSubview(container); let content = scrollContent(in: container)
@@ -479,30 +521,30 @@ final class BridgeController: UIViewController, WKNavigationDelegate, WKUIDelega
     }
     private func loadWithRecovery(_ web: WKWebView, url: URL, address: String, ticket: Int) {
         Task { @MainActor in
-            guard let backup = DeviceBinding.load(address) else { if ticket == generation && self.web === web { web.load(URLRequest(url: url)) }; return }
+            guard let backup = DeviceBinding.load(address) else { if ticket == generation && self.web === web { loadNative(web, URLRequest(url: url)) }; return }
             let store = WKWebsiteDataStore.default().httpCookieStore
             let cookies = await withCheckedContinuation { continuation in store.getAllCookies { continuation.resume(returning: $0) } }
             let before = cookies.first { cookieMatches($0, address: address) }
             if before?.name == backup.name && before?.value == backup.token {
-                if ticket == generation && self.web === web { web.load(URLRequest(url: url)) }; return
+                if ticket == generation && self.web === web { loadNative(web, URLRequest(url: url)) }; return
             }
             if let before {
                 let current = await DeviceBinding.verify(address, .init(name: before.name, token: before.value))
-                if current == true || current == nil { if ticket == generation && self.web === web { web.load(URLRequest(url: url)) }; return }
+                if current == true || current == nil { if ticket == generation && self.web === web { loadNative(web, URLRequest(url: url)) }; return }
             }
             let valid = await DeviceBinding.verify(address, backup)
             if valid == false, DeviceBinding.load(address)?.cookie == backup.cookie { DeviceBinding.clear(address) }
             guard ticket == generation, self.web === web, saved.contains(address) else { return }
             guard valid == true, DeviceBinding.load(address)?.cookie == backup.cookie,
-                  let host = URL(string: address)?.host else { web.load(URLRequest(url: url)); return }
+                  let host = URL(string: address)?.host else { loadNative(web, URLRequest(url: url)); return }
             var properties: [HTTPCookiePropertyKey: Any] = [.name: backup.name, .value: backup.token, .domain: host,
                 .path: GatewayURL.cookiePath(address), .expires: Date().addingTimeInterval(400 * 86400),
                 HTTPCookiePropertyKey("HttpOnly"): "TRUE", HTTPCookiePropertyKey("SameSite"): "Strict"]
             if address.hasPrefix("https://") { properties[.secure] = "TRUE" }
-            guard let restored = HTTPCookie(properties: properties) else { web.load(URLRequest(url: url)); return }
+            guard let restored = HTTPCookie(properties: properties) else { loadNative(web, URLRequest(url: url)); return }
             let latest = await withCheckedContinuation { continuation in store.getAllCookies { continuation.resume(returning: $0) } }
             guard latest.first(where: { cookieMatches($0, address: address) })?.value == before?.value,
-                  DeviceBinding.load(address)?.cookie == backup.cookie else { web.load(URLRequest(url: url)); return }
+                  DeviceBinding.load(address)?.cookie == backup.cookie else { loadNative(web, URLRequest(url: url)); return }
             await withCheckedContinuation { continuation in store.setCookie(restored) { continuation.resume() } }
             guard ticket == generation, self.web === web, saved.contains(address),
                   DeviceBinding.load(address)?.cookie == backup.cookie else {
@@ -511,8 +553,12 @@ final class BridgeController: UIViewController, WKNavigationDelegate, WKUIDelega
                 return
             }
             defaults.set(backup.name, forKey: "cookieName:" + address)
-            web.load(URLRequest(url: url))
+            loadNative(web, URLRequest(url: url))
         }
+    }
+    private func loadNative(_ web: WKWebView, _ request: URLRequest) {
+        nativeMainNavigation = request.url.map { (web, generation, $0.absoluteString) }
+        web.load(request)
     }
     private func recoverConnection() {
         guard !routeAttempted, UIApplication.shared.applicationState == .active, let requested = requestedRoute,
@@ -577,6 +623,7 @@ final class BridgeController: UIViewController, WKNavigationDelegate, WKUIDelega
         let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = .default(); configuration.applicationNameForUserAgent = "BridgeMobile/0.1-iOS"
         configuration.ignoresViewportScaleLimits = false
         configuration.userContentController.addUserScript(WKUserScript(source: WebScripts.fixedViewport, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+        configuration.userContentController.addUserScript(WKUserScript(source: "window.BridgeMobileCapabilities = Object.freeze({ diagnosticsExport: true });", injectionTime: .atDocumentEnd, forMainFrameOnly: true))
         clipboardToken = UUID().uuidString
         let appearanceScript = scripts.appearance.replacingOccurrences(of: "__BRIDGE_CLIPBOARD_TOKEN__", with: clipboardToken) + "\ndocument.addEventListener('bridge-authenticated', () => window.prompt('codexbridge-session:" + clipboardToken + "', ''));document.addEventListener('bridge-logged-out', () => window.prompt('codexbridge-logout:" + clipboardToken + "', ''));document.addEventListener('bridge-auth-lost', () => window.prompt('codexbridge-auth-lost:" + clipboardToken + "', ''));"
         configuration.userContentController.addUserScript(WKUserScript(source: appearanceScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
@@ -587,7 +634,7 @@ final class BridgeController: UIViewController, WKNavigationDelegate, WKUIDelega
         let web = WKWebView(frame: .zero, configuration: configuration); self.web = web; web.scrollView.contentInsetAdjustmentBehavior = .never; web.navigationDelegate = self; web.uiDelegate = self; web.allowsBackForwardNavigationGestures = true; web.customUserAgent = nil; page.addArrangedSubview(web); gatewayMenuTop = gatewayMenu.topAnchor.constraint(equalTo: web.topAnchor, constant: 4); gatewayMenuTop?.isActive = true; loadWithRecovery(web, url: url, address: address, ticket: generation)
         web.scrollView.pinchGestureRecognizer?.isEnabled = false
     }
-    @objc private func refresh() { routeAttempted = false; web?.reload() }
+    @objc private func refresh() { routeAttempted = false; if let web { nativeMainNavigation = web.url.map { (web, generation, $0.absoluteString) }; web.reload() } }
     func webView(_ webView: WKWebView, decidePolicyFor response: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
         let recover = webView === web && response.isForMainFrame && response.response.url.map { GatewayURL.same($0, origin) } == true && ConnectionDiscovery.retryableStatus((response.response as? HTTPURLResponse)?.statusCode ?? 0)
         decisionHandler(.allow)
@@ -595,13 +642,25 @@ final class BridgeController: UIViewController, WKNavigationDelegate, WKUIDelega
     }
     func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
         guard let url = action.request.url else { decisionHandler(.cancel); return }
+        if action.targetFrame?.isMainFrame == false {
+            decisionHandler(isHtmlPreviewShell(url) ? .allow : .cancel); return
+        }
+        if action.targetFrame?.isMainFrame == true, nativeMainNavigation?.web === webView {
+            let expected = nativeMainNavigation
+            nativeMainNavigation = nil
+            if !action.sourceFrame.isMainFrame {
+                guard action.navigationType == .other, expected?.generation == generation,
+                      expected?.url == url.absoluteString, GatewayURL.same(url, origin) else { decisionHandler(.cancel); return }
+            }
+        } else if !action.sourceFrame.isMainFrame { decisionHandler(.cancel); return }
+        if isHtmlPreviewShell(url) { decisionHandler(.cancel); return }
         if url.absoluteString == "codexbridge://home", action.sourceFrame.isMainFrame, action.navigationType == .linkActivated, let source = webView.url, GatewayURL.same(source, origin) { decisionHandler(.cancel); home(); return }
         if action.navigationType == .linkActivated, action.sourceFrame.isMainFrame,
            let source = webView.url, GatewayURL.same(source, origin), isArtifact(url) {
             decisionHandler(.cancel); downloadArtifact(action.request); return
         }
         if GatewayURL.same(url, origin) {
-            if action.targetFrame == nil { decisionHandler(.cancel); webView.load(action.request) }
+            if action.targetFrame == nil { decisionHandler(.cancel); loadNative(webView, action.request) }
             else { decisionHandler(.allow) }
             return
         }
@@ -610,13 +669,13 @@ final class BridgeController: UIViewController, WKNavigationDelegate, WKUIDelega
             let a = UIAlertController(title: MobileStrings.text("在浏览器打开外部链接？"), message: url.host, preferredStyle: .alert); a.addAction(UIAlertAction(title: MobileStrings.text("取消"), style: .cancel)); a.addAction(UIAlertAction(title: MobileStrings.text("打开"), style: .default) { _ in UIApplication.shared.open(url) }); present(a, animated: true)
         }
     }
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { guard webView === web, let url = webView.url, GatewayURL.same(url, origin) else { return }; subtitle.isHidden = true; registerNativePush(); rememberConnection()
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { if nativeMainNavigation?.web === webView { nativeMainNavigation = nil }; guard webView === web, let url = webView.url, GatewayURL.same(url, origin) else { return }; subtitle.isHidden = true; registerNativePush(); rememberConnection()
         if let snapshot = pendingStorage { pendingStorage = nil; webView.evaluateJavaScript("(()=>{const data=" + snapshot + ";for(const [k,v] of Object.entries(data))if(typeof v==='string')localStorage.setItem(k,v);location.reload();})()", completionHandler: nil) }
     }
-    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { guard webView === web else { return }; subtitle.isHidden = false; subtitle.text = MobileStrings.text("连接失败，请检查电脑和地址后刷新"); recoverConnection() }
-    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { guard webView === web else { return }; recoverConnection() }
-    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) { let a = UIAlertController(title: nil, message: message, preferredStyle: .alert); a.addAction(UIAlertAction(title: MobileStrings.text("好"), style: .default) { _ in completionHandler() }); present(a, animated: true) }
-    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) { let a = UIAlertController(title: nil, message: message, preferredStyle: .alert); a.addAction(UIAlertAction(title: MobileStrings.text("取消"), style: .cancel) { _ in completionHandler(false) }); a.addAction(UIAlertAction(title: MobileStrings.text("确认"), style: .default) { _ in completionHandler(true) }); present(a, animated: true) }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { if nativeMainNavigation?.web === webView { nativeMainNavigation = nil }; guard webView === web else { return }; subtitle.isHidden = false; subtitle.text = MobileStrings.text("连接失败，请检查电脑和地址后刷新"); recoverConnection() }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { if nativeMainNavigation?.web === webView { nativeMainNavigation = nil }; guard webView === web else { return }; recoverConnection() }
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) { guard frame.isMainFrame else { completionHandler(); return }; let a = UIAlertController(title: nil, message: message, preferredStyle: .alert); a.addAction(UIAlertAction(title: MobileStrings.text("好"), style: .default) { _ in completionHandler() }); present(a, animated: true) }
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) { guard frame.isMainFrame else { completionHandler(false); return }; let a = UIAlertController(title: nil, message: message, preferredStyle: .alert); a.addAction(UIAlertAction(title: MobileStrings.text("取消"), style: .cancel) { _ in completionHandler(false) }); a.addAction(UIAlertAction(title: MobileStrings.text("确认"), style: .default) { _ in completionHandler(true) }); present(a, animated: true) }
     func webView(_ webView: WKWebView, runJavaScriptTextInputPanelWithPrompt prompt: String, defaultText: String?, initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (String?) -> Void) {
         if prompt == "codexbridge-system-bars:" + clipboardToken {
             guard webView === web, UIApplication.shared.applicationState == .active, frame.isMainFrame,
@@ -686,6 +745,9 @@ final class BridgeController: UIViewController, WKNavigationDelegate, WKUIDelega
     }
     private func isArtifact(_ url: URL) -> Bool {
         DownloadManager.allows(url, origin: origin)
+    }
+    private func isHtmlPreviewShell(_ url: URL) -> Bool {
+        url.absoluteString == origin + "/html-preview-shell"
     }
     private func downloadArtifact(_ request: URLRequest) {
         guard !downloadState.busy else { downloadPanel.expand(); info(MobileStrings.text("已有下载进行中，请稍候")); return }
@@ -1016,7 +1078,7 @@ final class BridgeController: UIViewController, WKNavigationDelegate, WKUIDelega
         request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         request.setValue("Codex-Mobile-Bridge/" + current, forHTTPHeaderField: "User-Agent")
         let session = URLSession(configuration: .ephemeral)
-        session.dataTask(with: request) { [weak sheet, weak check, weak status] data, response, error in
+        session.dataTask(with: request) { [weak self, weak sheet, weak check, weak status] data, response, error in
             defer { session.finishTasksAndInvalidate() }
             var candidate: MobileRelease?; var failed = false
             do {
@@ -1024,13 +1086,19 @@ final class BridgeController: UIViewController, WKNavigationDelegate, WKUIDelega
                 candidate = try MobileRelease.select(data, current: current)
             } catch { failed = true }
             DispatchQueue.main.async {
-                guard let sheet, sheet.presentingViewController != nil, let check, let status else { return }
+                guard let self, let sheet, sheet.presentingViewController != nil, let check, let status else { return }
                 check.isEnabled = true
                 let url = candidate?.page ?? URL(string: MobileRelease.repository + "/releases")!
                 if !failed && candidate == nil { status.text = MobileStrings.text("当前已是此通道最新版本。"); return }
-                status.text = MobileStrings.text(failed ? "检查失败，请检查网络后重试。也可以打开版本页面。" : "发现新版本") + (candidate.map { " · " + $0.version } ?? "")
+                let skipKey = "skip-mobile-update:" + MobileRelease.channel(current)
+                let skipped = candidate?.version == self.defaults.string(forKey: skipKey)
+                status.text = MobileStrings.text(failed ? "检查失败，请检查网络后重试。也可以打开版本页面。" : skipped ? "已跳过此版本，仍可手动更新" : "发现新版本") + (candidate.map { " · " + $0.version } ?? "")
                 let alert = UIAlertController(title: status.text, message: candidate.map { MobileStrings.text("iOS App 需要使用自己的 Apple 账号重新签名安装，暂不支持 App 内直接覆盖更新。") + "\n\n" + $0.notes }, preferredStyle: .alert)
                 alert.addAction(UIAlertAction(title: MobileStrings.text("稍后"), style: .cancel))
+                if let candidate { alert.addAction(UIAlertAction(title: MobileStrings.text("跳过此版本"), style: .default) { _ in
+                    self.defaults.set(candidate.version, forKey: skipKey)
+                    status.text = MobileStrings.text("已跳过此版本，仍可手动更新") + " · " + candidate.version
+                }) }
                 alert.addAction(UIAlertAction(title: MobileStrings.text(failed ? "版本页面" : "查看新版与安装指引"), style: .default) { _ in UIApplication.shared.open(url) })
                 sheet.present(alert, animated: true)
             }
@@ -1281,6 +1349,8 @@ enum MobileStrings {
 "版本页面": "Releases",
 "当前已是此通道最新版本。": "You are up to date on this channel.",
 "发现新版本": "Update available",
+"跳过此版本": "Skip this version",
+"已跳过此版本，仍可手动更新": "This version is skipped; you can still update manually",
 "下载后按系统提示覆盖安装，不要先卸载。已保存的电脑与登录状态会保留。": "After downloading, follow the system prompts to update without uninstalling. Saved computers and sign-ins will be retained.",
 "稍后": "Later",
 "更新说明": "Release notes",

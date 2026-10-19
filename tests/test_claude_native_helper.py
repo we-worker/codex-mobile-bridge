@@ -13,8 +13,39 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class WindowsOwnerErrorSource(unittest.TestCase):
+    def test_native_helper_preserves_attempt_marker_and_emits_distinct_codes(self):
+        source = (ROOT/'bridge/platforms/windows/claude-helper.cs').read_text(encoding='utf-8')
+        mapping = source[source.index('    static string OwnerIssue('):source.index('    static string DesktopName(')]
+        self.assertIn('value.Contains("["+marker+"]")', mapping)
+        for code in ('OWNER_BUSY', 'OWNER_UNCONFIRMED', 'OWNER_LEGACY'):
+            self.assertIn('return "'+code+'"', mapping)
+        self.assertIn('OwnerIssue(value,args[3])', source)
+        self.assertIn('if(ownerIssue!=null) {Stage(ownerIssue);return 0;}', source)
+
+
 @unittest.skipUnless(shutil.which('swift'), 'Swift interpreter required')
 class DesktopSessionGuards(unittest.TestCase):
+    def test_owner_errors_require_this_attempt_marker(self):
+        source = (ROOT/'bridge/platforms/macos/claude-helper.swift').read_text()
+        pure = source[source.index('func bridgeOwnerIssue('):source.index('func attribute(')]
+        fixture = '''import Foundation
+''' + pure + '''
+precondition(bridgeOwnerIssue("Error: BRIDGE_OWNER_BUSY [current]", marker: "current") == "busy")
+precondition(bridgeOwnerIssue("Error: BRIDGE_OWNER_UNCONFIRMED [current]", marker: "current") == "unconfirmed")
+precondition(bridgeOwnerIssue("Error: BRIDGE_OWNER_LEGACY [current]", marker: "current") == "legacy")
+precondition(bridgeOwnerIssue("Error: Claude 桥接连接被其他网关占用 [current]", marker: "current") == "legacy")
+precondition(bridgeOwnerIssue("Error: BRIDGE_OWNER_BUSY [old]", marker: "current") == nil)
+precondition(bridgeOwnerIssue("Error: BRIDGE_OWNER_BUSY", marker: "current") == nil)
+print("owner error marker fixtures passed")
+'''
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            folder = Path(folder); script = folder/'owner-errors.swift'; script.write_text(fixture)
+            result = subprocess.run(['swift', '-module-cache-path', str(folder/'modules'), str(script)],
+                                    capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('owner error marker fixtures passed', result.stdout)
+
     def test_pure_state_guards_without_starting_native_helper_or_reading_desktop(self):
         source = (ROOT/'bridge/platforms/macos/claude-helper.swift').read_text()
         pure = source[source.index('func desktopIssue('):source.index('func currentDesktopIssue(')]
@@ -52,6 +83,24 @@ print("15 desktop-state fixtures passed without GUI APIs")
 
 @unittest.skipUnless(sys.platform == 'darwin' and shutil.which('swiftc'), 'macOS Swift compiler required')
 class NativeConsoleSelectors(unittest.TestCase):
+    def test_product_console_keyboard_dispatch_pairs_hid_events(self):
+        harness = ROOT/'tests/fixtures/claude_key_dispatch_harness.py'
+        result = subprocess.run([sys.executable, str(harness)], capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('prompt: hid-down,hid-up', result.stdout)
+        self.assertIn('app-shortcut: pid-down,pid-up', result.stdout)
+        self.assertIn('focus-lost-after-down: hid-down,hid-up', result.stdout)
+
+    def test_product_console_ax_tree_and_refocused_devtools(self):
+        harness = ROOT/'tests/fixtures/claude_console_ax_harness.py'
+        result = subprocess.run([sys.executable, str(harness)], capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('existing_open_refocus: result=success', result.stdout)
+        self.assertIn('cold_ax_off: result=success', result.stdout)
+        self.assertIn('cold_ax_unsupported: result=success', result.stdout)
+        for case in ('other_app_refocus', 'ordinary_refocus', 'ambiguous_refocus'):
+            self.assertIn(case + ': result=needs-attention', result.stdout)
+
     def test_observed_console_selectors_submission_and_window_guards(self):
         with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
             folder = Path(folder)
@@ -64,82 +113,116 @@ class NativeConsoleSelectors(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(json.loads(result.stdout)['setupState'], 'ready', result.stdout)
 
-    def test_product_verify_requires_one_complete_read_and_bounded_navigation(self):
+    def test_product_verify_uses_stable_ax_slice_without_navigation(self):
         source = (ROOT/'bridge/platforms/macos/claude-helper.swift').read_text()
         actual = source[source.index('    func verify(_ prompt: AXUIElement'):source.index('    func submit(_ prompt: AXUIElement')]
-        fixture = '''import Foundation
-import CoreFoundation
+        fixture = r'''import Foundation
 struct SetupError: Error { let state: String; let reason: String }
 func fail(_ state: String, _ reason: String) throws -> Never { throw SetupError(state: state, reason: reason) }
 struct AXUIElement {}
-struct AXError: Equatable { let code: Int; static let success = AXError(code: 0); static let failure = AXError(code: 1) }
-enum FakeAXValueType { case cfRange }
-struct FakeAXValue { let range: CFRange }
-func AXValueCreate(_ type: FakeAXValueType, _ range: inout CFRange) -> FakeAXValue? { FakeAXValue(range: range) }
-let kAXValueAttribute = "AXValue", kAXSelectedTextRangeAttribute = "AXSelectedTextRange"
-struct FakeFlags { static let maskCommand = FakeFlags() }
+let kAXValueAttribute = "AXValue"
 final class Scenario {
-    var reads: [String?], readIndex = 0, checks = 0, stopAt: Int?, stopState: String, settable: Bool
-    var keys = [Int](), positions = [Int]()
-    init(_ reads: [String?], settable: Bool = true, stopAt: Int? = nil, stopState: String = "cancelled") {
-        self.reads = reads; self.settable = settable; self.stopAt = stopAt; self.stopState = stopState
+    var reads: [String?], index = 0, checks = 0, stopAt: Int?, stopState: String
+    init(_ reads: [String?], stopAt: Int? = nil, stopState: String = "cancelled") {
+        self.reads = reads; self.stopAt = stopAt; self.stopState = stopState
     }
 }
 var scenario = Scenario([])
 func attribute(_ element: AXUIElement, _ name: String) -> Any? {
-    let index = min(scenario.readIndex, scenario.reads.count - 1)
-    scenario.readIndex += 1
+    let index = min(scenario.index, scenario.reads.count - 1)
+    scenario.index += 1
     return scenario.reads[index]
-}
-func AXUIElementIsAttributeSettable(_ element: AXUIElement, _ name: CFString, _ settable: inout DarwinBoolean) -> AXError {
-    settable = DarwinBoolean(scenario.settable)
-    return .success
-}
-func AXUIElementSetAttributeValue(_ element: AXUIElement, _ name: CFString, _ value: FakeAXValue) -> AXError {
-    scenario.positions.append(value.range.location)
-    return .success
 }
 final class Connector {
     func check(_ prompt: AXUIElement) throws {
         scenario.checks += 1
         if scenario.stopAt == scenario.checks { try fail(scenario.stopState, "stopped") }
     }
-    func key(_ code: Int, flags: FakeFlags = FakeFlags(), prompt: AXUIElement) throws {
-        try check(prompt)
-        scenario.keys.append(code)
-    }
-''' + actual + '''}
-let connector = Connector(), prompt = AXUIElement(), good = "abcdefghij"
-func run(_ name: String, _ reads: [String?], settable: Bool = true, stopAt: Int? = nil,
-         stopState: String = "cancelled", pass: Bool, moves: Int, selections: Int? = nil, restored: Bool = false) {
-    scenario = Scenario(reads, settable: settable, stopAt: stopAt, stopState: stopState)
-    var succeeded = false, stopped = false
-    do { try connector.verify(prompt, good); succeeded = true }
-    catch let error as SetupError { stopped = error.state == stopState }
+''' + actual + r'''}
+let connector = Connector(), prompt = AXUIElement()
+let expected = "/* codex bridge connector */" + String(repeating: "abcdefghij", count: 500)
+func run(_ name: String, _ reads: [String?], expected: String = expected,
+         stopAt: Int? = nil, stopState: String = "cancelled", pass: Bool, count: Int? = nil) {
+    scenario = Scenario(reads, stopAt: stopAt, stopState: stopState)
+    var succeeded = false, failure: String?
+    do { try connector.verify(prompt, expected); succeeded = true }
+    catch let error as SetupError { failure = error.state }
     catch { fatalError("unexpected error in " + name) }
     precondition(succeeded == pass, name)
-    if stopAt != nil { precondition(stopped && scenario.keys.isEmpty, name) }
-    precondition(scenario.keys.filter { $0 == 124 }.count == moves, name)
-    precondition(scenario.keys.contains(125) == restored, name)
-    precondition(scenario.positions.count == (selections ?? moves), name)
+    if let stopAt = stopAt { precondition(failure == stopState && scenario.checks == stopAt, name) }
+    if let count = count { precondition(scenario.index == count, name) }
 }
-run("exact", [good], pass: true, moves: 0)
-run("revealed", Array(repeating: "abc", count: 40) + [good], pass: true, moves: 0, restored: true)
-run("midpoint", Array(repeating: "abc", count: 42) + ["abcdef", good], pass: true, moves: 1, restored: true)
-run("same-length-middle-change", ["abcxefghij"], pass: false, moves: 3)
-run("truncated", ["abcdefghi"], pass: false, moves: 3)
-run("unreadable", [nil], pass: false, moves: 0)
-run("not-settable", ["abcdefghi"], settable: false, pass: false, moves: 0)
-run("cancelled", ["abcdefghi"], stopAt: 1, pass: false, moves: 0)
-run("focus-changed", ["abcdefghi"], stopAt: 44, stopState: "needs-attention", pass: false, moves: 0, selections: 1)
-print("9 product verify flow fixtures passed")
+let slice = String(expected.dropFirst(250).prefix(128))
+run("exact", [expected], pass: true, count: 1)
+run("stable-slice", [slice, slice], pass: true, count: 2)
+run("changing-slice", [String(expected.prefix(128)), slice, slice], pass: true, count: 3)
+run("empty-draft", ["old", nil, ""], expected: "", pass: true, count: 3)
+run("empty-not-slice", ["", ""], pass: false, count: 40)
+run("short-slice", [String(expected.prefix(31))], pass: false, count: 40)
+run("mismatched-source", [String(repeating: "z", count: 128)], pass: false, count: 40)
+run("same-length-middle-change", [expected.replacingOccurrences(of: "abcdefghij", with: "abcxefghij")], pass: false, count: 40)
+run("unreadable", [nil], pass: false, count: 40)
+run("cancelled", [slice], stopAt: 1, pass: false, count: 0)
+run("focus-changed", [slice], stopAt: 2, stopState: "needs-attention", pass: false, count: 1)
+print("11 non-navigating product verify fixtures passed")
 '''
         with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
             folder = Path(folder); script = folder/'verify.swift'; script.write_text(fixture)
             result = subprocess.run(['swift', '-module-cache-path', str(folder/'modules'), str(script)],
                                     capture_output=True, text=True, timeout=90)
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn('9 product verify flow fixtures passed', result.stdout)
+        self.assertIn('11 non-navigating product verify fixtures passed', result.stdout)
+
+    def test_product_submit_posts_one_hid_enter_pair(self):
+        source = (ROOT/'bridge/platforms/macos/claude-helper.swift').read_text()
+        actual = source[source.index('    func submit(_ prompt: AXUIElement'):source.index('    func inject(_ path: String')]
+        fixture = r'''import Foundation
+struct SetupError: Error { let state: String; let reason: String }
+func fail(_ state: String, _ reason: String) throws -> Never { throw SetupError(state: state, reason: reason) }
+struct AXUIElement {}
+struct CGEventFlags: OptionSet { let rawValue: Int }
+enum Tap { case cghidEventTap }
+enum EventField { case keyboardEventAutorepeat }
+var events = [String](), checks = 0, stopAt: Int?, desktopChecks = 0
+final class CGEvent {
+    let down: Bool
+    var flags: CGEventFlags = []
+    init?(keyboardEventSource: Any?, virtualKey: Int, keyDown: Bool) {
+        precondition(virtualKey == 36)
+        down = keyDown
+    }
+    func setIntegerValueField(_ field: EventField, value: Int64) { precondition(value == 0) }
+    func post(tap: Tap) { events.append(down ? "down" : "up") }
+}
+let kAXValueAttribute = "AXValue"
+func attribute(_ element: AXUIElement, _ name: String) -> Any? { fatalError("post-dispatch AX read") }
+func requireDesktop() throws { desktopChecks += 1 }
+final class Connector {
+    func check(_ prompt: AXUIElement) throws {
+        checks += 1
+        if checks == stopAt { try fail("needs-attention", "focus changed") }
+    }
+''' + actual + r'''}
+let connector = Connector(), prompt = AXUIElement()
+try connector.submit(prompt)
+precondition(events == ["down", "up"] && checks == 2 && desktopChecks == 1)
+events = []; checks = 0; stopAt = 1
+do { try connector.submit(prompt); fatalError("cancel before dispatch accepted") }
+catch let error as SetupError { precondition(error.state == "needs-attention" && events.isEmpty) }
+events = []; checks = 0; stopAt = 2
+do { try connector.submit(prompt); fatalError("focus change accepted") }
+catch let error as SetupError { precondition(error.state == "needs-attention" && events.isEmpty) }
+events = []; checks = 0; stopAt = 3
+try connector.submit(prompt)
+precondition(events == ["down", "up"] && checks == 2)
+print("product submit posts one HID Enter pair and leaves receipt to owner")
+'''
+        with tempfile.TemporaryDirectory(dir=ROOT/'.tmp') as folder:
+            folder = Path(folder); script = folder/'submit.swift'; script.write_text(fixture)
+            result = subprocess.run(['swift', '-module-cache-path', str(folder/'modules'), str(script)],
+                                    capture_output=True, text=True, timeout=90)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('product submit posts one HID Enter pair and leaves receipt to owner', result.stdout)
 
 
 @unittest.skipUnless(sys.platform == 'win32', 'Windows native helper required')

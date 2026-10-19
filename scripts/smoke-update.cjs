@@ -21,6 +21,40 @@ function worker(executable,data,action,payload){return new Promise((resolve,reje
   child.on('close',()=>{clearTimeout(timer);try{const result=JSON.parse(output);if(!result.ok)throw Error(result.error);resolve(result.result);}catch(error){reject(Error(action+': '+error.message+' '+errors));}});
   child.stdin.on('error',()=>{});child.stdin.end(payload?JSON.stringify(payload):'');
 });}
+async function authenticate(entry,cookie){
+  const response=await fetch(new URL('/api/auth',entry),{headers:{Cookie:cookie,'User-Agent':'BridgeMobile/0.1-Android'}});
+  assert.equal(response.status,200,'bound phone authentication response');
+  const value=await response.json();
+  assert.equal(value.authenticated,true,'original phone binding remains authenticated');
+  assert.equal(value.trustedDevice,true,'original phone binding remains trusted');
+  return value;
+}
+async function pairPhone(runtime,data){
+  const snapshot=await worker(runtime,data,'snapshot');
+  const entry=snapshot.urls.find(value=>{const url=new URL(value);return url.protocol==='http:'&&!['127.0.0.1','localhost','::1'].includes(url.hostname);});
+  assert.ok(entry,'an isolated LAN entry is required for real QR pairing');
+  const grant=await worker(runtime,data,'pairing',{action:'create',url:entry});
+  const response=await fetch(new URL('/api/pair',entry),{method:'POST',headers:{'Content-Type':'application/json',Origin:new URL(entry).origin,'User-Agent':'BridgeMobile/0.1-Android'},body:JSON.stringify({token:new URL(grant.url).hash.slice('#pair='.length)})});
+  assert.equal(response.status,200,'old gateway QR exchange');
+  await response.json();
+  const cookie=response.headers.get('set-cookie')?.split(';',1)[0];
+  assert.match(cookie||'',/^codex_mobile_session(?:_[a-f0-9]{24})?=[A-Za-z0-9_-]{32,128}$/);
+  const auth=await authenticate(entry,cookie);
+  const key=createHash('sha256').update(cookie.split('=')[1]).digest('hex');
+  const state=JSON.parse(await fs.readFile(path.join(data,'auth-sessions.json'),'utf8'));
+  assert.equal(state.cookieName,auth.cookieName);
+  assert.equal(state.sessions[key]?.trustedDevice,true);
+  assert.equal(state.sessions[key]?.expires,0);
+  return {entry,cookie,cookieName:auth.cookieName,key};
+}
+async function verifyPhone(data,phone){
+  const auth=await authenticate(phone.entry,phone.cookie);
+  assert.equal(auth.cookieName,phone.cookieName,'original cookie namespace');
+  const state=JSON.parse(await fs.readFile(path.join(data,'auth-sessions.json'),'utf8'));
+  assert.equal(state.cookieName,phone.cookieName,'persisted cookie namespace');
+  assert.equal(state.sessions[phone.key]?.trustedDevice,true,'persisted original phone session');
+  assert.equal(state.sessions[phone.key]?.expires,0,'original trust does not expire on upgrade');
+}
 async function inspectUI(debugPort,output){
   const page=await until(async()=>{const response=await fetch(`http://127.0.0.1:${debugPort}/json/list`);return (await response.json()).find(row=>row.type==='page'&&row.url.endsWith('/desktop/index.html'));},'renderer');
   const socket=new WebSocket(page.webSocketDebuggerUrl),pending=new Map();let id=0;
@@ -42,15 +76,16 @@ async function main(){
   const work=await fs.mkdtemp(path.join(root,'.tmp/update-smoke-中文 ')),target=path.join(work,mac?'Codex Mobile Bridge.app':'app'),data=path.join(work,'data');
   await fs.cp(source,target,{recursive:true,verbatimSymlinks:true});await fs.mkdir(data);
   const {app,runtime}=paths(target),settings=await worker(runtime,data,'snapshot'),gatewayPort=await port();
-  Object.assign(settings.preferences,{port:gatewayPort,lan:false,autoStart:false,tunnel:false,connections:[],codexHome:data});
+  Object.assign(settings.preferences,{port:gatewayPort,lan:true,autoStart:false,tunnel:false,connections:[],codexHome:data});
   await worker(runtime,data,'save',settings);await fs.writeFile(path.join(data,'notification-watches.json'),'[]\n');
   const preserved=['config.json','desktop.json','notifications.json','notification-watches.json'];
-  const originals=await Promise.all(preserved.map(name=>fs.readFile(path.join(data,name))));
   const env={...process.env,CMB_DATA_DIR:data};for(const key of ['ELECTRON_RUN_AS_NODE','CMB_UPDATE_DATA_DIR','CMB_UPDATE_TRANSACTION','CMB_UPDATE_TOKEN'])delete env[key];
-  const before=(await worker(runtime,data,'start')).pid;
-  await until(async()=>{const response=await fetch(`http://127.0.0.1:${gatewayPort}/api/auth`);return response.ok;},'original gateway');
   let appChild,newPid,helper;
   try{
+    const before=(await worker(runtime,data,'start')).pid;
+    await until(async()=>{const response=await fetch(`http://127.0.0.1:${gatewayPort}/api/auth`);return response.ok;},'original gateway');
+    const phone=await pairPhone(runtime,data);
+    const originals=await Promise.all(preserved.map(name=>fs.readFile(path.join(data,name))));
     for(const scenario of mac?['success','rollback']:['legacy-cwd','success','rollback']){
       const debugPort=await port();
       appChild=spawn(app,['--remote-debugging-address=127.0.0.1','--remote-debugging-port='+debugPort],{cwd:target,env,stdio:'ignore'});
@@ -82,11 +117,12 @@ async function main(){
       if(scenario==='legacy-cwd')assert.match(result.message,/WinError 32/);
       const state=await worker(runtime,data,'snapshot');assert.equal(state.runtime.running,true);assert.notEqual(state.runtime.pid,before);newPid=state.runtime.pid;
       for(let i=0;i<preserved.length;i++)assert.deepEqual(await fs.readFile(path.join(data,preserved[i])),originals[i],preserved[i]);
+      await verifyPhone(data,phone);
       // Stop only the isolated app launched by this helper before the next scenario.
       const launched=JSON.parse(await fs.readFile(path.join(path.dirname(planFile),'launched.json'),'utf8'));
       try{process.kill(launched.pid);}catch(error){if(error.code!=='ESRCH')throw error;}
       await delay(500);
-      console.log('PASS: '+scenario+'; packaged Electron and gateway, exact configuration preservation.');
+      console.log('PASS: '+scenario+'; packaged Electron and gateway, exact configuration preservation, original phone binding.');
     }
     console.log(JSON.stringify({ok:true,work,gatewayPid:newPid}));
   }finally{

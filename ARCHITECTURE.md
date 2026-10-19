@@ -12,7 +12,7 @@ Windows 新桌面壳使用 Tauri，页面通过 `desktop/tauri-bridge.js` 保持
 
 ## 原生 Goal 控制
 
-本地 Goal 元数据通过受限的官方运行时连接读写，只允许 `initialize` 和 `thread/goal/get/set/clear`；该连接不加载或恢复聊天，不调用 `turn/start`，也不修改 provider、认证或审批设置。原桌面 owner 继续拥有实际执行和审批。当前 follower IPC 没有 Goal 写接口，SSH Goal 因此禁用；不能把此通路当作任意 App Server RPC 代理。
+App 执行的本地聊天，其 Goal 元数据通过受限的官方运行时连接读写，只允许 `initialize` 和 `thread/goal/get/set/clear`；该连接不加载或恢复聊天，不调用 `turn/start`，也不修改 provider、认证或审批设置。原桌面 owner 继续拥有实际执行和审批。已连接原生 CLI 的本地或 SSH 聊天通过其同一 daemon 读写 Goal，能力经原生接口探测；两条路径共用操作 ID 与结果确认规则。当前 follower IPC 没有 Goal 写接口，因此 SSH 上由 App owner 执行的聊天仍不支持 Goal 控制；不能把此通路当作任意 App Server RPC 代理。
 
 创建和每一次恢复有独立的持久化操作 ID；该操作的重试沿用 ID 和启动消息，后续恢复不能复用历史启动 ID。写入断连、超时和重启遗留的 sent/pending 均作为结果未知处理，只依据可确认的原生状态核验，不自动重放写入。手机提交所见目标的身份和状态，拒绝对已经变化的目标执行新操作；原生接口尚无原子条件更新，桌面与手机同时修改仍应避免。
 
@@ -29,6 +29,10 @@ Windows 可在应用管理中显式扫描并启用独立的 **WSL Codex** 应用
 HTTP 阅读请求先返回，保存历史和实时连接在后台加载，通过原有 SSE/长轮询更新页面。每条会话只发起一个后台连接任务，失败后间隔重试，手动重新连接可跳过重试间隔。SSH/SQLite 元数据读取不占用会话总锁；写操作仍须确认原生 owner 已连接。只读超时与写入结果未知使用不同提示。
 
 网页点击或打开会话时，并行读取渐进历史并通过带 CSRF 的重连接口自动连接原生 owner。首屏不等待激活完成，切换会话取消旧页面请求，首次历史读取失败会自动重试。后台阅读、轮询和通知监听本身只订阅状态。打开会话、发送、处理授权或点击“重新连接”时，优先等待后台订阅；仍无 owner 才通过已有 `codex://threads/…` 链接让原 App 加载聊天，最多等待约 20 秒。该兜底可能切换桌面当前聊天，不调用第二个 app-server，不改 provider。连接失败时操作尚未发送，草稿保留。原 App 因 provider 缺失等配置问题无法恢复的聊天，网关也不会擅自迁移。
+
+CLI 来源表示创建方式，不固定当前执行进程。对 CLI 聊天，被动查询已有 Desktop owner 并定向订阅，核对 host/id/cwd/provider 后复用其执行连接；未发现 owner 时，仅显式继续才连接原生 daemon 或冷恢复。已发现 owner 但快照未到达或身份不符时不另行恢复。原生 writer 锁仍由官方运行时维护，网关不清锁、不终止持有者。详情见 [CLI 接入说明](docs/codex-cli.md)。
+
+模型、权限、Skill 与工作模式使用独立能力字段，不借用会同时开放重命名等操作的 `canConfigure`。App 接续的 CLI 聊天使用既有 owner 通路；已连接原生 CLI 的目录、设置、Skill、计划请求和本机/SSH Goal 使用同一 daemon。读取目录不激活会话，显式设置只更新所选模型/推理强度或经策略检查的权限字段，不替换 provider、认证或 cwd。原生 CLI 权限以 resume 的实际配置与 thread/settings/updated 事件为准，不把请求值投影为已生效；权限策略读取来自执行端，不依赖网关电脑的桌面开关。
 
 项目与 SSH 主机映射来自 App 的 `.codex-global-state.json`。远端只读取 App 已保存且有关联项目/会话的 SSH 别名；只读辅助脚本使用 `ssh` 和远端 Python，不向远端安装文件。
 
@@ -96,7 +100,7 @@ Windows 自动发现用户目录中的 App 运行时、常见安装目录、MSIX
 
 ## HTTP 与文件
 
-账号密码采用 PBKDF2-HMAC-SHA256，登录 Cookie 使用 HttpOnly、SameSite，HTTPS 入口加 Secure。Host 和 Origin 必须在允许列表；写操作还需 CSRF 令牌。
+账号密码采用 PBKDF2-HMAC-SHA256，登录 Cookie 使用 HttpOnly、SameSite，HTTPS 入口加 Secure。Host 必须在允许列表；提供 Origin 的请求须与当前 Host 的协议和完整域名／端口对应，写操作还需 Origin 与 CSRF 令牌。不能仅因 Host 与 Origin 各自在允许列表，就接受二者交叉配对。
 
 聊天内容、事件流、长轮询和附件接口均需要登录。文件访问仅允许当前聊天引用的本地工作目录或 visualizations 文件，并校验解析后的真实路径及大小。远端文件不映射到 本机文件系统。
 
@@ -129,6 +133,8 @@ Windows `desktop/shell/tray.cjs` 管理托盘状态、手机地址和两种退�
 ## 固定 HTTPS 入口
 
 桌面 `connections` 保存可独立启用的 Quick Tunnel、自有服务器 SSH 和 NAS 配置，局域网监听由 `lan` 控制，`lanAddresses: null` 保持所有 IPv4 网卡监听，数组仅绑定选中地址，空数组只保留回环。各监听器共享同一个认证、配对、通知和会话状态。`localAccess: false` 关闭本机网页入口，回环仅允许无会话信息的私有 `/api/health` 检查和保留 Host 的已授权 HTTPS 隧道；停机关闭全部监听器。桌面用系统网卡名称和 IPv4 地址呈现选择，地址不可绑定时失败，不回退至全网卡。旧单入口配置在读取时转换，保存前不改写文件。`bridge/features/network/access.py` 验证地址，生成不含凭据的 Caddy/Nginx Compose 部署包；所有启用的固定 URL 自动加入允许源，第一个启用的固定 URL 优先用于通知链接（显式 clickBase 仍优先）。停用或删除配置时移除对应托管固定源，保留其他手动 HTTPS 源。
+
+`accessMode: external` 只保存用户自管穿透或同机 HTTPS 反代的 `publicUrl`，要求可信 HTTPS 根地址，可包含端口；上游由用户指向电脑网关的实际回环端口。该模式不管理 SSH、frpc 或反代进程，即使 `lan: false`、`localAccess: false` 仍保留受公开 Host 约束的回环上游。跨设备 NAS 继续使用 `nas`，要求启用 LAN 并填写端口匹配、非回环的 `proxyUpstream`。固定入口和扫码前的探测不发送凭据、不跟随重定向、不跳过证书验证；仅核对本次网关实例，不用 `instanceId` 迁移或授予登录凭据。
 
 `bridge/features/network/ssh_tunnel.py` 管理独立 OpenSSH 子进程，复用已有 SSH 目标和身份，以 `-R 127.0.0.1:服务器端口:127.0.0.1:电脑端口` 回程。启用 BatchMode、StrictHostKeyChecking、ExitOnForwardFailure 与保活，不复用 ControlMaster。失败后台退避重连，不阻塞 LAN 服务。各 SSH 配置独立保存状态与日志，状态关联当前网关 PID；服务器 GatewayPorts 应使用 no/clientspecified，不能强制公网绑定。
 

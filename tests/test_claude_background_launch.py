@@ -133,6 +133,8 @@ class ClaudeBackgroundWorker(unittest.TestCase):
     def setUp(self):
         platform = patch('bridge.clients.claude.adapter.sys.platform', 'win32')
         platform.start(); self.addCleanup(platform.stop)
+        cli_profile = patch('bridge.clients.claude.cli_session._profile', return_value=None)
+        cli_profile.start(); self.addCleanup(cli_profile.stop)
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
         self.adapter = Claude(Path(self.temp.name)/'adapter', auto_connect=False)
@@ -185,10 +187,18 @@ class ClaudeBackgroundWorker(unittest.TestCase):
             self.adapter.connect()
         self.assertFalse(worker.is_alive())
         self.assertTrue(cancel.is_set())
-        self.assertEqual(native.call_args.kwargs['target'], self.adapter._connect_background)
-        self.assertIs(native.call_args.kwargs['args'][0], self.adapter.setup_cancel)
-        self.assertTrue(native.call_args.kwargs['kwargs']['foreground'])
+        self.assertEqual(native.call_args.kwargs['target'], self.adapter._connect_native)
+        self.assertEqual(native.call_args.kwargs['args'][0], False)
+        self.assertEqual(native.call_args.kwargs['kwargs'], {'existing_only': False, 'foreground': True})
         native.return_value.start.assert_called_once_with()
+        self.assertEqual(self.adapter.setup_mode, 'native')
+        self.adapter.setup_thread = None
+
+    def test_nonforeground_connect_keeps_background_route_without_fallback(self):
+        with patch('bridge.clients.claude.adapter.threading.Thread') as worker:
+            self.adapter.connect(foreground=False)
+        self.assertEqual(worker.call_args.kwargs['target'], self.adapter._connect_background)
+        self.assertEqual(worker.call_args.kwargs['kwargs']['foreground'], False)
         self.assertEqual(self.adapter.setup_mode, 'background')
         self.adapter.setup_thread = None
 

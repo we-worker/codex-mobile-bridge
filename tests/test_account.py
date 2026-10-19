@@ -1,5 +1,8 @@
 import copy
+import hashlib
+import json
 import tempfile
+import time
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -105,11 +108,48 @@ class AccountTests(unittest.TestCase):
         self.rpc = FakeRPC()
         for config in ({'model_provider': 'proxy'},
                        {'profile': 'api', 'profiles': {'api': {'model_provider': 'proxy'}}},
-                       {'model_providers': {'openai': {'base_url': 'https://proxy.test'}}}):
+                       {'model_providers': {'openai': {'base_url': 'https://proxy.test'}}},
+                       {'model_providers': {'openai': {'aws': {'region': 'fixture'}}}},
+                       {'model_providers': {'openai': {'query_params': {'key': 'fixture'}}}}):
             self.rpc.config = config
             self.rpc.calls.clear()
             self.assertEqual(self.account.read(), {'visible': False, 'loginType': 'api'})
             self.assertEqual([m for m, _ in self.rpc.calls], ['config/read'])
+
+    def test_chatgpt_route_override_retains_native_account_context_and_separates_caches(self):
+        direct=self.account.read()
+        legacy_identity=json.dumps([self.rpc.auth['account'],None],sort_keys=True,separators=(',',':'))
+        self.assertEqual(direct['accountKey'],hashlib.sha256(legacy_identity.encode()).hexdigest())
+        self.rpc.limits['rateLimits']['primary']['usedPercent']=60
+        for config in ({'openai_base_url':'http://127.0.0.1:3425/backend-api/codex'},
+                       {'profile':'proxy','profiles':{'proxy':{'openai_base_url':'https://proxy.test/backend-api/codex'}}}):
+            self.rpc.config=config
+            result=self.account.read(refresh=False)
+            self.assertTrue(result['visible'])
+            self.assertEqual(result['loginType'],'chatgpt')
+            self.assertEqual(result['accountKey'],direct['accountKey'])
+            self.assertEqual(result['limits'][0]['windows'][0]['remainingPercent'],40)
+            self.assertNotIn('_routeCacheKey',result)
+        self.rpc.config={}
+        self.assertEqual(self.account.read(refresh=False)['limits'],direct['limits'])
+        self.rpc.auth['account']={'type':'apiKey'}
+        self.assertEqual(self.account.read(),{'visible':False,'loginType':'api'})
+
+    def test_legacy_pending_reset_survives_route_change_and_blocks_new_request(self):
+        direct=self.account.read()
+        request_id=str(uuid.uuid4())
+        self.account.path.write_text(json.dumps({request_id:{'accountKey':direct['accountKey'],
+                                                'creditId':'card-1','at':time.time()}}))
+        self.rpc.config={'openai_base_url':'https://proxy.test/backend-api/codex'}
+        self.assertEqual(self.account.read()['pendingReset']['requestId'],request_id)
+        with self.assertRaises(AccountError):
+            self.account.consume({'requestId':str(uuid.uuid4()),'accountKey':direct['accountKey'],
+                                  'creditId':'card-1','confirmed':True})
+        self.assertEqual(self.consumes(),[])
+
+    def test_route_changed_during_usage_read_does_not_show_old_route(self):
+        self.rpc.on_limits=lambda: self.rpc.config.update(openai_base_url='https://other.test/backend-api/codex')
+        self.assertFalse(self.account.read()['visible'])
 
     def test_unknown_quota_and_card_count_are_not_zero(self):
         result = normalize_limits({'rateLimits': {'primary': {}}})

@@ -15,12 +15,25 @@
   };
   const sameWorkspace = cwd => typeof cwd === 'string' &&
     normalizedWorkspace(cwd) === normalizedWorkspace(config.cwd);
+  function ownerError(code, message) {
+    window.__codingRemoteInjectionError = message;
+    console.error('Error: BRIDGE_OWNER_' + code + ' ' + message + ' [' +
+      (config.inspectionMarker || config.generation) + ']');
+    throw new Error(message);
+  }
   const existing = window.__claudeMobileBridge;
-  let sameOwner = false;
+  let sameOwner = false, canHandoff = false, safeLegacyStatus = false;
   if (existing) {
     let state;
     try {
       state = existing.status();
+      // Early file connectors cleared busy at their reply deadline while the
+      // Desktop operation could still be running. Their status cannot fence it.
+      safeLegacyStatus = state?.transport === 'file' ?
+        typeof state.suspended === 'boolean' && typeof state.writing === 'boolean' :
+        state?.transport === 'cdp' && typeof state.busy === 'boolean';
+      canHandoff = state?.transport === 'file' &&
+        state.connectorRevision === config.connectorRevision && typeof existing.handoff === 'function';
       if (typeof existing.owns === 'function') sameOwner = existing.owns(config.cwd) === true;
       else if (state?.transport === 'file' && state.sessionId) {
         // Legacy connectors expose only a session ID. Check Desktop's live
@@ -31,21 +44,36 @@
         sameOwner = sameWorkspace(session?.cwd);
       }
     } catch { /* Unknown ownership is occupied, never permission to replace. */ }
-    if (!state || state.busy || state.writing || !sameOwner && state.suspended !== true) {
-      const message = sameOwner ? 'Claude 桥接仍有请求进行中，请稍后重试连接' :
-        'Claude 桥接连接被其他网关占用，请先停止旧网关；旧版连接还需重新加载 Claude';
-      window.__codingRemoteInjectionError = message;
-      console.error('Error: ' + message + ' [' + (config.inspectionMarker || config.generation) + ']');
-      throw new Error(message);
+    if (!state || state.busy && !state.handoffPending || state.writing ||
+        sameOwner && !safeLegacyStatus ||
+        !sameOwner && state.suspended !== true && !canHandoff) {
+      const message = state?.busy && !state.handoffPending || state?.writing ?
+        'Claude 桥接仍有请求进行中，请稍后重试连接' :
+        '旧版 Claude 桥接无法核验在途请求；请确认当前任务结束后重新加载或退出重开 Claude Desktop，再初始化新网关（只需迁移一次）';
+      ownerError(state?.busy && !state.handoffPending || state?.writing ? 'BUSY' : 'LEGACY', message);
     }
   }
-  function replaceExisting() {
+  async function replaceExisting() {
     if (!existing) return;
-    const state = existing.status();
+    let state;
+    try { state = existing.status(); } catch {
+      ownerError('UNCONFIRMED', 'Claude 桥接状态已变化，请刷新后重试连接');
+    }
+    if (!sameOwner && state?.suspended !== true) {
+      let released = false;
+      try { released = canHandoff && await existing.handoff(config.cwd); } catch {}
+      if (!released)
+        ownerError('UNCONFIRMED', '旧网关仍有未确认请求或未完成接替，请在旧网关检查结果后重试');
+    }
+    try { state = existing.status(); } catch {
+      ownerError('UNCONFIRMED', 'Claude 桥接状态已变化，请刷新后重试连接');
+    }
     if (!state || window.__claudeMobileBridge !== existing || state.busy || state.writing ||
         !sameOwner && state.suspended !== true)
-      throw new Error('Claude 桥接状态已变化，请刷新后重试连接');
-    existing.stop();
+      ownerError('UNCONFIRMED', 'Claude 桥接状态已变化，请刷新后重试连接');
+    try { existing.stop(); } catch {
+      ownerError('UNCONFIRMED', 'Claude 桥接状态已变化，请刷新后重试连接');
+    }
   }
   const encoder = new TextEncoder();
   const key = await crypto.subtle.importKey('raw', encoder.encode(config.token),
@@ -98,8 +126,11 @@
       }
     }
   }
-  function activate(bridge) {
-    replaceExisting();
+  async function activate(bridge) {
+    await replaceExisting();
+    // A second injector may have completed the same asynchronous handoff.
+    if (window.__claudeMobileBridge !== existing)
+      ownerError('UNCONFIRMED', 'Claude 桥接状态已变化，请刷新后重试连接');
     try {
       installObservers();
       window.__claudeMobileBridge = bridge;
@@ -184,15 +215,24 @@
     if (method === 'getAll' && Array.isArray(result)) return result.map(publicSession);
     if (method === 'getSession') return publicSession(result);
     if (method === 'getTranscript' && Array.isArray(result)) return result
-      .filter(row => ['user', 'assistant', 'result'].includes(row.type || row.message?.role))
+      .filter(row => ['user', 'assistant', 'result'].includes(row.type || row.message?.role) ||
+        row.type==='system'&&row.subtype==='compact_boundary')
       .map(row => {
-        if(row.type==='result')return Object.fromEntries(
+        if(row.type==='system')return {type:'system',subtype:'compact_boundary'};
+        if(row.type==='result'){
+          const modelUsage=row.modelUsage&&typeof row.modelUsage==='object'&&!Array.isArray(row.modelUsage)
+            ? Object.fromEntries(Object.entries(row.modelUsage).filter(([model,usage])=>
+              model&&usage&&typeof usage==='object'&&Number.isSafeInteger(usage.contextWindow)&&usage.contextWindow>0)
+              .map(([model,usage])=>[model,{contextWindow:usage.contextWindow}])) : {};
+          return Object.fromEntries(
           ['type','uuid','subtype'].filter(k=>typeof row[k]==='string').map(k=>[k,row[k]])
           .concat(['is_error','isSidechain','isSyntheticResult','isSynthetic','isMeta','isCompactSummary']
             .filter(k=>typeof row[k]==='boolean').map(k=>[k,row[k]]),
             typeof row.num_turns==='number'&&Number.isFinite(row.num_turns)?[['num_turns',row.num_turns]]:[],
             'parent_tool_use_id' in row?[['parent_tool_use_id',row.parent_tool_use_id==null?null:
-              typeof row.parent_tool_use_id==='string'?row.parent_tool_use_id:'nested']]:[]));
+              typeof row.parent_tool_use_id==='string'?row.parent_tool_use_id:'nested']]:[],
+            Object.keys(modelUsage).length?[['modelUsage',modelUsage]]:[]));
+        }
         const source = row.message || row;
         let content = typeof source.content === 'string' ? source.content :
           (Array.isArray(source.content) ? source.content : []).filter(b =>
@@ -210,9 +250,16 @@
             else if (!tool) content.push({type:'tool_result',content:detail});
           }
         }
-        return {type:row.type,uuid:row.uuid,isSynthetic:row.isSynthetic === true,isMeta:row.isMeta === true,
+        const usage=source.usage&&typeof source.usage==='object'?Object.fromEntries(
+          ['input_tokens','cache_creation_input_tokens','cache_read_input_tokens','context_window']
+            .filter(key=>Number.isSafeInteger(source.usage[key])&&source.usage[key]>=0)
+            .map(key=>[key,source.usage[key]])):null;
+        return {type:row.type||source.role,uuid:row.uuid,isSynthetic:row.isSynthetic === true,isMeta:row.isMeta === true,
+          isSidechain:row.isSidechain === true,
+          ...(typeof row.parent_tool_use_id==='string'?{parent_tool_use_id:row.parent_tool_use_id}:{}),
           message:{id:source.id,role:source.role || row.type,content,
             ...(typeof source.model==='string'?{model:source.model}:{}),
+            ...(usage&&Object.keys(usage).length?{usage}:{}),
             ...(typeof source.effort==='string'?{effort:source.effort}:{})}};
       });
     return result ?? null;
@@ -257,7 +304,7 @@
   }
   if (config.transport === 'cdp') {
     let stopped = false, inFlight = 0, highWater = 0;
-    activate({
+    await activate({
       stop() { stopped = true; for (const undo of restore) undo(); },
       owns(cwd) { return sameWorkspace(cwd); },
       status() { return {transport:'cdp', stopped, busy:inFlight > 0, connectorRevision:config.connectorRevision, surfaces:capabilities}; },
@@ -309,6 +356,7 @@
   let generation = initial.generation;
   const generations = new Set([generation]);
   let stopped = false, suspended = initial.type === 'stop', busy = false, inFlight = 0, writing = 0, highWater = initial.seq, lastWrite = 0, dirty = true;
+  let handoff = null, completedHandoff = null;
   let wake, wakeRequested=false;
   const wakePoll=()=>{wakeRequested=true;wake?.();};
   const pause=async()=>{
@@ -320,14 +368,39 @@
     wakeRequested=false;
   };
   let state = {seq: 0, done: false};
-  activate({stop() { stopped = true;wakePoll(); for (const undo of restore) undo(); },
+  await activate({stop() { stopped = true;wakePoll(); for (const undo of restore) undo(); },
     owns(cwd) { return sameWorkspace(cwd); },
-    status() { return {transport: 'file', stopped, suspended, busy:busy || inFlight > 0,
-      writing:writing > 0, sessionId, lastWrite, connectorRevision:config.connectorRevision}; }});
+    status() { return {transport: 'file', stopped, suspended, busy:busy || inFlight > 0 || !!handoff,
+      handoffPending:!!handoff,
+      writing:writing > 0, sessionId, lastWrite, connectorRevision:config.connectorRevision}; },
+    async handoff(cwd) {
+      if (sameWorkspace(cwd) || stopped || suspended) return false;
+      if (handoff) return bounded(handoff.promise,6000,false).catch(() => false);
+      if (busy || inFlight || writing) return false;
+      let resolve;
+      const promise = new Promise(done => { resolve = done; });
+      const pending = {id:null,promise,resolve};
+      handoff = pending;
+      let current;
+      try { current = await read(); }
+      catch { if (handoff === pending) handoff = null; resolve(false); return false; }
+      if (handoff !== pending) return false;
+      if (busy || inFlight || writing || stopped || suspended ||
+          !current || current.generation !== generation || current.type !== 'idle' ||
+          current.seq !== highWater || highWater > 0 && state.done !== true) {
+        handoff = null; resolve(false); return false;
+      }
+      pending.id = generation + ':' + highWater + ':' + Date.now();
+      dirty = true; wakePoll();
+      // A timeout does not revoke the offer: the old writer may already have
+      // fenced itself and its acknowledgement may still be reaching Desktop.
+      return bounded(promise,6000,false).catch(() => false);
+    }});
   async function publish() {
     writing++;
     try {
-      let value = {...state, generation, connected: !stopped && !suspended,
+      let value = {...state, generation, connected: !stopped && !suspended && !handoff?.id,
+        ...(handoff?.id ? {handoffId:handoff.id} : {}),
         timestamp: Date.now() / 1000, connectorRevision:config.connectorRevision, surfaces: capabilities};
       let text = await pack(value);
       if (stopped) return;
@@ -352,6 +425,15 @@
         continue;
       }
       if (stopped) break;
+      if (handoff && msg?.type === 'handoff-ack' && msg.generation === generation &&
+          msg.handoffId === handoff.id && msg.seq === highWater) {
+        completedHandoff = handoff; handoff = null; suspended = true; stopped = true;
+        break;
+      }
+      if (handoff && msg?.type === 'request' && msg.generation === generation &&
+          Number.isSafeInteger(msg.seq) && msg.seq > highWater) {
+        const pending = handoff; handoff = null; pending.resolve(false); dirty = true;
+      }
       if (msg && msg.generation !== generation) {
         // A signed idle packet is the only restart handshake. Never replay a request.
         if (!config.reconnect || generations.has(msg.generation) || msg.type !== 'idle' || msg.seq !== 0) {
@@ -361,6 +443,7 @@
         highWater = 0; state = {seq: 0, done: false}; busy = false; suspended = false; dirty = true;
       }
       if (msg?.type === 'stop') {
+        if (handoff) { const pending = handoff; handoff = null; pending.resolve(false); }
         if (!config.reconnect) break;
         if (!suspended) { suspended = true; dirty = true; }
       }
@@ -402,5 +485,7 @@
       await pause();
     }
   } catch (error) { window.__codingRemoteInjectionError = String(error.message || error); console.error('Claude 文件桥接停止：', error); }
-  finally { stopped = true; for (const undo of restore) undo(); await publish().catch(() => {}); }
+  finally { stopped = true; for (const undo of restore) undo(); await publish().catch(() => {});
+    if (handoff) { handoff.resolve(false); handoff = null; }
+    completedHandoff?.resolve(true); }
 })();

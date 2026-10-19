@@ -1,6 +1,6 @@
 [package]
 name = "codex-mobile-bridge-tauri"
-version = "2.0.3"
+version = "2.1.1"
 edition = "2021"
 publish = false
 license = "MIT"

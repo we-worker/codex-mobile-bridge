@@ -3,12 +3,14 @@ import json
 import os
 import tempfile
 import threading
+import traceback
 import unittest
 import uuid
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from bridge.features.accounts import accounts as accounts_module
 from bridge.features.accounts.account import Account
 from bridge.features.accounts.accounts import Accounts, ManagedRPC, operation, private_bytes, private_json
 from bridge.clients.desktop_app import DesktopApp
@@ -24,6 +26,65 @@ def wait_for_account_worker(test):
         test.assertFalse(test.manager.thread.is_alive(), 'account worker did not finish within 30 seconds')
 
 
+class PrivateWriteTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(dir=ROOT/'.tmp')
+        self.addCleanup(self.tmp.cleanup)
+        self.path = Path(self.tmp.name)/'config.toml'
+        self.path.write_bytes(b'original')
+
+    def test_windows_transient_sharing_denial_retries_atomic_replace(self):
+        original_replace = os.replace
+        attempts = []
+        def replace(source, destination):
+            attempts.append(source)
+            if len(attempts) <= 2:
+                error = PermissionError('temporary sharing denial')
+                error.winerror = (5, 32)[len(attempts)-1]
+                raise error
+            return original_replace(source, destination)
+        windows = SimpleNamespace(name='nt', fdopen=os.fdopen, fsync=os.fsync, replace=replace)
+        clock = SimpleNamespace(monotonic=Mock(side_effect=[0, .01, .02]), sleep=Mock())
+        with patch.object(accounts_module, 'os', windows), patch.object(accounts_module, 'time', clock):
+            private_bytes(self.path, b'restored')
+        self.assertEqual(self.path.read_bytes(), b'restored')
+        self.assertEqual(len(attempts), 3)
+        self.assertEqual(clock.sleep.call_count, 2)
+        self.assertEqual(list(self.path.parent.glob('.account-*')), [])
+
+    def test_windows_persistent_denial_keeps_original_and_cleans_source(self):
+        attempts = []
+        def replace(source, destination):
+            attempts.append(source)
+            error = PermissionError('persistent sharing denial')
+            error.winerror = 5
+            raise error
+        windows = SimpleNamespace(name='nt', fdopen=os.fdopen, fsync=os.fsync, replace=replace)
+        clock = SimpleNamespace(monotonic=Mock(side_effect=[0, 1, 2]), sleep=Mock())
+        with patch.object(accounts_module, 'os', windows), patch.object(accounts_module, 'time', clock):
+            with self.assertRaises(PermissionError):
+                private_bytes(self.path, b'uncommitted')
+        self.assertEqual(len(attempts), 2)
+        clock.sleep.assert_called_once_with(.05)
+        self.assertEqual(self.path.read_bytes(), b'original')
+        self.assertEqual(list(self.path.parent.glob('.account-*')), [])
+
+    def test_other_denial_is_not_retried(self):
+        replace = Mock()
+        error = PermissionError('different denial')
+        error.winerror = 13
+        replace.side_effect = error
+        windows = SimpleNamespace(name='nt', fdopen=os.fdopen, fsync=os.fsync, replace=replace)
+        clock = SimpleNamespace(monotonic=Mock(return_value=0), sleep=Mock())
+        with patch.object(accounts_module, 'os', windows), patch.object(accounts_module, 'time', clock):
+            with self.assertRaises(PermissionError):
+                private_bytes(self.path, b'uncommitted')
+        replace.assert_called_once()
+        clock.sleep.assert_not_called()
+        self.assertEqual(self.path.read_bytes(), b'original')
+        self.assertEqual(list(self.path.parent.glob('.account-*')), [])
+
+
 class AccountsTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(dir=ROOT/'.tmp')
@@ -37,11 +98,18 @@ class AccountsTests(unittest.TestCase):
             catalog_reader=SimpleNamespace(executable=self.root/'runtime', cache={'old': 1}),
             remote_bridges={}, live={}, submissions={}, lock=threading.RLock(),
             account=Account(self.home,self.root,executable=self.root/'runtime'), ipc=Mock(), _disconnected=Mock())
+        self.bridge.cli_sessions = SimpleNamespace(lock=threading.RLock(), joined={}, attaching=set(),
+            requests={}, client=SimpleNamespace(socket_path=str(self.root/'missing.sock')),
+            daemon_may_be_running=Mock(return_value=False))
         self.manager = Accounts(self.bridge)
         self.bridge.accounts = self.manager
         self.manager.index['desktopExecutable'] = '/fixture/Desktop'
         self.app = Mock()
         self.app.executable = Path('/fixture/Desktop')
+        runtime_probe = patch('bridge.features.accounts.cli_sync.LocalCliSync._codex_runtime',
+                              return_value=(True, self.app))
+        runtime_probe.start()
+        self.addCleanup(runtime_probe.stop)
         self.manager.wait_stopped = Mock()
         self.manager.wait_ready = Mock()
         self.original = self.manager.snapshot_files()
@@ -85,20 +153,35 @@ class AccountsTests(unittest.TestCase):
     def test_chat_catalog_and_account_details_use_the_same_selected_upstream(self):
         row=self.api(name='Gemini access');self.manager.mark_active(row['id'])
         self.manager.info.entries={}
-        with patch('bridge.features.accounts.accounts.model_ids', return_value=['gemini-flash','gemini-pro']) as upstream:
+        with patch('bridge.features.accounts.accounts.model_catalog', return_value=[{'id': 'gemini-flash', 'name': 'Flash', 'efforts': ['low', 'high'], 'defaultEffort': 'low'}, {'id': 'gemini-pro', 'name': 'Pro', 'efforts': []}]) as upstream:
             details=self.manager.api_models(row, refresh=True)
             chat=self.manager.current_models()
         self.assertEqual(chat['models'],details)
+        self.assertEqual(chat['models'][0]['efforts'], ['low', 'high'])
         self.assertEqual(chat['modelSource'],'api');self.assertEqual(chat['modelAccessName'],'Gemini access')
+        self.assertEqual(chat['cache']['identity'], self.manager.current_model_identity())
+        self.assertIsInstance(chat['cache']['updatedAt'], float)
         self.assertEqual(upstream.call_count,1)
         self.assertNotIn('secret-fixture',json.dumps(chat))
 
     def test_changed_live_api_credentials_do_not_query_saved_account_models(self):
         row=self.api();self.manager.mark_active(row['id'])
         private_json(self.home/'auth.json',{'OPENAI_API_KEY':'changed-fixture-key'})
-        with patch('bridge.features.accounts.accounts.model_ids') as upstream:
+        with patch('bridge.features.accounts.accounts.model_catalog') as upstream:
             self.assertIsNone(self.manager.current_models(refresh=True))
         upstream.assert_not_called()
+        self.assertIsNone(self.manager.current_model_identity())
+
+    def test_official_catalog_identity_uses_account_home_not_chat_directory(self):
+        from bridge.clients.codex.catalog import Catalog
+        reader = Catalog(self.home, executable=self.root/'runtime')
+        self.bridge.catalog_reader = reader
+        self.manager.index['activeId'] = 'a' * 32
+        with patch.object(self.manager, 'active_matches', return_value=True), \
+             patch.object(self.manager, 'row', return_value={'id': 'a' * 32, 'kind': 'chatgpt'}):
+            identity = self.manager.current_model_identity()
+        self.assertEqual(identity, reader.model_identity(str(self.home), 'openai'))
+        self.assertNotEqual(identity, reader.model_identity('/another-chat', 'openai'))
 
     def test_account_switch_invalidates_split_model_catalog(self):
         from bridge.clients.codex.catalog import Catalog
@@ -229,9 +312,14 @@ class AccountsTests(unittest.TestCase):
             self.assertFalse(self.bridge.account.lock.acquire(blocking=False))
             original_restore(snapshot)
         self.manager.restore_files=restore
-        with patch('bridge.features.accounts.accounts.DesktopApp',return_value=self.app):
+        recovery_errors=[]
+        original_phase=self.manager.phase
+        def record_phase(name,**values):
+            if name=='interrupted':recovery_errors.append(traceback.format_exc())
+            return original_phase(name,**values)
+        with patch.object(self.manager,'phase',side_effect=record_phase), patch('bridge.features.accounts.accounts.DesktopApp',return_value=self.app):
             self.manager.recover({'confirmed':True});wait_for_account_worker(self)
-        self.assertEqual(self.manager.state['phase'],'restored')
+        self.assertEqual(self.manager.state['phase'],'restored',recovery_errors[-1] if recovery_errors else 'no recovery exception captured')
         self.assertEqual(self.manager.snapshot_files(),self.original)
 
     def test_busy_and_queued_tasks_block_before_shutdown(self):
@@ -242,6 +330,25 @@ class AccountsTests(unittest.TestCase):
         self.bridge.submissions={};self.bridge.live={'one':SimpleNamespace(view=lambda:{'status':'active','connected':True,'title':'Busy fixture'})}
         with self.assertRaises(ValueError):self.switch(row)
         self.app.stop.assert_not_called()
+
+    def test_unchecked_shared_switch_blocks_joined_cli_before_desktop_shutdown(self):
+        row = self.api()
+        self.bridge.cli_sessions.joined['fixture'] = object()
+        with self.assertRaisesRegex(ValueError, 'CLI 会话'):
+            self.switch(row, syncLocalCli=False)
+        self.app.stop.assert_not_called()
+        self.assertEqual(self.manager.snapshot_files(), self.original)
+
+    def test_cli_join_after_desktop_stop_blocks_shared_file_write(self):
+        row = self.api()
+        self.manager.prepare = self.prepare
+        def joined_after_stop():
+            self.bridge.cli_sessions.joined['fixture'] = object()
+        self.manager.wait_stopped = Mock(side_effect=joined_after_stop)
+        self.switch(row, syncLocalCli=False)
+        wait_for_account_worker(self)
+        self.assertEqual(self.manager.snapshot_files(), self.original)
+        self.assertEqual(self.manager.state['phase'], 'restored')
 
     def test_disconnected_active_history_and_connected_error_do_not_block(self):
         self.bridge.live={
@@ -295,7 +402,7 @@ class AccountsTests(unittest.TestCase):
         row=self.api();self.manager.mark_active(row['id']);self.bridge.host='local'
         self.bridge.ipc.request.return_value={'result':{'ok':True}}
         for provider in ('openai','bridge_api'):
-            session=SimpleNamespace(id='fixture',owner='desktop',view=lambda:{'provider':provider})
+            session=SimpleNamespace(id='fixture',owner='desktop',runtime='desktop',view=lambda:{'provider':provider})
             self.assertEqual(Bridge._call(self.bridge,session,'thread-follower-start-turn',{}),{'ok':True})
         self.assertEqual(self.bridge.ipc.request.call_count,2)
 
@@ -303,7 +410,7 @@ class AccountsTests(unittest.TestCase):
         row=self.api();self.manager.mark_active(row['id'])
         self.bridge.host='local'
         self.bridge.ipc.request.return_value={'result':{'ok':True}}
-        session=SimpleNamespace(id='fixture',owner='original-desktop',view=lambda:{'provider':'other-custom'})
+        session=SimpleNamespace(id='fixture',owner='original-desktop',runtime='desktop',view=lambda:{'provider':'other-custom'})
         self.assertEqual(Bridge._call(self.bridge,session,'thread-follower-start-turn',{}), {'ok':True})
         self.assertEqual(self.bridge.ipc.request.call_args.kwargs['target'], 'original-desktop')
 

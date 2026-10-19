@@ -28,6 +28,10 @@ if(command==='dev'){
   env.CMB_PYTHON=env.CMB_PYTHON||(fs.existsSync(local)?local:process.platform==='win32'?'python':'python3');
 }
 const cli=require.resolve('@tauri-apps/cli/tauri.js');
-const result=spawnSync(process.execPath,[cli,command,...process.argv.slice(3)],{cwd:root,env,stdio:'inherit'});
+const args=process.argv.slice(3);
+// npm on Windows can consume the unknown `--target` option while leaving its
+// value behind. A lone Rust target triple is unambiguous, so restore the flag.
+if(command==='build'&&args.length===1&&/^[a-z0-9_]+(?:-[a-z0-9_]+)+$/i.test(args[0]))args.unshift('--target');
+const result=spawnSync(process.execPath,[cli,command,...args],{cwd:root,env,stdio:'inherit'});
 if(result.error)throw result.error;
 process.exitCode=result.status??1;

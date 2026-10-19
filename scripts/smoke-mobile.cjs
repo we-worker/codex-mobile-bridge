@@ -9,7 +9,8 @@ app.whenReady().then(async()=>{
   try{
     await window.loadURL(url.href);
     await window.webContents.executeJavaScript(fs.readFileSync(path.join(__dirname,'../tests/browser/i18n.browser.js'),'utf8'));
-    const result=await window.webContents.executeJavaScript('runI18nTests()');
+    const result=await window.webContents.executeJavaScript('(()=>{try{return runI18nTests();}catch(error){return {error:error.message,stack:error.stack};}})()');
+    assert.ok(!result.error,result.stack||result.error);
     assert.equal(result.passed,11);console.log(JSON.stringify(result));app.exit(0);
   }catch(error){console.error(error);app.exit(1);}
 });

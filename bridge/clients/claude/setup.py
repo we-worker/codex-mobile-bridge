@@ -117,12 +117,13 @@ def developer_mode_enabled(data_home):
         return False
 
 
-def console_source(source, config):
+def console_source(source, config, *, multiline=False):
     """Normalize our controlled, semicolon-terminated IIFE before adding data.
 
     Only standalone comment lines are removed. The connector has no template
     literals or inline line comments; parity tests run this exact transformation.
     Configuration is inserted afterwards so path/string whitespace is untouched.
+    Windows can retain a few bounded lines for the Console accessibility tree.
     """
     lines, block = [], False
     for line in source.splitlines():
@@ -138,8 +139,25 @@ def console_source(source, config):
         if '`' in line:
             raise ValueError('连接脚本格式不支持，请重新构建应用')
         lines.append(line)
-    script = '/* codex bridge connector */' + ' '.join(lines)
-    return script.replace('__BRIDGE_CONFIG__', json.dumps(config, ensure_ascii=True))
+    marker = '/* codex bridge connector */'
+    encoded_config = json.dumps(config, ensure_ascii=True)
+    if not multiline:
+        return (marker + ' '.join(lines)).replace('__BRIDGE_CONFIG__', encoded_config)
+    rendered = [line.replace('__BRIDGE_CONFIG__', encoded_config) for line in lines]
+    groups, pending = [], []
+    for line in rendered:
+        pending.append(line)
+        while len((marker if not groups else '') + ' '.join(pending)) > 3500:
+            for cut in range(len(pending) - 1, 0, -1):
+                if (pending[cut - 1].endswith((';', '{')) and
+                        len((marker if not groups else '') + ' '.join(pending[:cut])) <= 3500):
+                    break
+            else:
+                raise ValueError('连接脚本单行过长，请重新构建应用')
+            groups.append((marker if not groups else '') + ' '.join(pending[:cut]))
+            pending = pending[cut:]
+    groups.append((marker if not groups else '') + ' '.join(pending))
+    return '\n'.join(groups)
 
 
 def _native_action_macos(action, *, pid=None, executable=None, script=None, cancel_path=None, cancelled=None, recovered=None):

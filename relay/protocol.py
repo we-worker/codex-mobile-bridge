@@ -6,6 +6,7 @@ from urllib.parse import urlsplit
 MAX_BODY = 20 * 1024 * 1024
 MAX_FRAME = (MAX_BODY + 2) // 3 * 4 + 16384
 UUID = r'[0-9a-f-]{36}'
+DIAGNOSTIC_UUID = r'[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
 THREAD = re.compile(r'/api/sessions/' + UUID + r'(?:/(.*))?')
 DESKTOP = re.compile(r'/api/desktop-sessions/(?:deepseek|claude)/(.*)')
 READ = {'', 'catalog', 'poll', 'timeline', 'detail', 'changes', 'notifications',
@@ -43,6 +44,10 @@ def validate(method, path, size=0):
         raise ValueError('Unsupported request or body too large')
     if method == 'GET' and size:
         raise ValueError('GET body is not allowed')
+    if p.path == '/api/sessions/diagnostics':
+        if method == 'GET' and (not p.query or re.fullmatch('thread=' + DIAGNOSTIC_UUID, p.query)):
+            return
+        raise PermissionError('This operation is not available through the shared relay')
     if ((method == 'GET' and (p.path == '/api/mobile/update' or re.fullmatch(r'/api/mobile/update/(?:status|packages)/[a-f0-9]{64}', p.path)))
             or (method == 'POST' and p.path == '/api/mobile/update/prepare')):
         return
@@ -54,6 +59,8 @@ def validate(method, path, size=0):
     if p.path in ('/api/clients', '/api/file-transfer'):
         return
     if p.path == '/api/clients/claude/reconnect' and method == 'POST':
+        return
+    if p.path == '/api/cli-access' and not p.query:
         return
     desktop = DESKTOP.fullmatch(p.path)
     if desktop:

@@ -52,7 +52,7 @@ class ClientNavigation {
     for(const [id,name] of [['codex','Codex'],['claude','Claude'],['deepseek','DeepSeek Harness']]){const row=document.createElement('label'),box=document.createElement('input'),caption=document.createElement('span');row.className='display-option';box.type='checkbox';box.id='appearance-switch-'+id;box.checked=this.preference('switch:'+id);box.onchange=()=>{this.preference('switch:'+id,box.checked);this.paint();};caption.textContent=name;row.append(caption,box);switchPreferences.append(row);}const switchHint=document.createElement('p');switchHint.className='muted';switchHint.dataset.i18n='隐藏图标不关闭应用，仍可在应用管理中打开聊天。';switchHint.textContent=BridgeI18n.t('隐藏图标不关闭应用，仍可在应用管理中打开聊天。');switchPreferences.append(switchHint);preferences.after(switchPreferences);this.switchPreferences=switchPreferences;
     const swipeRow=document.createElement('label'),swipeBox=document.createElement('input'),swipeCaption=document.createElement('span');swipeRow.className='display-option';swipeBox.type='checkbox';swipeBox.id='appearance-swipe-clients';swipeBox.checked=this.preference('swipe-clients',undefined,true);swipeBox.onchange=()=>{this.preference('swipe-clients',swipeBox.checked);this.cancelListSwipe();};swipeCaption.dataset.i18n='左右滑动切换应用';swipeCaption.textContent=BridgeI18n.t('左右滑动切换应用');swipeRow.append(swipeCaption,swipeBox);switchPreferences.append(swipeRow);this.bindListGestures();
     const language=document.getElementById('language');if(language)preferences.append(language.closest('label'));
-    const applications=make('应用管理',()=>{settings.close();this.openManager();});applications.dataset.i18nAriaLabel='应用管理';applications.setAttribute('aria-label',BridgeI18n.t('应用管理'));this.settingsNotifications=make('第三方通知',()=>{if(window.BridgeSharedRelay)return;settings.close();this.notifications.click();});this.settingsNotifications.removeAttribute('data-i18n');this.settingsNotifications.dataset.i18nAriaLabel='第三方通知';this.settingsNotifications.setAttribute('aria-label',BridgeI18n.t('第三方通知'));this.settingsActions.append(applications,this.settingsNotifications);
+    const applications=make('应用管理',()=>{settings.close();this.openManager();});applications.dataset.i18nAriaLabel='应用管理';applications.setAttribute('aria-label',BridgeI18n.t('应用管理'));this.settingsNotifications=make('第三方通知',()=>{if(window.BridgeSharedRelay)return;settings.close();this.notifications.click();});this.settingsNotifications.removeAttribute('data-i18n');this.settingsNotifications.dataset.i18nAriaLabel='第三方通知';this.settingsNotifications.setAttribute('aria-label',BridgeI18n.t('第三方通知'));this.settingsActions.append(applications,this.settingsNotifications,document.getElementById('open-session-diagnostics'));
     this.account=document.getElementById('accounts-button');this.notifications=document.getElementById('pushplus-settings');
     // Older native shells move these controls after page load. Keep the new
     // two-row navigation intact while preserving their native home action.
@@ -73,9 +73,9 @@ class ClientNavigation {
   syncHome(){this.home.hidden=!BridgeHost.hasNativeLayout();}
   paintSettingsActions(){
     this.settingsNotifications.hidden=!!window.BridgeSharedRelay;
-    const count=1+Number(!this.switchToggle.hidden)+Number(!this.settingsNotifications.hidden);
+    const count=2+Number(!this.switchToggle.hidden)+Number(!this.settingsNotifications.hidden);
+    this.settingsActions.classList.toggle('three-actions',count===3);
     this.settingsActions.classList.toggle('two-actions',count===2);
-    this.settingsActions.classList.toggle('one-action',count===1);
   }
   preference(key,value,fallback=true){if(value!==undefined)localStorage.setItem('navigation:'+key,String(value));const saved=localStorage.getItem('navigation:'+key);return saved==null?fallback:saved!=='false';}
   bindListGestures(){
@@ -94,9 +94,11 @@ class ClientNavigation {
   listTouch(phase,event,list){
     if(!this.preference('swipe-clients',undefined,true)||document.querySelector('dialog[open]')||this.clients.filter(c=>c.enabled).length<2){this.cancelListSwipe();return;}
     if(phase==='start'){
+      const settling=this.swipePreview;
+      if(settling?.commitTarget&&settling.provider===this.provider&&this.clients.some(client=>client.id===settling.commitTarget&&client.enabled))this.choose(settling.commitTarget).catch(error=>this.notify(error.message));
       this.cancelListSwipe();const touch=event.touches[0],control=event.target.closest('input,select,textarea,button,a,[contenteditable="true"],summary');
       if(event.touches.length!==1||!touch||touch.clientX<28||touch.clientX>innerWidth-28||event.target.closest('.list-heading,.chat-list-toolbar,.client-navigation')||(control&&!control.closest('.session'))||window.getSelection()?.toString())return;
-      this.listGesture={list,provider:this.provider,id:touch.identifier,x:touch.clientX,y:touch.clientY,time:Date.now(),horizontal:false};return;
+      this.listGesture={list,paintList:this.provider==='codex'?this.sidebar:this.view.list,provider:this.provider,id:touch.identifier,x:touch.clientX,y:touch.clientY,time:Date.now(),horizontal:false};return;
     }
     const gesture=this.listGesture;if(!gesture||gesture.list!==list)return;if(gesture.provider!==this.provider){this.cancelListSwipe();return;}
     if(event.touches.length>(phase==='end'?0:1)){this.cancelListSwipe();return;}
@@ -115,6 +117,8 @@ class ClientNavigation {
   swipeRows(){return isCodexClient(this.provider)?document.getElementById('sessions'):this.view.rowsRoot;}
   copySwipeRows(source){
     const clone=source.cloneNode(true);clone.classList.add('client-swipe-rows');
+    const gutter=source.offsetWidth-source.clientWidth;
+    if(gutter>0)clone.style.paddingRight=(parseFloat(getComputedStyle(source).paddingRight)+gutter)+'px';
     // A preview is visual only: no duplicate IDs, focus targets or native actions.
     for(const node of [clone,...clone.querySelectorAll('*')]){
       for(const attr of [...node.attributes])if(['id','name','href','autofocus'].includes(attr.name)||attr.name.startsWith('on'))node.removeAttribute(attr.name);
@@ -134,7 +138,7 @@ class ClientNavigation {
     let preview=this.swipePreview;
     if(preview&&(preview.next!==next?.id||preview.direction!==direction)){this.cancelListSwipe();this.listGesture=gesture;preview=null;}
     if(!preview){
-      const source=this.swipeRows(),rect=source.getBoundingClientRect(),listRect=gesture.list.getBoundingClientRect();
+      const source=this.swipeRows(),rect=source.getBoundingClientRect(),listRect=(gesture.paintList||gesture.list).getBoundingClientRect();
       const root=document.createElement('div');root.className='client-swipe-preview';root.setAttribute('aria-hidden','true');root.inert=true;
       Object.assign(root.style,{left:listRect.left+'px',top:rect.top+'px',width:listRect.width+'px',height:Math.max(0,this.navigation.getBoundingClientRect().top-rect.top)+'px'});
       const current=document.createElement('div'),incoming=document.createElement('div');current.className=incoming.className='client-swipe-page';
@@ -161,6 +165,7 @@ class ClientNavigation {
   }
   async finishListSwipe(gesture,dx,next){
     this.dragListSwipe(gesture,dx);const preview=this.swipePreview,commit=next&&preview.next===next;
+    preview.commitTarget=commit?next:null;
     const end=commit?-preview.direction*preview.width:0;
     try{
       if(!window.matchMedia('(prefers-reduced-motion: reduce)').matches){
@@ -183,12 +188,12 @@ class ClientNavigation {
     const enabled=this.clients.filter(c=>c.enabled);
     const id=enabled.some(c=>c.id===this.provider)?this.provider:enabled[0]?.id||null;
     if(id!==this.provider||this.view.provider!==(isCodexClient(id)?'codex':id||'codex'))this.choose(id,{activate:false}).catch(error=>this.notify(error.message));
-    else this.paint();
+    else{if(id&&this.view.previewOnly)this.view.confirmCachedList();this.paint();}
   }
   async refresh(){
     if(this.loading||this.pending.size||this.choosing||document.getElementById('app').hidden)return;
     this.loading=true;const revision=this.revision;
-    try{const data=await ClientLifecycle.request(signal=>this.request('/api/clients',undefined,signal),{timeout:this.statusTimeout??10000,uncertain:false,message:'客户端状态读取超时，请重试。'});if(revision===this.revision){ClientLifecycle.reconcile(this.operationFailures,data.clients);this.applyClients(data);}}
+    try{const data=await ClientLifecycle.request(signal=>this.request('/api/clients',undefined,signal),{timeout:this.statusTimeout??10000,uncertain:false,message:'客户端状态读取超时，请重试。'});if(revision===this.revision){this.statusPending=data.pending===true;if(data.refreshError)throw Error(data.refreshError);if(!this.statusPending){ClientLifecycle.reconcile(this.operationFailures,data.clients);this.applyClients(data);}}}
     catch(error){this.notify(error.message);}finally{this.loading=false;this.paint();}
   }
   clear(){this.revision++;this.clients=[];this.choosing=null;this.pending.clear();this.operationFailures?.clear();this.swipeSnapshots.clear();}
@@ -200,7 +205,7 @@ class ClientNavigation {
     finally{if(revision===this.revision){this.choosing=null;this.revision++;button.disabled=false;this.paint();}}
   }
   poll(fast=false){
-    if(document.hidden||document.getElementById('app').hidden||this.hasUncertain()||(fast&&!this.clients.some(client=>ClientLifecycle.connection(client).waiting)))return;
+    if(document.hidden||document.getElementById('app').hidden||this.hasUncertain()||(fast&&!this.statusPending&&!this.clients.some(client=>ClientLifecycle.connection(client).waiting)))return;
     return this.refresh();
   }
   connection(client){return ClientLifecycle.connection({...client,pendingEnable:this.gatewayRunning!==false&&this.pending.has(client.id)&&client.enabled});}
@@ -209,13 +214,18 @@ class ClientNavigation {
   retryOperation(id){const failure=this.operationFailures?.get(id);if(!failure||this.hasUncertain())return;return failure.action==='initialize'?this.initialize(id):this.toggle(id,failure.action==='enable');}
   async choose(id,{activate=true}={}){
     this.cancelListSwipe();
-    if(id===this.provider&&this.view.provider===(isCodexClient(id)?'codex':id||'codex')){if(activate&&id?.startsWith('wsl:'))await this.onApplicationChange?.(id,id,{activate});return;}
+    if(id===this.provider&&this.view.provider===(isCodexClient(id)?'codex':id||'codex')){
+      if(activate&&id?.startsWith('wsl:'))await this.onApplicationChange?.(id,id,{activate});
+      return;
+    }
+    ++this.revision;
+    const restoreCodex=id==='codex'&&this.provider===null&&this.view.provider==='codex'&&!this.pending.has('codex');
     this.rememberSwipeList();
     const previous=this.provider;this.listReadDone=false;this.listVisit=(this.listVisit||0)+1;this.provider=id;if(id)localStorage.setItem('bridge-client',id);
-    const ready=this.view.choose(isCodexClient(id)?'codex':id||'codex');this.paint();await this.onApplicationChange?.(previous,id,{activate});await ready;
+    const ready=this.view.choose(isCodexClient(id)?'codex':id||'codex');if(restoreCodex)this.view.onSelect?.('codex');this.paint();await this.onApplicationChange?.(previous,id,{activate});await ready;
   }
   acknowledgeList(provider,value){
-    if(provider?.startsWith('wsl:')||this.listReadDone||provider!==this.provider||document.hidden||document.getElementById('app').hidden||value.connected===false||value.unavailableHosts?.length)return;
+    if(provider?.startsWith('wsl:')||this.listReadDone||provider!==this.provider||document.hidden||document.getElementById('app').hidden||value.connected===false||value.complete===false||value.unavailableHosts?.length)return;
     const list=isCodexClient(provider)?this.sidebar:this.view.list;if(list?.getBoundingClientRect().width===0)return;
     const visit=this.listVisit;const read=value.notificationRead;if(!read||!Number.isSafeInteger(read.cursor))return;
     this.listReadDone=true;
@@ -239,7 +249,7 @@ class ClientNavigation {
     return true;
   }
   async initialize(id){
-    const client=this.clients.find(row=>row.id===id);if(this.gatewayRunning===false||this.pending.size||this.choosing||this.hasUncertain()||!client||!this.connection(client).canInitialize)return;
+    const client=this.clients.find(row=>row.id===id),state=client&&this.connection(client);if(this.gatewayRunning===false||this.pending.size||this.choosing||this.hasUncertain()||!state||!(state.canInitialize||state.canStartDesktop))return;
     this.choosing=id;++this.revision;this.paint();let confirmed=false;
     try{confirmed=await ClientLifecycle.chooseInitialize(client);}finally{this.choosing=null;this.paint();}
     if(confirmed)return this.toggle(id,true,{initializeDesktop:true});
@@ -258,7 +268,7 @@ class ClientNavigation {
     this.operationFailures??=new Map();this.operationFailures.delete(id);let failed=false;
     this.pending.add(id);this.pendingQuitDesktop=quitDesktop;this.pendingForceDesktop=forceDesktop;++this.revision;
     this.applyClients({clients:this.clients.map(c=>c.id===id?{...c,enabled}:c)});
-    try{const data=await ClientLifecycle.request(signal=>this.request('/api/clients',{provider:id,enabled,...(!enabled?{quitDesktop}:{}),...(forceDesktop?{forceDesktop:true,forceConfirmed:true}:{}),...(initializeDesktop?{initializeDesktop:true}:{})},signal),{timeout:this.lifecycleTimeout??45000});this.applyClients(data);}
+    try{const data=await ClientLifecycle.request(signal=>this.request('/api/clients',{provider:id,enabled,...(!enabled?{quitDesktop}:{}),...(forceDesktop?{forceDesktop:true,forceConfirmed:true}:{}),...(initializeDesktop?{initializeDesktop:true}:{})},signal),{timeout:this.lifecycleTimeout??45000});this.applyClients(data);if(enabled&&id==='codex'&&previous===null)this.view.onSelect?.('codex');}
     catch(error){failed=true;this.operationFailures.set(id,ClientLifecycle.failure(initializeDesktop?'initialize':enabled?'enable':forceDesktop?'force':quitDesktop?'quit':'disable',error));this.provider=previous;this.applyClients({clients:before});throw error;}
     finally{this.pending.delete(id);this.pendingQuitDesktop=false;this.pendingForceDesktop=false;++this.revision;this.paint();if(failed)await this.refresh();}
   }
@@ -269,15 +279,16 @@ class ClientNavigation {
     finally{this.pending.delete(id);this.reconnecting=null;++this.revision;this.paint();}
   }
   paint(){
-    this.cancelListSwipe();this.syncViewClients();
-    const provider=this.provider,row=this.clients.find(c=>c.id===provider);this.badge.replaceChildren();if(provider)this.badge.append(this.icon(provider),document.createTextNode(row?.name||'Codex'));
-    const target=provider&&!isCodexClient(provider)?this.view.list:this.sidebar;target.prepend(this.heading);target.append(this.navigation);
+    if((this.listGesture||this.swipePreview)&&(!this.clients.some(c=>c.id===this.provider&&c.enabled)||this.swipePreview&&this.swipePreview.provider!==this.provider))this.cancelListSwipe();
+    this.syncViewClients();
+    const provider=this.provider,row=this.clients.find(c=>c.id===provider),badgeName=row?.name||'Codex';if(this.badge.dataset.provider!==provider||this.badge.dataset.name!==badgeName){this.badge.replaceChildren();if(provider)this.badge.append(this.icon(provider),document.createTextNode(badgeName));this.badge.dataset.provider=provider||'';this.badge.dataset.name=badgeName;}
+    const target=provider&&!isCodexClient(provider)?this.view.list:this.sidebar;if(this.heading.parentElement!==target)target.prepend(this.heading);if(this.navigation.parentElement!==target)target.append(this.navigation);
     this.account.classList.toggle('navigation-hidden',!provider||(isCodexClient(provider)&&!!window.BridgeSharedRelay));this.notifications.classList.toggle('navigation-hidden',!provider);this.manage.hidden=!this.preference('clients');
     this.account.textContent=BridgeI18n.t('账号管理');this.account.removeAttribute('data-i18n');this.notifications.textContent=BridgeI18n.language()==='en'?'Push alerts':'第三方通知';this.notifications.removeAttribute('data-i18n');this.notifications.setAttribute('aria-label',BridgeI18n.t('第三方通知'));this.home.textContent=BridgeI18n.language()==='en'?'Computers':'返回电脑列表';
     this.switcher.replaceChildren();const enabled=this.clients.filter(c=>c.enabled),visible=this.visibleClients();const collapsed=this.preference('switch-collapsed',undefined,false);this.switchToggle.hidden=enabled.length<2||!visible.length;this.paintSettingsActions();this.switchDock.hidden=this.switchToggle.hidden||collapsed;this.navigation.classList.toggle('switch-dock-hidden',this.switchDock.hidden);this.switchToggle.textContent=BridgeI18n.t(collapsed?'显示底部 APP 图标':'隐藏底部 APP 图标');this.switchToggle.setAttribute('aria-expanded',String(!collapsed));this.switchToggle.setAttribute('aria-label',BridgeI18n.t(collapsed?'展开应用图标':'收起应用图标'));this.switchToggle.title=this.switchToggle.getAttribute('aria-label');this.settingsNotifications.textContent=BridgeI18n.language()==='en'?'Push alerts':'第三方通知';
     for(const client of visible){const button=document.createElement('button');button.type='button';button.append(this.icon(client.id),document.createTextNode(client.name));button.classList.toggle('selected',client.id===provider);button.setAttribute('aria-pressed',String(client.id===provider));button.onclick=()=>this.choose(client.id).catch(e=>this.notify(e.message));this.switcher.append(button);}
     document.getElementById('desktop-backend').hidden=true;
-    document.getElementById('new-chat').disabled=!provider;document.getElementById('new-chat').hidden=false;
+    document.getElementById('new-chat').disabled=!provider||this.view.previewOnly===true;document.getElementById('new-chat').hidden=false;
     this.sidebar.classList.toggle('no-client',!provider);document.getElementById('app').classList.toggle('no-enabled-client',!provider);
     let empty=this.sidebar.querySelector('.no-client-message');if(!empty){empty=document.createElement('p');empty.className='no-client-message muted';empty.textContent=BridgeI18n.t('尚未启用应用，请打开应用管理。');this.heading.after(empty);}empty.hidden=!!provider;this.renderManager();
   }
@@ -305,8 +316,9 @@ class ClientNavigation {
       if(client.enabled){const open=document.createElement('button');open.type='button';open.textContent=BridgeI18n.t('查看聊天');open.onclick=()=>{manager.dialog.close();this.choose(client.id).catch(error=>this.notify(error.message));};control.append(open);}
       if(failure){const retry=document.createElement('button');retry.type='button';retry.textContent=BridgeI18n.t(failure.uncertain?'刷新状态':ClientLifecycle.retryLabel(failure.action));retry.disabled=this.pending.size>0||!!this.choosing||!!this.loading||(!failure.uncertain&&this.hasUncertain());retry.onclick=()=>Promise.resolve(failure.uncertain?this.refresh():this.retryOperation(client.id)).catch(error=>this.notify(error.message));control.append(retry);}
       if(!failure&&state.retryable&&this.gatewayRunning!==false){const retry=document.createElement('button');retry.type='button';retry.textContent=BridgeI18n.t('重试连接');retry.disabled=this.pending.size>0||!!this.choosing||this.hasUncertain();retry.onclick=()=>this.toggle(client.id,true).catch(error=>this.notify(error.message));control.append(retry);}
-      if(!failure&&state.canReconnect&&this.gatewayRunning!==false){const reconnect=document.createElement('button');reconnect.type='button';reconnect.textContent=BridgeI18n.t('尝试重连');reconnect.disabled=this.pending.size>0||!!this.choosing||this.hasUncertain();reconnect.onclick=()=>this.reconnect(client.id).catch(error=>this.notify(error.message));control.append(reconnect);}
+      if(!failure&&state.canReconnect&&this.gatewayRunning!==false){const reconnect=document.createElement('button');reconnect.type='button';reconnect.textContent=BridgeI18n.t('重新连接 Desktop');reconnect.disabled=this.pending.size>0||!!this.choosing||this.hasUncertain();reconnect.onclick=()=>this.reconnect(client.id).catch(error=>this.notify(error.message));control.append(reconnect);}
       if(!failure&&state.canInitialize&&this.gatewayRunning!==false){const initialize=document.createElement('button');initialize.type='button';initialize.textContent=BridgeI18n.t(state.canReconnect?'重新初始化连接':'初始化连接');initialize.disabled=this.pending.size>0||!!this.choosing||this.hasUncertain();initialize.onclick=()=>this.initialize(client.id).catch(error=>this.notify(error.message));control.append(initialize);}
+      if(!failure&&state.canStartDesktop&&this.gatewayRunning!==false){const start=document.createElement('button');start.type='button';start.textContent=BridgeI18n.t('启动 Desktop');start.disabled=this.pending.size>0||!!this.choosing||this.hasUncertain();start.onclick=()=>this.initialize(client.id).catch(error=>this.notify(error.message));control.append(start);}
     }
     note.textContent=BridgeI18n.t(this.gatewayRunning===false?'网关未启动，开关仅保存下次启动时的选择，不会打开或退出应用。':'安装和登录请在电脑端完成。关闭接入可保留或退出电脑 App。macOS Claude 默认后台启动并尝试恢复已有连接；“初始化连接”经确认后使用电脑前台。Windows 优先尝试后台初始化。')+' '+BridgeI18n.t(ClientLifecycle.sessionNotice(this.windowsSession));
   }

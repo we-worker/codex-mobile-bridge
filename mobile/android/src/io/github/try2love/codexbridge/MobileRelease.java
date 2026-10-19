@@ -13,6 +13,7 @@ public final class MobileRelease {
  public MobileRelease(String version,String notes){this(version,notes,-1,null);}
  public MobileRelease(String version,String notes,long size,String sha256){this.version=version;this.notes=notes;this.size=size;this.sha256=normalizeDigest(sha256);download=REPO+"/releases/download/v"+version+"/"+asset(version);}
  public static String asset(String version){return "Codex-Mobile-Bridge-"+version+"-Android.apk";}
+ public static String channel(String version){Matcher match=VERSION.matcher(version);if(!match.matches())throw new IllegalArgumentException("Invalid version");return match.group(4)==null?"stable":match.group(4);}
  public String page(){return REPO+"/releases/tag/v"+version;}
  private static String normalizeDigest(String value){if(value==null)return null;String digest=value.startsWith("sha256:")?value.substring(7):value;return digest.matches("[a-fA-F0-9]{64}")?digest.toLowerCase():null;}
  public static boolean isDownload(String url){try{String prefix=REPO+"/releases/download/v";if(!url.startsWith(prefix))return false;int slash=url.lastIndexOf('/');String version=url.substring(prefix.length(),slash);parts(version);return url.equals(new MobileRelease(version,"").download);}catch(Exception e){return false;}}

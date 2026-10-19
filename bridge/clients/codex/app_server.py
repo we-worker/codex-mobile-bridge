@@ -1,0 +1,332 @@
+"""WebSocket client for an already running Codex app-server control socket.
+
+The proxy command only connects to the given socket. This module never starts a
+daemon, resumes a thread, or changes its model, provider, cwd, or approvals.
+"""
+
+import json
+import base64
+import hashlib
+import os
+import struct
+import subprocess
+import threading
+from concurrent.futures import Future, TimeoutError
+from pathlib import Path
+
+
+class AppServerError(RuntimeError):
+    pass
+
+
+class AppServerUnavailable(AppServerError):
+    pass
+
+
+class AppServerUnknownResult(AppServerError):
+    """The request may have reached the runtime; the caller must not replay it."""
+
+
+class AppServerUnsupported(AppServerError):
+    pass
+
+
+class _WebSocket:
+    """Minimal client-side WebSocket over the proxy's byte streams."""
+
+    def __init__(self, reader, writer):
+        self.reader = reader
+        self.writer = writer
+        self.write_lock = threading.Lock()
+        key = base64.b64encode(os.urandom(16)).decode('ascii')
+        request = ('GET / HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\n'
+                   'Connection: Upgrade\r\nSec-WebSocket-Key: ' + key + '\r\n'
+                   'Sec-WebSocket-Version: 13\r\n\r\n').encode('ascii')
+        self._write(request)
+        header = bytearray()
+        while not header.endswith(b'\r\n\r\n'):
+            byte = self.reader.read(1)
+            if not byte or len(header) > 8192:
+                raise AppServerUnavailable('Codex control socket WebSocket handshake failed')
+            header.extend(byte)
+        lines = header.decode('ascii').split('\r\n')
+        expected = base64.b64encode(hashlib.sha1(
+            (key + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode('ascii')).digest()).decode('ascii')
+        fields = {name.lower(): value.strip() for line in lines[1:] if ':' in line
+                  for name, value in (line.split(':', 1),)}
+        if ' 101 ' not in lines[0] or fields.get('sec-websocket-accept') != expected:
+            raise AppServerUnavailable('Codex control socket rejected WebSocket handshake')
+
+    def send(self, value):
+        data = json.dumps(value, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
+        if len(data) > 16 * 1024 * 1024:
+            raise AppServerError('App-server message is too large')
+        mask = os.urandom(4)
+        if len(data) < 126:
+            header = bytes((0x81, 0x80 | len(data)))
+        elif len(data) <= 65535:
+            header = bytes((0x81, 0xfe)) + struct.pack('!H', len(data))
+        else:
+            header = bytes((0x81, 0xff)) + struct.pack('!Q', len(data))
+        payload = bytes(byte ^ mask[i % 4] for i, byte in enumerate(data))
+        self._write(header + mask + payload)
+
+    def receive(self):
+        fragments = []
+        total = 0
+        while True:
+            head = self._exact(2)
+            opcode = head[0] & 15
+            length = head[1] & 127
+            if length == 126:
+                length = struct.unpack('!H', self._exact(2))[0]
+            elif length == 127:
+                length = struct.unpack('!Q', self._exact(8))[0]
+            if length > 64 * 1024 * 1024 or head[1] & 128:
+                raise AppServerUnsupported('Invalid Codex WebSocket frame')
+            payload = self._exact(length)
+            if opcode == 8:
+                raise EOFError()
+            if opcode == 9:
+                self._control(10, payload)
+                continue
+            if opcode not in (0, 1):
+                continue
+            fragments.append(payload)
+            total += len(payload)
+            if total > 64 * 1024 * 1024:
+                raise AppServerUnsupported('Codex WebSocket message is too large')
+            if head[0] & 128:
+                return json.loads(b''.join(fragments))
+
+    def _exact(self, length):
+        chunks = bytearray()
+        while len(chunks) < length:
+            data = self.reader.read(length - len(chunks))
+            if not data:
+                raise EOFError()
+            chunks.extend(data)
+        return chunks
+
+    def _write(self, data):
+        with self.write_lock:
+            view = memoryview(data)
+            while view:
+                count = self.writer.write(view)
+                if not count:
+                    raise OSError('Codex proxy pipe closed')
+                view = view[count:]
+            self.writer.flush()
+
+    def _control(self, opcode, payload):
+        mask = os.urandom(4)
+        self._write(bytes((0x80 | opcode, 0x80 | len(payload))) + mask +
+                    bytes(byte ^ mask[i % 4] for i, byte in enumerate(payload)))
+
+
+class CodexAppServer:
+    MAX_LINE = 64 * 1024 * 1024
+
+    def __init__(self, socket_path, cli='codex', on_event=None,
+                 on_server_request=None, on_disconnect=None, process_factory=None,
+                 command=None, check_socket=True, client_name='codex-mobile-bridge'):
+        if not socket_path or not Path(socket_path).is_absolute():
+            raise ValueError('An absolute existing control socket path is required')
+        self.socket_path = str(socket_path)
+        self.cli = str(cli)
+        self.command = list(command) if command is not None else [
+            self.cli, 'app-server', 'proxy', '--sock', self.socket_path]
+        self.check_socket = check_socket
+        self.client_name = client_name
+        self.on_event = on_event or (lambda event: None)
+        self.on_server_request = on_server_request or (lambda request: None)
+        self.on_disconnect = on_disconnect or (lambda: None)
+        self.process_factory = process_factory or subprocess.Popen
+        self.process = None
+        self.transport = None
+        self.server_info = None
+        self.pending = {}
+        self.next_id = 1
+        self.lock = threading.RLock()
+        self.write_lock = threading.Lock()
+        self.connect_lock = threading.Lock()
+
+    def connect(self, timeout=5):
+        with self.connect_lock:
+            if self.process is not None and self.server_info is not None:
+                return self.server_info
+            if self.check_socket and not Path(self.socket_path).exists():
+                raise AppServerUnavailable('Codex app-server control socket is unavailable')
+            try:
+                options = {'creationflags': subprocess.CREATE_NO_WINDOW} if os.name == 'nt' else {}
+                process = self.process_factory(
+                    self.command,
+                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL, **options)
+            except OSError as exc:
+                raise AppServerUnavailable('Could not connect to the existing Codex runtime') from exc
+            self.process = process
+            handshake = Future()
+            def open_websocket():
+                try:
+                    handshake.set_result(_WebSocket(process.stdout, process.stdin))
+                except Exception as exc:
+                    handshake.set_exception(exc)
+            threading.Thread(target=open_websocket, daemon=True).start()
+            try:
+                transport = handshake.result(timeout=timeout)
+                self.transport = transport
+            except TimeoutError as exc:
+                self.close()
+                raise AppServerUnavailable('Codex control socket handshake timed out') from exc
+            except Exception:
+                self.close()
+                raise
+            threading.Thread(target=self._read_loop, args=(process, transport), daemon=True).start()
+            try:
+                info = self.request('initialize', {
+                    'clientInfo': {'name': self.client_name, 'version': '1'},
+                    'capabilities': {'experimentalApi': True}}, timeout=timeout,
+                    replay_safe=True)
+                if not isinstance(info, dict) or not info.get('codexHome'):
+                    raise AppServerUnsupported('Unexpected app-server initialize response')
+                self.server_info = info
+                self._send({'method': 'initialized', 'params': {}})
+                return info
+            except Exception:
+                self.close()
+                raise
+
+    def _send(self, message):
+        with self.write_lock:
+            transport = self.transport
+            if transport is None:
+                raise AppServerUnavailable('Codex app-server connection is closed')
+            try:
+                transport.send(message)
+            except (OSError, ValueError) as exc:
+                raise AppServerUnknownResult('Codex runtime connection failed; request result is unknown') from exc
+
+    def request(self, method, params=None, timeout=15, replay_safe=False):
+        """Send one RPC. A failed write or lost response is never retried here."""
+        with self.lock:
+            request_id = self.next_id
+            self.next_id += 1
+            future = Future()
+            self.pending[request_id] = future
+        try:
+            self._send({'id': request_id, 'method': method, 'params': params or {}})
+            try:
+                response = future.result(timeout=timeout)
+            except TimeoutError as exc:
+                if replay_safe:
+                    raise AppServerUnavailable('Codex runtime read timed out') from exc
+                raise AppServerUnknownResult('Codex runtime response timed out; request may have completed') from exc
+            if 'error' in response:
+                error = response['error']
+                code = error.get('code') if isinstance(error, dict) else None
+                detail = error.get('message', 'App-server request failed') if isinstance(error, dict) else str(error)
+                if code == -32601:
+                    raise AppServerUnsupported(detail)
+                raise AppServerError(detail)
+            return response['result']
+        finally:
+            with self.lock:
+                self.pending.pop(request_id, None)
+
+    def loaded_threads(self, limit=200):
+        """List IDs loaded in this runtime; loading does not establish ownership."""
+        self.connect()
+        ids = []
+        cursor = None
+        seen = set()
+        while True:
+            result = self.request('thread/loaded/list', {'limit': limit, 'cursor': cursor},
+                                  replay_safe=True)
+            if not isinstance(result, dict) or not isinstance(result.get('data'), list):
+                raise AppServerUnsupported('Unexpected loaded thread list response')
+            ids.extend(result['data'])
+            cursor = result.get('nextCursor')
+            if not cursor:
+                return ids
+            if cursor in seen:
+                raise AppServerUnsupported('Repeated loaded thread cursor')
+            seen.add(cursor)
+
+    def is_loaded(self, thread_id):
+        return thread_id in self.loaded_threads()
+
+    def respond(self, request_id, result=None, error=None):
+        """Return a decision to a server request only after the caller authorizes it."""
+        if error is not None:
+            self._send({'id': request_id, 'error': error})
+        else:
+            self._send({'id': request_id, 'result': result})
+
+    def _read_loop(self, process, transport):
+        try:
+            while True:
+                message = transport.receive()
+                with self.lock:
+                    if self.process is not process:
+                        return
+                if not isinstance(message, dict):
+                    continue
+                if 'id' in message and ('result' in message or 'error' in message):
+                    with self.lock:
+                        if self.process is not process:
+                            return
+                        future = self.pending.get(message['id'])
+                        if future is not None and not future.done():
+                            future.set_result(message)
+                elif 'id' in message and 'method' in message:
+                    self.on_server_request(message)
+                elif 'method' in message:
+                    self.on_event(message)
+        except (OSError, EOFError, ValueError, TypeError, AppServerError):
+            pass
+        finally:
+            with self.lock:
+                current = self.process is process
+                if current:
+                    self.process = None
+                    self.transport = None
+                    self.server_info = None
+                    for future in self.pending.values():
+                        if not future.done():
+                            future.set_exception(AppServerUnknownResult(
+                                'Codex runtime connection closed; request result is unknown'))
+            if current:
+                self._stop_process(process)
+                self.on_disconnect()
+
+    def close(self):
+        """Disconnect this proxy client; never stop or restart the daemon."""
+        with self.lock:
+            process = self.process
+            self.process = None
+            self.transport = None
+            self.server_info = None
+            for future in self.pending.values():
+                if not future.done():
+                    future.set_exception(AppServerUnknownResult(
+                        'Codex runtime connection closed; request result is unknown'))
+        if process is not None:
+            self._stop_process(process)
+
+    @staticmethod
+    def _stop_process(process):
+        # The child is a byte proxy only. Stopping it never stops app-server.
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+        for stream in (process.stdin, process.stdout):
+            if stream is not None:
+                try:
+                    stream.close()
+                except OSError:
+                    pass

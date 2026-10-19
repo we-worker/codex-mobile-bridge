@@ -66,6 +66,25 @@ class ClaudeContext(unittest.IsolatedAsyncioTestCase):
         result = await self.detail('code', ['getContextUsageSummary'], contextUsage=None, contextUsageStatus='private fixture')
         self.assertEqual(result['session']['contextUsageStatus'], 'unavailable')
 
+    async def test_desktop_transcript_usage_fills_missing_summary(self):
+        event = {'type': 'assistant', 'message': {'id': 'step', 'model': 'desktop-model',
+                 'usage': {'input_tokens': 10, 'cache_creation_input_tokens': 20,
+                           'cache_read_input_tokens': 30}}}
+        raw = {'sessionId': 'fixture', 'turnRunning': False}
+        row = session('code', raw)
+        self.adapter.index = {row['id']: row}
+        self.adapter.desktop.capabilities = {'code': ['mobileDetail']}
+        capacity = {'type': 'result', 'modelUsage': {'desktop-model': {'contextWindow': 200000}}}
+        self.adapter.desktop.call.return_value = {'session': raw, 'transcript': [event, capacity],
+                                                  'contextUsage': None, 'contextUsageStatus': 'unsupported'}
+        with patch.object(self.adapter, 'prepare'), patch.object(self.adapter, 'connect'), \
+             patch.object(self.adapter, 'reconnect'):
+            result = await self.adapter.dispatch('detail', row['id'], {})
+        self.assertEqual(result['session']['contextUsage']['usedTokens'], 60)
+        self.assertEqual(result['session']['contextUsage']['contextWindow'], 200000)
+        self.assertEqual(result['session']['contextUsageStatus'], 'available')
+        self.assertTrue(result['capabilities']['contextUsage'])
+
 
 if __name__ == '__main__':
     unittest.main()

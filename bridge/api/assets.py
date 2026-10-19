@@ -21,6 +21,7 @@ STATIC = {"/file-actions.js": ("file-actions.js", "text/javascript; charset=utf-
           "/client-navigation.css": ("client-navigation.css", "text/css; charset=utf-8"),
           "/desktop-sessions.js": ("desktop-sessions.js", "text/javascript; charset=utf-8"),
           "/client-accounts.js": ("client-accounts.js", "text/javascript; charset=utf-8"),
+          "/cli-access.js": ("cli-access.js", "text/javascript; charset=utf-8"),
           "/desktop-sessions.css": ("desktop-sessions.css", "text/css; charset=utf-8"),
           "/vendor/xterm/xterm.js": ("vendor/xterm/xterm.js", "text/javascript; charset=utf-8"),
           "/vendor/xterm/addon-fit.js": ("vendor/xterm/addon-fit.js", "text/javascript; charset=utf-8"),
@@ -33,6 +34,12 @@ STATIC = {"/file-actions.js": ("file-actions.js", "text/javascript; charset=utf-
           "/floating-panel.js": ("floating-panel.js", "text/javascript; charset=utf-8"),
           "/git-panel.js": ("git-panel.js", "text/javascript; charset=utf-8"),
           "/workbench.js": ("workbench.js", "text/javascript; charset=utf-8"),
+          "/source-view.js": ("source-view.js", "text/javascript; charset=utf-8"),
+          "/pdf-preview.js": ("pdf-preview.js", "text/javascript; charset=utf-8"),
+          "/html-preview.js": ("html-preview.js", "text/javascript; charset=utf-8"),
+          "/vendor/pdfjs/pdf.min.mjs": ("vendor/pdfjs/pdf.min.mjs", "text/javascript; charset=utf-8"),
+          "/vendor/pdfjs/pdf.worker.min.mjs": ("vendor/pdfjs/pdf.worker.min.mjs", "text/javascript; charset=utf-8"),
+          "/vendor/prism/source-view.min.js": ("vendor/prism/source-view.min.js", "text/javascript; charset=utf-8"),
           "/image-viewer.js": ("image-viewer.js", "text/javascript; charset=utf-8"),
           "/workbench.css": ("workbench.css", "text/css; charset=utf-8"),
           "/": ("index.html", "text/html; charset=utf-8"),
@@ -59,6 +66,8 @@ STATIC = {"/file-actions.js": ("file-actions.js", "text/javascript; charset=utf-
           "/manifest.webmanifest": ("manifest.webmanifest", "application/manifest+json"),
           "/icon.png": ("icon.png", "image/png")}
 FONT_ROUTE = re.compile(r"^/vendor/katex/fonts/(KaTeX_[A-Za-z0-9_-]+\.(woff2|woff|ttf))$")
+PDF_CMAP_ROUTE = re.compile(r"^/vendor/pdfjs/cmaps/([A-Za-z0-9_-]+\.bcmap)$")
+PDF_FONT_ROUTE = re.compile(r"^/vendor/pdfjs/standard_fonts/([A-Za-z0-9_-]+\.(?:pfb|ttf))$")
 
 # The manifest moves files, never expands the public URL allowlist.
 _layout = json.loads((project_root() / 'web/assets.json').read_text(encoding='utf-8'))

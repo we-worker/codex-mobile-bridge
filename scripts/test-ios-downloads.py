@@ -32,6 +32,24 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == '/capture':
             redirected.append(True)
             self.send_response(200); self.send_header('Content-Length', '0'); self.end_headers(); return
+        if urlsplit(self.path).path == '/api/sessions/diagnostics':
+            slow = parse_qs(urlsplit(self.path).query).get('thread') == ['aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee']
+            body = b'x' * (2 * 1024 * 1024) if slow else b'{"hosts":[],"phase":"discovery"}'
+            requests.append(('diagnostic', 0, self.headers.get('If-Range'), self.headers.get('Cookie'), self.headers.get('User-Agent')))
+            if self.headers.get('Cookie') != 'codex_mobile_session=fixture':
+                self.send_response(401); self.send_header('Content-Length', '0'); self.end_headers(); return
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(body)))
+            self.send_header('Content-Disposition', 'attachment; filename="codex-session-diagnostics.json"')
+            if slow: self.send_header('ETag', '"changing-report"')
+            self.end_headers()
+            try:
+                if slow:
+                    for offset in range(0, len(body), 16384):
+                        self.wfile.write(body[offset:offset + 16384]); self.wfile.flush(); time.sleep(.014)
+                else: self.wfile.write(body)
+            except (BrokenPipeError, ConnectionResetError): pass
+            return
         scenario = parse_qs(urlsplit(self.path).query)['case'][0]
         start, end = map(int, re.fullmatch(r'bytes=(\d+)-(\d+)', self.headers['Range']).groups())
         requests.append((scenario, start, self.headers.get('If-Range'), self.headers.get('Cookie'), self.headers.get('User-Agent')))
