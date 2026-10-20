@@ -16,6 +16,7 @@ final class TailnetCredentialStore {
  private static final String PREF="bridge-tailnet";
  private static final String KEY="authKey";
  private static final String ALIAS="codex-bridge-tailnet-auth-v1";
+ private static final String AUTH_PREFIX="tskey-auth-";
 
  private TailnetCredentialStore(){}
 
@@ -30,12 +31,12 @@ final class TailnetCredentialStore {
  }
 
  static boolean valid(String value){
-  return value!=null&&value.length()>=20&&value.length()<=16384&&value.startsWith("tskey-")&&value.matches("tskey-[A-Za-z0-9_-]+");
+  return value!=null&&value.length()>=20&&value.length()<=16384&&value.startsWith(AUTH_PREFIX)&&value.matches("tskey-auth-[A-Za-z0-9_-]+");
  }
 
  static void save(Context context,String value)throws Exception {
   String trimmed=value==null?"":value.trim();
-  if(!valid(trimmed))throw new IllegalArgumentException("请输入有效的 Tailscale Auth Key");
+  if(!valid(trimmed))throw new IllegalArgumentException(invalidMessage(trimmed));
   Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");cipher.init(Cipher.ENCRYPT_MODE,key());
   byte[] iv=cipher.getIV(),encrypted=cipher.doFinal(trimmed.getBytes(StandardCharsets.UTF_8)),combined=new byte[iv.length+encrypted.length];
   System.arraycopy(iv,0,combined,0,iv.length);System.arraycopy(encrypted,0,combined,iv.length,encrypted.length);
@@ -57,4 +58,9 @@ final class TailnetCredentialStore {
  static boolean saved(Context context){return !load(context).isEmpty();}
 
  static void clear(Context context){context.getSharedPreferences(PREF,0).edit().remove(KEY).apply();}
+
+ static String invalidMessage(String value){
+  if(value!=null&&value.startsWith("tskey-api-"))return "这是 Tailscale API 密钥，不能用于设备登录；请生成以 tskey-auth- 开头的 Auth Key。";
+  return "请输入以 tskey-auth- 开头的 Tailscale Auth Key。";
+ }
 }

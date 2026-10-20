@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -30,7 +31,17 @@ const (
 	stateFailed       = "failed"
 )
 
-var authURLPattern = regexp.MustCompile(`https://login\.tailscale\.com/[^\s<>"']+`)
+const authKeyStartupTimeout = 75 * time.Second
+
+var (
+	authURLPattern        = regexp.MustCompile(`https://login\.tailscale\.com/[^\s<>"']+`)
+	authLoginPattern      = regexp.MustCompile(`(?i)https://login\.tailscale\.com/[^\s<>"']+`)
+	authKeyPattern        = regexp.MustCompile(`(?i)\btskey-[a-z0-9][a-z0-9_-]{5,}\b`)
+	keyIdentifierPattern  = regexp.MustCompile(`(?i)\b(?:auth|api) key\s+[a-z0-9_-]{8,}\b`)
+	authorizationPattern  = regexp.MustCompile(`(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}`)
+	deviceSecretPattern   = regexp.MustCompile(`(?i)\b[a-z0-9_-]{40,}\b`)
+	diagnosticLinePattern = regexp.MustCompile(`[\x00-\x1f\x7f]+`)
+)
 
 // Mobile is generated as a Java class by gomobile.
 type Mobile struct {
@@ -39,6 +50,9 @@ type Mobile struct {
 	state        string
 	authURL      string
 	errorCode    string
+	errorDetail  string
+	diagnostic   string
+	controlPlane string
 	proxyAddress string
 	cancel       context.CancelFunc
 	done         chan struct{}
@@ -61,6 +75,9 @@ func (m *Mobile) Start(stateDir, hostname, authKey string) error {
 	if err != nil {
 		return err
 	}
+	if err := prepareRuntimeDirectories(root); err != nil {
+		return err
+	}
 
 	m.mu.Lock()
 	if m.state == stateFailed {
@@ -75,10 +92,31 @@ func (m *Mobile) Start(stateDir, hostname, authKey string) error {
 	m.generation++
 	generation := m.generation
 	ctx, cancel := context.WithCancel(context.Background())
+	m.state = stateStarting
+	m.authURL = ""
+	m.errorCode = ""
+	m.errorDetail = ""
+	m.diagnostic = "正在探测 Tailscale 控制面网络"
+	m.controlPlane = ""
+	m.proxyAddress = ""
+	m.cancel = cancel
+	m.done = nil
+	m.server = nil
+	m.proxy = nil
+	m.mu.Unlock()
+
+	selection := chooseMobileControlURL(ctx)
+	m.mu.Lock()
+	if generation != m.generation || ctx.Err() != nil {
+		m.mu.Unlock()
+		cancel()
+		return errors.New("mobile Tailscale start was cancelled")
+	}
 	server := &tsnet.Server{
-		Dir:      root,
-		Hostname: hostname,
-		AuthKey:  authKey,
+		Dir:        root,
+		Hostname:   hostname,
+		AuthKey:    authKey,
+		ControlURL: selection.URL,
 		UserLogf: func(format string, args ...any) {
 			authURL := safeAuthorizationURLFromLog(fmt.Sprintf(format, args...))
 			if authURL == "" {
@@ -93,13 +131,10 @@ func (m *Mobile) Start(stateDir, hostname, authKey string) error {
 		},
 		Logf: func(string, ...any) {},
 	}
-	m.state = stateStarting
-	m.authURL = ""
-	m.errorCode = ""
-	m.proxyAddress = ""
-	m.cancel = cancel
 	m.done = make(chan struct{})
 	m.server = server
+	m.diagnostic = selection.Detail
+	m.controlPlane = selection.URL
 	m.mu.Unlock()
 
 	log.SetFlags(0)
@@ -109,7 +144,7 @@ func (m *Mobile) Start(stateDir, hostname, authKey string) error {
 	if err != nil {
 		cancel()
 		_ = server.Close()
-		m.finishStartFailure(generation, "proxy_failed")
+		m.finishStartFailure(generation, "proxy_failed", safeErrorDetail(err))
 		return err
 	}
 
@@ -132,7 +167,16 @@ func (m *Mobile) Start(stateDir, hostname, authKey string) error {
 
 func (m *Mobile) run(ctx context.Context, generation uint64, server *tsnet.Server, done chan struct{}) {
 	defer close(done)
-	_, err := server.Up(ctx)
+	upCtx := ctx
+	cancel := func() {}
+	m.mu.Lock()
+	hasAuthKey := server.AuthKey != ""
+	m.mu.Unlock()
+	if hasAuthKey {
+		upCtx, cancel = context.WithTimeout(ctx, authKeyStartupTimeout)
+	}
+	defer cancel()
+	_, err := server.Up(upCtx)
 	if err != nil {
 		m.mu.Lock()
 		if generation == m.generation {
@@ -140,9 +184,17 @@ func (m *Mobile) run(ctx context.Context, generation uint64, server *tsnet.Serve
 			if ctx.Err() != nil {
 				m.state = stateStopped
 				m.errorCode = ""
+				m.errorDetail = ""
+				m.diagnostic = ""
 			} else {
 				m.state = stateFailed
-				m.errorCode = mobileErrorCode(err)
+				if errors.Is(upCtx.Err(), context.DeadlineExceeded) {
+					m.errorCode = "network_timeout"
+					m.errorDetail = "Tailscale 节点启动超过 75 秒，请检查控制面网络后重试"
+				} else {
+					m.errorCode = mobileErrorCode(err)
+					m.errorDetail = safeErrorDetail(err)
+				}
 			}
 		}
 		m.mu.Unlock()
@@ -152,9 +204,46 @@ func (m *Mobile) run(ctx context.Context, generation uint64, server *tsnet.Serve
 	if generation == m.generation {
 		m.authURL = ""
 		m.errorCode = ""
+		m.errorDetail = ""
+		m.diagnostic = networkDiagnostic(server)
 		m.state = stateReady
 	}
 	m.mu.Unlock()
+}
+
+func networkDiagnostic(server *tsnet.Server) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	client, err := server.LocalClient()
+	if err != nil {
+		return "Tailscale 节点已连接"
+	}
+	status, err := client.Status(ctx)
+	if err != nil {
+		return "Tailscale 节点已连接"
+	}
+	parts := []string{"Tailscale 节点已连接"}
+	if len(status.TailscaleIPs) > 0 {
+		parts = append(parts, "本机 "+status.TailscaleIPs[0].String())
+	}
+	if status.CurrentTailnet != nil && status.CurrentTailnet.StableID != "" {
+		parts = append(parts, "Tailnet "+string(status.CurrentTailnet.StableID))
+	}
+	if status.Self != nil && status.Self.UserID != 0 {
+		parts = append(parts, fmt.Sprintf("用户 %d", status.Self.UserID))
+	}
+	parts = append(parts, fmt.Sprintf("可见设备 %d", len(status.Peer)))
+	peers := make([]string, 0, len(status.Peer))
+	for _, peer := range status.Peer {
+		if len(peer.TailscaleIPs) > 0 {
+			peers = append(peers, fmt.Sprintf("%s:%t", peer.TailscaleIPs[0], peer.Online))
+		}
+	}
+	sort.Strings(peers)
+	if len(peers) > 0 {
+		parts = append(parts, "对端 "+strings.Join(peers, ","))
+	}
+	return strings.Join(parts, " · ")
 }
 
 // Stop is safe in every lifecycle state and waits briefly for the node to exit.
@@ -171,6 +260,9 @@ func (m *Mobile) Stop() {
 	m.state = stateStopped
 	m.authURL = ""
 	m.errorCode = ""
+	m.errorDetail = ""
+	m.diagnostic = ""
+	m.controlPlane = ""
 	m.proxyAddress = ""
 	cancel := m.cancel
 	done := m.done
@@ -238,6 +330,52 @@ func (m *Mobile) ErrorCode() string {
 	return m.errorCode
 }
 
+// ErrorDetail returns a bounded, credential-redacted explanation suitable for
+// an on-device diagnostic screen or logcat.
+func (m *Mobile) ErrorDetail() string {
+	if m == nil {
+		return ""
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.errorDetail
+}
+
+// Diagnostic describes the current startup stage without exposing credentials.
+func (m *Mobile) Diagnostic() string {
+	if m == nil {
+		return ""
+	}
+	m.mu.Lock()
+	if m.state != stateReady || m.server == nil {
+		value := m.diagnostic
+		m.mu.Unlock()
+		return value
+	}
+	generation := m.generation
+	server := m.server
+	m.mu.Unlock()
+
+	value := networkDiagnostic(server)
+	m.mu.Lock()
+	if m.generation == generation && m.state == stateReady && m.server == server {
+		m.diagnostic = value
+	}
+	m.mu.Unlock()
+	return value
+}
+
+// ControlPlane returns the selected public control URL, or empty when the
+// embedded client is using its default resolver.
+func (m *Mobile) ControlPlane() string {
+	if m == nil {
+		return ""
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.controlPlane
+}
+
 func validateStart(stateDir, hostname, authKey string) (string, error) {
 	if stateDir == "" {
 		return "", errors.New("state directory is required")
@@ -256,6 +394,23 @@ func validateStart(stateDir, hostname, authKey string) (string, error) {
 		return "", errors.New("invalid Tailscale auth key")
 	}
 	return root, nil
+}
+
+func prepareRuntimeDirectories(root string) error {
+	logsDir := filepath.Join(root, "logs")
+	tempDir := filepath.Join(root, "tmp")
+	for _, dir := range []string{logsDir, tempDir} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("create embedded Tailscale runtime directory: %w", err)
+		}
+	}
+	if err := os.Setenv("TS_LOGS_DIR", logsDir); err != nil {
+		return fmt.Errorf("configure embedded Tailscale log directory: %w", err)
+	}
+	if err := os.Setenv("TMPDIR", tempDir); err != nil {
+		return fmt.Errorf("configure embedded Tailscale temporary directory: %w", err)
+	}
+	return nil
 }
 
 func safeAuthorizationURLFromLog(value string) string {
@@ -282,6 +437,8 @@ func safeAuthorizationURL(value string) bool {
 func mobileErrorCode(err error) string {
 	text := strings.ToLower(err.Error())
 	switch {
+	case strings.Contains(text, "invalid key") || strings.Contains(text, "api key"):
+		return "auth_key_invalid"
 	case strings.Contains(text, "auth") || strings.Contains(text, "login") || strings.Contains(text, "machine"):
 		return "authentication_failed"
 	case strings.Contains(text, "context canceled"):
@@ -293,11 +450,12 @@ func mobileErrorCode(err error) string {
 	}
 }
 
-func (m *Mobile) finishStartFailure(generation uint64, code string) {
+func (m *Mobile) finishStartFailure(generation uint64, code, detail string) {
 	m.mu.Lock()
 	if generation == m.generation {
 		m.state = stateFailed
 		m.errorCode = code
+		m.errorDetail = detail
 		m.proxyAddress = ""
 		done := m.done
 		m.cancel = nil
@@ -311,4 +469,22 @@ func (m *Mobile) finishStartFailure(generation uint64, code string) {
 		return
 	}
 	m.mu.Unlock()
+}
+
+func safeErrorDetail(err error) string {
+	if err == nil {
+		return ""
+	}
+	value := diagnosticLinePattern.ReplaceAllString(err.Error(), " ")
+	value = authLoginPattern.ReplaceAllString(value, "[已隐藏授权链接]")
+	value = authKeyPattern.ReplaceAllString(value, "[已隐藏密钥]")
+	value = keyIdentifierPattern.ReplaceAllString(value, "[已隐藏 Tailscale 密钥]")
+	value = authorizationPattern.ReplaceAllString(value, "[已隐藏令牌]")
+	value = deviceSecretPattern.ReplaceAllString(value, "[已隐藏设备密钥]")
+	value = strings.Join(strings.Fields(value), " ")
+	runes := []rune(value)
+	if len(runes) > 320 {
+		value = string(runes[:317]) + "..."
+	}
+	return value
 }

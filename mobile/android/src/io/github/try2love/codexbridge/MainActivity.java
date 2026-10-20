@@ -169,7 +169,7 @@ void manualAddress(){resetExitGesture();EditText field=new EditText(this);field.
    if(GatewayURL.tailnetOrigin(origin)){
     final String target=url,address=base;final int ticket=generation;
     status.setText(L("正在启动内置 Tailscale · ")+origin);
-    tailnet.start(new TailnetController.Listener(){
+    tailnet.start(base,new TailnetController.Listener(){
      public void status(String value){if(ticket==generation&&address.equals(origin))status.setText(L(value));}
      public void authRequired(String value){if(ticket==generation&&address.equals(origin))openTailnetAuthorization(value);}
      public void ready(int port){if(ticket==generation&&address.equals(origin)){status.setText(L("内置 Tailscale 已连接 · ")+origin);openGateway(target);}}

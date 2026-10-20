@@ -4,10 +4,13 @@ import android.content.Context;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.util.Log;
 import androidx.webkit.ProxyConfig;
 import androidx.webkit.ProxyController;
 import androidx.webkit.WebViewFeature;
 import java.io.File;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -28,10 +31,12 @@ final class TailnetController {
  private final ExecutorService worker=Executors.newSingleThreadExecutor();
  private int generation;
  private String lastAuthURL="";
+ private String lastStatus="";
+ private String lastDetail="";
 
  TailnetController(Context context){this.context=context.getApplicationContext();}
 
- void start(Listener listener){
+ void start(String target,Listener listener){
   String unsupported=unsupportedWebProxy();
   if(unsupported!=null){
    TailnetHttp.clear();
@@ -40,6 +45,8 @@ final class TailnetController {
   }
   final int ticket=++generation;
   lastAuthURL="";
+  lastStatus="";
+  lastDetail="";
   TailnetHttp.clear();
   clearWebProxy(null);
   main.post(()->listener.status("正在启动内置 Tailscale…"));
@@ -49,27 +56,21 @@ final class TailnetController {
    try{
     mobile.start(stateDirectory().getAbsolutePath(),hostname(),TailnetCredentialStore.load(context));
     if(ticket!=generation){mobile.stop();return;}
+    Log.i("CodexTailnet","started control="+safeLogValue(mobile.controlPlane())+" proxy="+safeLogValue(mobile.proxyAddress()));
     TailnetHttp.activate(mobile.proxyAddress());
-    main.post(()->poll(ticket,listener,0));
+    main.post(()->poll(ticket,listener,target,0));
    }catch(Exception error){
     if(ticket==generation)main.post(()->listener.failed(message(error)));
    }
   });
  }
 
- private void poll(int ticket,Listener listener,int attempts){
+ private void poll(int ticket,Listener listener,String target,int attempts){
   if(ticket!=generation)return;
   String status=mobile.status();
+  logStatus(status);
   if("ready".equals(status)){
-   try{
-    int port=localPort(mobile.proxyAddress());
-    applyWebProxy(port,()->{
-     if(ticket!=generation)return;
-     listener.ready(port);
-    });
-   }catch(Exception error){
-    fail(ticket,listener,error.getMessage());
-   }
+   waitForGateway(ticket,listener,target,0);
    return;
   }
   if("auth_required".equals(status)){
@@ -78,23 +79,79 @@ final class TailnetController {
     lastAuthURL=url;
     listener.authRequired(url);
    }
-   main.postDelayed(()->poll(ticket,listener,attempts+1),750);
+   main.postDelayed(()->poll(ticket,listener,target,attempts+1),750);
    return;
   }
   if("failed".equals(status)){
-   fail(ticket,listener,failureMessage(mobile.errorCode()));
+   String code=mobile.errorCode();
+   String detail=mobile.errorDetail();
+   if("auth_key_invalid".equals(code)){
+    TailnetCredentialStore.clear(context);
+    detail="保存的 Tailscale Auth Key 无效或已失效，已从本机清除。请重试并使用浏览器授权，或保存新的 tskey-auth- Auth Key。";
+   }
+   Log.w("CodexTailnet","connection failed code="+safeLogValue(code)+" control="+safeLogValue(mobile.controlPlane())+" detail="+safeLogValue(detail));
+   fail(ticket,listener,failureMessage(code,detail));
    return;
   }
   if("stopped".equals(status)){
    fail(ticket,listener,"内置 Tailscale 已停止，请重新连接。");
    return;
   }
-  if(attempts>=120){
+  if(attempts>=600){
    fail(ticket,listener,"内置 Tailscale 启动超时，请检查网络后重试。");
    return;
   }
   int wait="auth_required".equals(status)?1000:250;
-  main.postDelayed(()->poll(ticket,listener,attempts+1),wait);
+  main.postDelayed(()->poll(ticket,listener,target,attempts+1),wait);
+ }
+
+ private void waitForGateway(int ticket,Listener listener,String target,int attempts){
+  if(ticket!=generation)return;
+  worker.execute(()->{
+   boolean reachable=gatewayReachable(target);
+   if(ticket!=generation)return;
+   if(!reachable&&attempts<40){
+    main.postDelayed(()->waitForGateway(ticket,listener,target,attempts+1),500);
+    return;
+   }
+   if(!reachable){
+    fail(ticket,listener,"内置 Tailscale 已连接，但暂时无法访问目标电脑。请确认电脑端网关仍在运行后重试。");
+    return;
+   }
+   main.post(()->{
+    if(ticket!=generation)return;
+    try{
+     int port=localPort(mobile.proxyAddress());
+     applyWebProxy(port,()->{
+      if(ticket!=generation)return;
+      listener.ready(port);
+      main.postDelayed(()->{
+       if(ticket==generation)Log.i("CodexTailnet","status=ready detail="+safeLogValue(mobile.diagnostic()));
+      },1000);
+     });
+    }catch(Exception error){
+     fail(ticket,listener,error.getMessage());
+    }
+   });
+  });
+ }
+
+ private static boolean gatewayReachable(String target){
+  HttpURLConnection connection=null;
+  try{
+   URL url=new URL(target.endsWith("/")?target+"api/auth":target+"/api/auth");
+   connection=TailnetHttp.open(url);
+   connection.setInstanceFollowRedirects(false);
+   connection.setUseCaches(false);
+   connection.setConnectTimeout(3000);
+   connection.setReadTimeout(3000);
+   int status=connection.getResponseCode();
+   return status>0&&status!=502&&status!=503&&status!=504;
+  }catch(Exception unavailable){
+   return false;
+  }finally{
+   if(connection!=null)connection.disconnect();
+  }
  }
 
  void stop(){
@@ -197,9 +254,26 @@ final class TailnetController {
   return value==null||value.isEmpty()?"内置 Tailscale 启动失败。":value;
  }
 
- private static String failureMessage(String code){
+ private void logStatus(String status){
+  if(status==null||status.equals(lastStatus))return;
+  lastStatus=status;
+  String detail=mobile.diagnostic();
+  if(detail==null||detail.equals(lastDetail))detail="";
+  else lastDetail=detail;
+  Log.i("CodexTailnet","status="+safeLogValue(status)+(detail.isEmpty()?"":" detail="+safeLogValue(detail)));
+ }
+
+ private static String safeLogValue(String value){
+  if(value==null)return "";
+  return value.replace('\n',' ').replace('\r',' ');
+ }
+
+ private static String failureMessage(String code,String detail){
   if("authentication_failed".equals(code))return "Tailscale 授权未完成，请重新连接并完成登录。";
+  if("auth_key_invalid".equals(code))return detail;
+  if("network_timeout".equals(code))return "内置 Tailscale 启动超时，请检查控制面网络后重试。";
   if("network_failed".equals(code))return "Tailscale 网络不可用，请检查网络后重试。";
+  if("proxy_failed".equals(code))return "内置 Tailscale 本地代理启动失败，请重试。";
   return "内置 Tailscale 连接失败，请稍后重试。";
  }
 }

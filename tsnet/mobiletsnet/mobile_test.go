@@ -3,12 +3,17 @@ package mobiletsnet
 import (
 	"bufio"
 	"context"
+	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -212,6 +217,67 @@ func TestHTTPProxyAllowsOnlyPrivateTailnetPort(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyHandlesConcurrentAssetRequests(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	upstream := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		_, _ = io.WriteString(response, request.URL.Path)
+	}))
+	defer upstream.Close()
+
+	proxy, err := startConnectProxy(ctx, func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return (&net.Dialer{}).DialContext(ctx, network, upstream.Listener.Addr().String())
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer proxy.close()
+
+	proxyURL, _ := url.Parse("http://" + proxy.address())
+	client := &http.Client{Transport: &http.Transport{
+		Proxy:               http.ProxyURL(proxyURL),
+		MaxConnsPerHost:     4,
+		MaxIdleConnsPerHost: 4,
+	}}
+	defer client.CloseIdleConnections()
+
+	const requests = 20
+	var wait sync.WaitGroup
+	failures := make(chan error, requests)
+	for index := 0; index < requests; index++ {
+		index := index
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			path := fmt.Sprintf("/asset-%02d.js", index)
+			request, _ := http.NewRequestWithContext(ctx, http.MethodGet,
+				"http://100.64.0.10:8787"+path, nil)
+			response, err := client.Do(request)
+			if err != nil {
+				failures <- fmt.Errorf("%s request: %w", path, err)
+				return
+			}
+			defer response.Body.Close()
+			body, err := io.ReadAll(response.Body)
+			if err != nil {
+				failures <- fmt.Errorf("%s body: %w", path, err)
+				return
+			}
+			if response.StatusCode != http.StatusOK || string(body) != path ||
+				!strings.HasPrefix(response.Header.Get("Content-Type"), "text/javascript") {
+				failures <- fmt.Errorf("%s response = %d %q %q", path, response.StatusCode,
+					response.Header.Get("Content-Type"), body)
+			}
+		}()
+	}
+	wait.Wait()
+	close(failures)
+	for failure := range failures {
+		t.Error(failure)
+	}
+}
+
 func TestAuthorizationURLBoundary(t *testing.T) {
 	valid := "https://login.tailscale.com/a/0123456789"
 	if got := safeAuthorizationURLFromLog("open " + valid + " to authorize"); got != valid {
@@ -229,6 +295,17 @@ func TestAuthorizationURLBoundary(t *testing.T) {
 	}
 }
 
+func TestMobileErrorRedactsKeyIdentifiers(t *testing.T) {
+	err := errors.New("backend: invalid key: API key abcdef0123456789 not valid")
+	if got := mobileErrorCode(err); got != "auth_key_invalid" {
+		t.Fatalf("mobileErrorCode = %q", got)
+	}
+	detail := safeErrorDetail(err)
+	if strings.Contains(detail, "abcdef0123456789") || !strings.Contains(detail, "[已隐藏 Tailscale 密钥]") {
+		t.Fatalf("safeErrorDetail = %q", detail)
+	}
+}
+
 func TestStopIsIdempotentInIdleState(t *testing.T) {
 	mobile := NewMobile()
 	mobile.Stop()
@@ -238,5 +315,27 @@ func TestStopIsIdempotentInIdleState(t *testing.T) {
 	}
 	if strings.Contains(mobile.AuthURL()+mobile.ProxyAddress()+mobile.ErrorCode(), "tskey-") {
 		t.Fatal("status leaked an auth key")
+	}
+}
+
+func TestPrepareRuntimeDirectoriesUsesAppPrivateStorage(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("TS_LOGS_DIR", "")
+	t.Setenv("TMPDIR", "")
+	if err := prepareRuntimeDirectories(root); err != nil {
+		t.Fatal(err)
+	}
+	for env, name := range map[string]string{
+		"TS_LOGS_DIR": "logs",
+		"TMPDIR":      "tmp",
+	} {
+		want := filepath.Join(root, name)
+		if got := os.Getenv(env); got != want {
+			t.Fatalf("%s = %q, want %q", env, got, want)
+		}
+		info, err := os.Stat(want)
+		if err != nil || !info.IsDir() {
+			t.Fatalf("%s directory %q was not created: %v", env, want, err)
+		}
 	}
 }

@@ -51,6 +51,42 @@ def tailnet_endpoint_kind(value):
     return ''
 
 
+def embedded_tailnet_endpoint_verified(snapshot, origin):
+    """Match a connected embedded tsnet endpoint without probing the host stack.
+
+    A userspace Tailscale node is absent from Windows' socket routing table.
+    The sidecar has already verified each published endpoint against the live
+    gateway instance, so probing the same URL through ``socket.getaddrinfo``
+    would fail even though the exact endpoint is ready for phones.
+    """
+    runtime = snapshot.get('runtime') if isinstance(snapshot, dict) else {}
+    instance_id = runtime.get('instanceId') if isinstance(runtime, dict) else ''
+    if not runtime.get('running') or not isinstance(instance_id, str) or not instance_id:
+        return False
+    connections = (snapshot.get('preferences') or {}).get('connections') or []
+    embedded = {
+        entry.get('id') for entry in connections
+        if isinstance(entry, dict) and entry.get('enabled') is not False
+        and entry.get('accessMode') == 'tailscale'
+        and entry.get('tailscaleRuntime') == 'embedded'
+    }
+    statuses = snapshot.get('externalStatus') or {}
+    endpoint = origin.rstrip('/') + '/'
+    for connection_id in embedded:
+        status = statuses.get(connection_id) if isinstance(statuses, dict) else None
+        if not isinstance(status, dict) or status.get('state') != 'connected':
+            continue
+        if status.get('instanceId') != instance_id:
+            continue
+        values = status.get('urls') if isinstance(status.get('urls'), list) else []
+        if not values and isinstance(status.get('url'), str):
+            values = [status['url']]
+        if endpoint in {value.rstrip('/') + '/' for value in values
+                        if isinstance(value, str) and value}:
+            return True
+    return False
+
+
 class Desktop:
     def __init__(self, data_dir):
         self.data_dir = Path(data_dir).expanduser().resolve()
@@ -611,10 +647,14 @@ class Desktop:
             if not snapshot['runtime']['running'] or url not in snapshot['urls']:
                 raise ValueError('请先启动网关，再生成二维码')
             origin = phone_origin(url)
-            # Probe the actual entry, without credentials or redirects, before granting access.
-            remote = access.read_auth(origin)
-            if remote.get('instanceId') != snapshot['runtime']['instanceId']:
-                raise ValueError('此地址未指向当前网关，请检查连接配置')
+            # Embedded tsnet is intentionally absent from the operating-system
+            # routing table. Its sidecar has already verified the exact URL and
+            # gateway instance; public/LAN/system-Tailscale entries still use a
+            # real credential-free probe below.
+            if not embedded_tailnet_endpoint_verified(snapshot, origin):
+                remote = access.read_auth(origin)
+                if remote.get('instanceId') != snapshot['runtime']['instanceId']:
+                    raise ValueError('此地址未指向当前网关，请检查连接配置')
         return request_pairing(self.data_dir, value)
 
     def transfer_settings(self, value=None):

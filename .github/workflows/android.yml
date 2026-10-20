@@ -96,6 +96,7 @@ jobs:
       - name: Verify shared mobile resources and Android behavior
         run: |
           node --test mobile/tests/*.test.cjs
+          python scripts/test-mobile-tailnet-credentials.py
           python scripts/test-mobile-session.py
           python scripts/test-mobile-events.py
           python scripts/test-mobile-discovery.py

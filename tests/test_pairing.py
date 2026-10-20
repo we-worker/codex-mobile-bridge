@@ -109,6 +109,38 @@ class PairingTests(unittest.TestCase):
             desktop.pairing({'action': 'create', 'url': 'https://example.com/'})
             request.assert_called_once()
 
+    def test_desktop_trusts_only_the_matching_connected_embedded_tailnet_endpoint(self):
+        desktop = Desktop(ROOT/'.tmp/pairing-embedded-controller-test')
+        private = 'http://100.64.0.23:8787/'
+        snapshot = {
+            'runtime': {'running': True, 'instanceId': 'expected'},
+            'preferences': {'connections': [{
+                'id': 'embedded', 'enabled': True, 'accessMode': 'tailscale',
+                'tailscaleRuntime': 'embedded',
+            }]},
+            'externalStatus': {'embedded': {
+                'state': 'connected', 'instanceId': 'expected', 'urls': [private],
+            }},
+            'urls': [private],
+        }
+        desktop.snapshot = lambda: snapshot
+        with patch('bridge.features.network.access.read_auth') as probe, \
+                patch('bridge.app.desktop.request_pairing', return_value={}) as request:
+            desktop.pairing({'action': 'create', 'url': private})
+            probe.assert_not_called()
+            request.assert_called_once()
+
+        stale = {**snapshot, 'externalStatus': {'embedded': {
+            'state': 'connected', 'instanceId': 'other', 'urls': [private],
+        }}}
+        desktop.snapshot = lambda: stale
+        with patch('bridge.features.network.access.read_auth',
+                   return_value={'instanceId': 'expected'}) as probe, \
+                patch('bridge.app.desktop.request_pairing', return_value={}) as request:
+            desktop.pairing({'action': 'create', 'url': private})
+            probe.assert_called_once_with('http://100.64.0.23:8787')
+            request.assert_called_once()
+
 
 class PairingHTTPTests(unittest.TestCase):
     @classmethod
